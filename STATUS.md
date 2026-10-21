@@ -4,8 +4,8 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–6 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–10); awaiting review round 7.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–7 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–11); awaiting review round 8.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -84,6 +84,10 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
 - P8 (from P1 review round 6): event-driven R3/R4 recaps must bypass the response cache (COT 6 h, EIA 1 h TTLs) on
   release days; use a U.S. bond-market (SIFMA) calendar for Treasury freshness so Columbus/Veterans Day curves are not
   labelled stale; make `CircuitBreaker.release_probe` atomic on Valkey (compare-and-delete script).
+- Before FRED is enabled (from P1 review round 7, minor): per-series bounds for share-type percent series
+  (unemployment, participation: 0–100%) — the global percent range has a −100% floor and no ceiling (D-033).
+- P11 (from P1 review round 7, minor): keep status-page quality notes per request subject (one passing fetch of another
+  subject clears the provider-level note today) and record failures raised inside `_parse` and after QA too.
 
 ## Environment notes for reviewers
 
