@@ -1,10 +1,12 @@
 """rd_db paths that need no database: CLI argument handling, error reporting, factories."""
 
 import pytest
+from alembic import command
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from rd_core.settings import Settings
-from rd_db import health, healthcheck
+from rd_db import health, healthcheck, migrate
 from rd_db.engine import make_engine, make_session_factory
 
 
@@ -59,3 +61,37 @@ def test_healthcheck_reports_errors_without_traceback(
     assert "unhealthy: ConnectionError" in out.out
     assert secret not in out.out + out.err
     assert "Traceback" not in out.out + out.err
+
+
+def test_migrate_retries_refused_connections_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    outcomes: list[BaseException | None] = [ConnectionRefusedError(111, "refused"), ConnectionResetError(), None]
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def upgrade(_cfg: object, rev: str) -> None:
+        calls.append(rev)
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    monkeypatch.setattr(command, "upgrade", upgrade)
+    migrate.upgrade_to_head(sleep=sleeps.append)
+    assert calls == ["head", "head", "head"]
+    assert sleeps == [migrate.CONNECT_PAUSE_S, migrate.CONNECT_PAUSE_S]
+
+    def bad_sql(_cfg: object, _rev: str) -> None:
+        raise ProgrammingError("ALTER TABLE x", {}, Exception("syntax error"))
+
+    monkeypatch.setattr(command, "upgrade", bad_sql)
+    sleeps.clear()
+    with pytest.raises(ProgrammingError):
+        migrate.upgrade_to_head(sleep=sleeps.append)
+    assert sleeps == []  # a failing migration is never retried
+
+    def always_down(_cfg: object, _rev: str) -> None:
+        raise ConnectionRefusedError(111, "refused")
+
+    monkeypatch.setattr(command, "upgrade", always_down)
+    with pytest.raises(ConnectionRefusedError):
+        migrate.upgrade_to_head(sleep=sleeps.append)
+    assert len(sleeps) == migrate.CONNECT_ATTEMPTS - 1

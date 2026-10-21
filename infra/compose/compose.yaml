@@ -30,7 +30,9 @@ services:
     ports: ["127.0.0.1:${DB_PORT:-5432}:5432"]
     volumes: [db-data:/var/lib/postgresql/data]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rdesk -d rdesk"]
+      # TCP, not the Unix socket: during first-boot init the image runs a temporary socket-only server and then
+      # restarts, so a socket probe reports healthy too early (migrate then hits the restart window).
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U rdesk -d rdesk"]
       interval: 3s
       timeout: 3s
       retries: 30
