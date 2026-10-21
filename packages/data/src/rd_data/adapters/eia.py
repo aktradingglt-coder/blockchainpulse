@@ -53,6 +53,8 @@ class SeriesInfo:
     hi: float | None = None
     #: A level of inventory (not a flow): judged on relative changes, extreme latest moves held (D-031).
     stock: bool = True
+    #: Largest physically possible change in one week (well above any recorded weekly build or draw, D-033).
+    max_step: float | None = None
 
 
 _WPSR = timedelta(days=5, hours=15, minutes=30)  # Weekly Petroleum Status Report: the following Wednesday
@@ -61,10 +63,11 @@ _WNGSR = timedelta(days=6, hours=15, minutes=30)  # Weekly Natural Gas Storage R
 #: upper bounds are round figures above total U.S. working storage for each product (D-033), so a value beyond them
 #: is a unit or decimal error, not a market event.
 SERIES: Mapping[str, SeriesInfo] = {
-    "WCESTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 800_000.0),  # crude excl. SPR, thousand barrels
-    "WGTSTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 400_000.0),  # motor gasoline, thousand barrels
-    "WDISTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 300_000.0),  # distillate, thousand barrels
-    "NW2_EPG0_SWO_R48_BCF": SeriesInfo("natural-gas/stor/wkly", _WNGSR, 0.0, 6_000.0),  # Lower-48 storage, Bcf
+    # thousand barrels: crude excl. SPR, motor gasoline, distillate; Bcf: Lower-48 working gas
+    "WCESTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 800_000.0, max_step=40_000.0),
+    "WGTSTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 400_000.0, max_step=25_000.0),
+    "WDISTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 300_000.0, max_step=25_000.0),
+    "NW2_EPG0_SWO_R48_BCF": SeriesInfo("natural-gas/stor/wkly", _WNGSR, 0.0, 6_000.0, max_step=500.0),
 }
 SERIES_ROUTES: Mapping[str, str] = {k: v.route for k, v in SERIES.items()}
 #: Release lag assumed for weekly series outside the catalogue: the earliest weekly schedule (Wednesday 15:30 UTC
@@ -189,6 +192,23 @@ class EiaAdapter(BaseAdapter):
             DataQualityReport(report.subject, (*report.checks, *extra), report.quarantined, report.record_count),
             rejected,
         )
+        step = _latest_step_violation(usable, info.max_step if info else None)
+        if step is not None:
+            usable = [o for o in usable if o is not step]
+            quality = DataQualityReport(
+                quality.subject,
+                (
+                    *quality.checks,
+                    CheckResult(
+                        "max_weekly_change",
+                        passed=False,
+                        blocking=False,
+                        detail=f"latest week moved more than {info.max_step if info else 0:,.0f} in one week; held",
+                    ),
+                ),
+                quality.quarantined,
+                quality.record_count,
+            )
         wanted = int(request.params.get("length", 260))
         window = usable[-wanted:]
         first = window[0].ts if window else (obs[-1].ts if obs else raw.retrieved_at)
@@ -238,3 +258,14 @@ def _error(payload: Mapping[str, Any], provider: str) -> Exception:
     if code in (401, 403) or code >= 500 or "api_key" in lowered or "unavailable" in lowered:
         return ProviderDown(f"eia: {message}", provider=provider)
     return InvalidArgs(f"eia: {message}", provider=provider)
+
+
+def _latest_step_violation(obs: list[MacroObservation], max_step: float | None) -> MacroObservation | None:
+    """The newest observation, if it moved further from the week before than physically possible."""
+    values = [o for o in obs if o.value is not None]
+    if max_step is None or len(values) < 2:
+        return None
+    last, prev = values[-1], values[-2]
+    if last.value is None or prev.value is None:  # pragma: no cover - filtered above; narrows the type
+        return None
+    return last if abs(last.value - prev.value) > max_step else None

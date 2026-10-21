@@ -67,6 +67,7 @@ async def provider_statuses(
             "circuit": circuit.state.value,
             "consecutive_failures": circuit.consecutive_failures,
             "last_error": circuit.last_error,
+            "last_quality_error": circuit.last_quality_error,
             "terms_verified": cls.licence.terms_verified,
         }
     return out

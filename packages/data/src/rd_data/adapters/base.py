@@ -328,6 +328,9 @@ class BaseAdapter(ABC):
         if raw is None or parsed is None:
             raw = await self._download_checked(request)
             parsed = await self._parse_checked(request, raw, from_cache=False)
+            await self.ctx.breaker.note_quality(
+                self.name, None if parsed.quality.passed else "; ".join(parsed.quality.failures)
+            )
             parsed.quality.require_passed(provider=self.name)
             if cacheable:  # only payloads that passed QA are cached
                 assert self.ctx.cache is not None  # noqa: S101 - narrowed by ``cacheable``

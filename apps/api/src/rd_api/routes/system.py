@@ -86,7 +86,8 @@ async def status(request: Request) -> dict[str, Any]:
         degraded = sorted(
             name
             for name, p in providers.items()
-            if p["enabled"] and (not p["configured"] or p["circuit"] != CircuitState.CLOSED.value)
+            if p["enabled"]
+            and (not p["configured"] or p["circuit"] != CircuitState.CLOSED.value or p["last_quality_error"])
         )
     except Exception as exc:  # noqa: BLE001 - status reports, never raises
         providers, degraded = {"error": type(exc).__name__}, []

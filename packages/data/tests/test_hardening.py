@@ -10,7 +10,7 @@ import csv
 import io
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,7 +29,7 @@ from rd_data.adapters.sec_edgar import SecEdgarAdapter
 from rd_data.adapters.treasury import COLUMNS, TreasuryAdapter
 from rd_data.adapters.twelvedata import TwelveDataAdapter
 from rd_data.cassette import Cassette, RecordingTransport, ReplayTransport
-from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown, RateLimited, Stale
+from rd_data.errors import DataQualityError, InvalidArgs, LicenceBlocked, NotFound, ProviderDown, RateLimited, Stale
 from rd_data.freshness import ExchangeCalendar, Freshness
 from rd_data.http import HttpFetcher, redact_params
 from rd_data.quality import check_interval_gaps
@@ -945,7 +945,7 @@ async def test_kraken_recovers_with_a_fresh_adapter_per_fetch() -> None:
     assert (await breaker.status("kraken_futures")).state is CircuitState.CLOSED
 
 
-def _eia_body(values: list[float | None], series: str = "WCESTUS1", unit: str = "MBBL") -> dict[str, Any]:
+def _eia_body(values: Sequence[float | None], series: str = "WCESTUS1", unit: str = "MBBL") -> dict[str, Any]:
     end = datetime(2026, 10, 16, tzinfo=UTC)
     rows = [
         {"period": (end - timedelta(weeks=k)).strftime("%Y-%m-%d"), "series": series, "value": v, "units": unit}
@@ -1112,8 +1112,10 @@ async def test_sec_fact_filed_before_period_end_and_missing_cik() -> None:
         fact = next(f for f in unit if f.get("form") in ("10-K", "10-Q"))
         fact["filed"] = "2000-01-01"
 
-    with pytest.raises(DataQualityError, match="schema"):
-        await _replay(SecEdgarAdapter, request, {0: _json_edit(lookahead)})
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(lookahead)})
+    facts = [f for f in resp.records if isinstance(f, FundamentalFact)]
+    assert all(f.filed >= f.period_end for f in facts)  # the look-ahead fact is never shown
+    assert any("point_in_time" in w for w in resp.quality.warnings)  # and is reported, not silently dropped
 
     def no_cik(data: dict[str, Any]) -> None:
         del data["cik"]
@@ -1618,3 +1620,203 @@ async def test_unlisted_eia_series_hold_impossible_latest_and_kraken_overflow_is
     with pytest.raises(DataQualityError, match="schema"):
         await kraken.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "BTC/USD:USD", "timeframe": "1h"}))
     await kraken.aclose()
+
+
+# ------------------------------------------------------------------------------------- review round 6 (P1)
+
+
+def _revenue_fact(data: dict[str, Any]) -> dict[str, Any]:
+    facts = data["facts"]["us-gaap"]["RevenueFromContractWithCustomerExcludingAssessedTax"]["units"]["USD"]
+    period = ("2025-01-01", "2025-06-30")
+    same = [f for f in facts if (f.get("start"), f["end"]) == period and f.get("form") in ("10-Q", "10-K")]
+    assert len(same) >= 2, "the recorded AMZN facts carry this half-year in two filings"
+    return max(same, key=lambda f: f["filed"])
+
+
+async def test_sec_scale_error_against_another_filing_is_quarantined() -> None:
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+
+    def x1000(data: dict[str, Any]) -> None:
+        _revenue_fact(data)["val"] *= 1000
+
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(x1000)})
+    shown = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact)
+        and f.concept == "RevenueFromContractWithCustomerExcludingAssessedTax"
+        and f.period_end.isoformat() == "2025-06-30"
+        and f.period_start is not None
+        and f.period_start.isoformat() == "2025-01-01"
+    ]
+    assert shown
+    assert max(f.value for f in shown) < 1e12  # the 323-trillion figure never reaches the user
+    assert len(resp.quarantined) == 1
+    assert any("scale_consistency" in w for w in resp.quality.warnings)
+
+
+async def test_sec_real_facts_trip_no_scale_quarantine() -> None:
+    """The rule is calibrated on real data: 9,000 multi-filing periods, none quarantined (restatements kept)."""
+    resp = await _replay(SecEdgarAdapter, _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS))
+    assert resp.quarantined == ()
+
+
+async def test_fred_record_percent_release_is_shown(ctx_factory: Any) -> None:
+    """Argentina's 2023 inflation (133.5%) is a genuine record release: shown with a warning, never dropped."""
+    info, _ = _fred_bodies(series="FPCPITOTLZGARG")
+    meta = json.loads(info)
+    meta["seriess"][0].update(frequency_short="A", units="Percent", units_short="%")
+    years = list(range(1994, 2024))
+    values = [10.0 + 5 * math.sin(k) for k in range(len(years) - 2)] + [72.4, 133.5]
+    obs = {"observations": [{"date": f"{y}-01-01", "value": f"{v:.1f}"} for y, v in zip(years, values, strict=True)]}
+    ctx, _ = ctx_factory(
+        lambda r: httpx.Response(200, text=json.dumps(meta) if r.url.path.endswith("/series") else json.dumps(obs)),
+        flags={"provider_fred": True},
+        **SETTINGS,
+    )
+    adapter = FredAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "FPCPITOTLZGARG"}))
+    await adapter.aclose()
+    assert resp.as_of == datetime(2023, 1, 1, tzinfo=UTC)
+    assert resp.quarantined == ()
+
+
+async def test_fred_held_latest_makes_the_response_only_as_fresh_as_what_it_shows(ctx_factory: Any) -> None:
+    values = [4.08 + 0.03 * math.sin(k) for k in range(60)]
+    values[-1] *= 10
+    info, obs = _fred_daily(values)
+    ctx, _ = ctx_factory(
+        lambda r: httpx.Response(200, text=info if r.url.path.endswith("/series") else obs),
+        now=datetime(2026, 10, 23, 12, tzinfo=UTC),
+        flags={"provider_fred": True},
+        **SETTINGS,
+    )
+    adapter = FredAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"}))
+    await adapter.aclose()
+    assert resp.freshness is not None
+    assert resp.freshness.as_of == resp.as_of  # judged from the newest value shown, not from last_updated
+
+
+async def test_fred_projections_left_out_and_400_bodies_mapped(ctx_factory: Any) -> None:
+    info, obs_text = _fred_bodies()
+    obs = json.loads(obs_text)
+    obs["observations"].append({"date": "2030-01-01", "value": "4.00"})  # a projection row
+    ctx, _ = ctx_factory(
+        lambda r: httpx.Response(200, text=info if r.url.path.endswith("/series") else json.dumps(obs)),
+        flags={"provider_fred": True},
+        **SETTINGS,
+    )
+    adapter = FredAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"}))
+    await adapter.aclose()
+    assert all(isinstance(o, MacroObservation) and o.ts.year < 2030 for o in resp.records)
+    assert any("projections" in n for n in resp.notes)
+
+    bad_key = {"error_code": 400, "error_message": "Bad Request.  The value for variable api_key is not registered."}
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(400, json=bad_key), flags={"provider_fred": True}, **SETTINGS)
+    adapter = FredAdapter(ctx)
+    with pytest.raises(ProviderDown, match="authorization"):
+        await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"}))
+    await adapter.aclose()
+    assert (await ctx.breaker.status("fred")).consecutive_failures == 1
+
+    missing = {"error_code": 400, "error_message": "Bad Request.  The series does not exist."}
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(400, json=missing), flags={"provider_fred": True}, **SETTINGS)
+    adapter = FredAdapter(ctx)
+    with pytest.raises(NotFound):
+        await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "NOSUCH"}))
+    await adapter.aclose()
+
+
+async def test_vendor_plan_limits_and_exchange_bad_requests_do_not_trip_the_breaker(
+    ctx_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = {"status": "error", "code": 403, "message": "This symbol is available starting with the Pro plan"}
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=body), flags={"provider_twelvedata": True}, **SETTINGS)
+    adapter = TwelveDataAdapter(ctx)
+    for _ in range(6):
+        with pytest.raises(LicenceBlocked):
+            await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "XAU/USD"}))
+    await adapter.aclose()
+    assert (await ctx.breaker.status("twelvedata")).state is CircuitState.CLOSED
+
+    import ccxt.async_support as ccxt_async  # noqa: PLC0415 - only this test needs the CCXT exception types
+
+    from rd_data.adapters import kraken_futures  # noqa: PLC0415
+
+    request = _plan(KrakenFuturesAdapter, RequestKind.CRYPTO_DERIVATIVES)
+    for exc, expected in (
+        (ccxt_async.BadRequest("bad"), InvalidArgs),
+        (ccxt_async.DDoSProtection("slow"), RateLimited),
+    ):
+
+        async def raising(self: Any, *_a: Any, _exc: Exception = exc, **_k: Any) -> Any:
+            raise _exc
+
+        monkeypatch.setattr(kraken_futures._RoutedKrakenFutures, "fetch_tickers", raising)
+        with pytest.raises(expected):
+            await _replay(KrakenFuturesAdapter, request)
+
+
+async def test_schema_drift_shows_on_the_status_page_without_opening_the_circuit() -> None:
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+
+    def rename(rows: list[list[str]]) -> None:
+        rows[0][rows[0].index("10 Yr")] = "10 Year"
+
+    cassette = Cassette.load(CASSETTES / "us_treasury" / cassette_name(request))
+    cassette.interactions[0].body = _csv_edit(rename)(cassette.interactions[0].body)
+    breaker = CircuitBreaker(MemoryStateStore())
+    ctx = AdapterContext(
+        settings=Settings(),
+        limiter=LocalRateLimiter(),
+        breaker=breaker,
+        clock=FixedClock(cassette.replay_time),
+        transport=ReplayTransport([cassette]),
+    )
+    adapter = TreasuryAdapter(ctx)
+    with pytest.raises(DataQualityError):
+        await adapter.fetch(request)
+    await adapter.aclose()
+    statuses = await provider_statuses({}, breaker, Settings())
+    assert statuses["us_treasury"]["circuit"] == "closed"
+    assert "10 Yr" in statuses["us_treasury"]["last_quality_error"]
+
+
+async def test_physically_impossible_weekly_storage_change_is_held(ctx_factory: Any) -> None:
+    storage = [3_500.0]
+    for k in range(59):  # realistic weekly builds and draws of up to ~130 Bcf: the MAD alone would let +700 pass
+        storage.append(storage[-1] + 90 * math.sin(k * 1.3) + 40 * math.cos(k * 2.1))
+    storage[-1] += 700  # +700 Bcf in one week: beyond any injection the system can make
+    body = _eia_body(storage, series="NW2_EPG0_SWO_R48_BCF", unit="BCF")
+    ctx, _ = ctx_factory(
+        lambda _r: httpx.Response(200, json=body), now=datetime(2026, 10, 23, 12, tzinfo=UTC), **SETTINGS
+    )
+    adapter = EiaAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "NW2_EPG0_SWO_R48_BCF"}))
+    await adapter.aclose()
+    assert len(resp.quarantined) == 1
+    assert any("max_weekly_change" in w for w in resp.quality.warnings)
+
+
+async def test_kraken_since_poll_gaps_outside_the_window_do_not_block(ctx_factory: Any) -> None:
+    end = datetime(2026, 10, 21, tzinfo=UTC)
+    server = _kraken_range_server(end, timedelta(days=1), bad_last=False)
+
+    def gappy(req: httpx.Request) -> httpx.Response:
+        resp = server(req)
+        if "/charts/" in req.url.path:
+            data = json.loads(resp.content)
+            data["candles"] = [c for i, c in enumerate(data["candles"]) if i not in (5, 6)]  # ~3 weeks back
+            return httpx.Response(200, json=data)
+        return resp
+
+    ctx, _ = ctx_factory(gappy, now=end + timedelta(hours=1), cache=False)
+    adapter = KrakenFuturesAdapter(ctx)
+    since = int((end - timedelta(days=3, hours=8)).timestamp() * 1000)
+    resp = await adapter.fetch(
+        DataRequest(kind=RequestKind.BARS, params={"symbol": "BTC/USD:USD", "timeframe": "1d", "since_ms": since})
+    )
+    await adapter.aclose()
+    assert resp.records

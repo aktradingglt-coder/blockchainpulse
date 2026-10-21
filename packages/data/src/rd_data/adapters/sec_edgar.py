@@ -7,7 +7,9 @@ fact carries its ``filed`` date and is usable only from then on (never by period
 
 from __future__ import annotations
 
+import math
 import re
+import statistics
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from typing import Any, ClassVar
@@ -218,6 +220,7 @@ class SecEdgarAdapter(BaseAdapter):
         wanted = {c.strip() for c in str(concepts_param).split(",")} if concepts_param else None
         records: list[FundamentalFact] = []
         rejected = 0
+        impossible = 0
         for taxonomy, concepts in (data.get("facts") or {}).items():
             for concept, body in concepts.items():
                 if wanted and concept not in wanted:
@@ -230,8 +233,9 @@ class SecEdgarAdapter(BaseAdapter):
                         filed = _date_or_none([fact.get("filed")], 0)
                         end = _date_or_none([fact.get("end")], 0)
                         if filed is not None and (filed > latest_allowed or (end is not None and filed < end)):
-                            # filed in the future, or before the period it reports ended: not point-in-time correct
-                            rejected += 1
+                            # filed in the future, or before the period it reports ended: not point-in-time correct.
+                            # One such fact is set aside (reported) rather than blocking the company's other facts.
+                            impossible += 1
                             continue
                         try:
                             records.append(
@@ -257,22 +261,49 @@ class SecEdgarAdapter(BaseAdapter):
             raise NotFound(f"sec: no XBRL facts for CIK {cik}", provider=self.name)
         records.sort(key=lambda f: (f.filed, f.concept, f.period_end, f.unit, f.accession))
         keys = [(f.concept, f.unit, f.period_start, f.period_end, f.accession, f.frame) for f in records]
-        quality = with_schema_rejections(
-            DataQualityReport(
-                f"sec:facts:{cik}",
-                (subject, check_duplicates(keys)),
-                (),
-                len(records),
+        held, flagged = _scale_errors(records)
+        checks = (
+            subject,
+            check_duplicates(keys),
+            CheckResult(
+                "scale_consistency",
+                passed=not held,
+                blocking=False,
+                detail=f"{len(held)} fact(s) a power of 1000 away from another filing of the same period quarantined"
+                if held
+                else "ok",
+                indices=tuple(sorted(held)),
             ),
-            rejected,
+            CheckResult(
+                "point_in_time",
+                passed=not impossible,
+                blocking=False,
+                detail=f"{impossible} fact(s) filed in the future or before their period ended, left out"
+                if impossible
+                else "ok",
+            ),
+            CheckResult(
+                "scale_outliers",
+                passed=not flagged,
+                blocking=False,
+                detail=f"{len(flagged)} fact(s) a power of 1000 from the concept's usual size, kept for review"
+                if flagged
+                else "ok",
+                indices=tuple(sorted(flagged)),
+            ),
         )
-        as_of = records[-1].filed if records else None
+        quality = with_schema_rejections(
+            DataQualityReport(f"sec:facts:{cik}", checks, tuple(sorted(held)), len(records)), rejected
+        )
+        usable = [f for i, f in enumerate(records) if i not in held]
+        as_of = usable[-1].filed if usable else None
         return ParseResult(
-            tuple(records),
+            tuple(usable),
             quality,
             as_of,
             FreshnessSpec(DataType.FUNDAMENTALS),
             source_tz="America/New_York",
+            quarantined=tuple(f for i, f in enumerate(records) if i in held),
             notes=("Point-in-time by filing date: a fact is usable only on or after its 'filed' date.",),
         )
 
@@ -283,6 +314,54 @@ class SecEdgarAdapter(BaseAdapter):
             DataRequest(kind=RequestKind.FILINGS, params={"cik": "320193"}),
             DataRequest(kind=RequestKind.COMPANY_FACTS, params={"cik": "1018724"}),
         ]
+
+
+#: How close (in log10) a ratio must be to 10^3, 10^6, ... to count as a units/decimals scale error.
+SCALE_TOLERANCE = 0.02
+#: A single fact this many orders of magnitude from its concept's median is only flagged if it is also scale-like.
+SCALE_FLAG_DISTANCE = 2.5
+
+
+def _scale_like(log_ratio: float) -> bool:
+    k = round(log_ratio / 3)
+    return k != 0 and abs(log_ratio - 3 * k) < SCALE_TOLERANCE
+
+
+def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
+    """XBRL scale errors (thousands entered as units, millions as thousands): (quarantine, flag).
+
+    Restatements legitimately change a period's value across filings (a 20:1 split restates share counts; real
+    AMZN data has cross-filing ratios up to 41), so only disagreements of almost exactly a power of 1000 count. Within
+    one period, the filing closest to the concept's usual size is the reference and filings a power of 1000 away
+    from it are quarantined (none of the 9,000 multi-filing periods in the recorded AMZN facts trips this). A lone
+    fact a power of 1000 from the concept's median is flagged but kept: genuine one-off items do that (D-036).
+    """
+    logs: dict[tuple[str, str], list[float]] = {}
+    for f in records:
+        if f.value:
+            logs.setdefault((f.concept, f.unit), []).append(math.log10(abs(f.value)))
+    medians = {k: statistics.median(v) for k, v in logs.items()}
+    groups: dict[tuple[str, str, date | None, date], list[int]] = {}
+    for i, f in enumerate(records):
+        if f.value:
+            groups.setdefault((f.concept, f.unit, f.period_start, f.period_end), []).append(i)
+    held: set[int] = set()
+    for (concept, unit, _, _), idx in groups.items():
+        if len(idx) < 2:
+            continue
+        med = medians[(concept, unit)]
+        ref = min(idx, key=lambda i: abs(math.log10(abs(records[i].value)) - med))
+        ref_log = math.log10(abs(records[ref].value))
+        held.update(i for i in idx if _scale_like(math.log10(abs(records[i].value)) - ref_log))
+    flagged = {
+        i
+        for i, f in enumerate(records)
+        if f.value
+        and i not in held
+        and abs(d := math.log10(abs(f.value)) - medians[(f.concept, f.unit)]) > SCALE_FLAG_DISTANCE
+        and _scale_like(d)
+    }
+    return held, flagged
 
 
 def _date_or_none(values: Any, i: int) -> date | None:  # noqa: ANN401 - provider arrays are untyped

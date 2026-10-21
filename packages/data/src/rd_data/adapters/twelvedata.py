@@ -23,7 +23,7 @@ from rd_data.adapters.base import (
     RequestKind,
     require_param,
 )
-from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown, RateLimited
+from rd_data.errors import DataQualityError, InvalidArgs, LicenceBlocked, NotFound, ProviderDown, RateLimited
 from rd_data.freshness import ContinuousCalendar, ExchangeCalendar, TradingCalendar, WeekdayCalendar
 from rd_data.licence import byo_key_only
 from rd_data.quality import QA_CONTEXT, DataQualityReport, check_bars, check_provider_order
@@ -200,10 +200,12 @@ def _error(body: Mapping[str, Any]) -> Exception:
         return RateLimited(f"twelvedata: {message}", provider="twelvedata")
     if code >= 500:
         return ProviderDown(f"twelvedata: server error {code}: {message}", provider="twelvedata")
-    if code in (401, 403):
-        return ProviderDown(
-            f"twelvedata: authorization rejected ({code}); check the API key or plan", provider="twelvedata"
-        )
+    if code == 401:
+        return ProviderDown(f"twelvedata: authorization rejected ({code}); check the API key", provider="twelvedata")
+    if code == 403:
+        # Twelve Data answers 403 when the plan does not cover this symbol or endpoint: a licence limit for this
+        # request, not an outage of the provider (it must not open the breaker for every other symbol).
+        return LicenceBlocked(f"twelvedata: not covered by the plan: {message}", provider="twelvedata")
     if code == 404 or "not found" in message.lower():
         return NotFound(f"twelvedata: {message}", provider="twelvedata")
     return InvalidArgs(f"twelvedata: {message}", provider="twelvedata")

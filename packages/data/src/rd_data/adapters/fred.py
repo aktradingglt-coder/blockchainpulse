@@ -32,8 +32,9 @@ from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, DataType, MacroObservation
 
 _SERIES = re.compile(r"^[A-Z0-9_]{1,30}$")
-#: Plausible range for a series measured in percent (rates, yields, unemployment); outside it is a unit error.
-PERCENT_RANGE = (-50.0, 100.0)
+#: Floor for a series measured in percent: no rate or percentage change goes below -100%. There is deliberately no
+#: ceiling: hyperinflation (Argentina 2023: 133.5%) and some lending rates exceed 100% (P1 review round 6).
+PERCENT_RANGE: tuple[float, float | None] = (-100.0, None)
 _FREQ = {"D": "daily", "W": "weekly", "BW": "weekly", "M": "monthly", "Q": "quarterly", "SA": "annual", "A": "annual"}
 
 
@@ -91,11 +92,12 @@ class FredAdapter(BaseAdapter):
         unit = str(meta.get("units_short") or meta.get("units") or "")
         obs: list[MacroObservation] = []
         rejected = 0
+        projections = 0
         for row in body.get("observations", []):
             try:
                 ts = datetime.strptime(str(row["date"]), "%Y-%m-%d").replace(tzinfo=UTC)
                 if ts > raw.retrieved_at:
-                    rejected += 1  # an observation dated after we fetched it cannot be real
+                    projections += 1  # e.g. potential-output series publish years ahead: projections, not data
                     continue
                 obs.append(
                     MacroObservation(
@@ -124,6 +126,9 @@ class FredAdapter(BaseAdapter):
         if self.copyrighted(raw):
             notes.append("Series notes carry a third-party copyright notice: internal use only.")
             override = self.licence.model_copy(update={"commercial_use_allowed": False})
+        if projections:
+            notes.append(f"{projections} observation(s) dated after retrieval (projections) left out.")
+        latest_held = bool(obs) and obs[-1] not in usable
         start = _start_of(request)
         held = tuple(o for o in obs if o not in usable and (start is None or o.ts >= start))
         if start is not None:
@@ -147,7 +152,9 @@ class FredAdapter(BaseAdapter):
             quarantined=held,
             notes=tuple(notes),
             licence_override=override,
-            freshness_as_of=updated or as_of,
+            # When the newest observation is held back, the response is only as fresh as what it shows: freshness
+            # then runs from the newest usable observation, not from the series' last update.
+            freshness_as_of=as_of if latest_held else (updated or as_of),
         )
 
     @staticmethod

@@ -200,8 +200,10 @@ class KrakenFuturesAdapter(BaseAdapter):
             raise
         except ccxt_async.BadSymbol as exc:
             raise NotFound(f"kraken_futures: {exc}", provider=self.name) from exc
-        except ccxt_async.RateLimitExceeded as exc:
+        except (ccxt_async.RateLimitExceeded, ccxt_async.DDoSProtection) as exc:
             raise RateLimited(f"kraken_futures: {type(exc).__name__}", provider=self.name) from exc
+        except ccxt_async.BadRequest as exc:  # our request was wrong; the exchange is up
+            raise InvalidArgs(f"kraken_futures: {exc}", provider=self.name) from exc
         except ccxt_async.BaseError as exc:
             # The exchange answered with an error body (maintenance, unavailable, auth): an outage for the breaker.
             detail = f"kraken_futures: exchange error ({type(exc).__name__})"
@@ -257,7 +259,7 @@ class KrakenFuturesAdapter(BaseAdapter):
             calendar=ContinuousCalendar(),
             rejected_rows=rejected,
             bar_width=width,
-            gap_window=int(request.params.get("limit", 200)),
+            gap_window=_window_size(bars, request),
         )
         since = request.params.get("since_ms")
         limit = int(request.params.get("limit", 200))
@@ -414,3 +416,13 @@ def _warning(symbols: list[str], what: str, name: str) -> CheckResult | None:
     return CheckResult(
         name, passed=False, blocking=False, detail=f"{len(symbols)} symbol(s) {what}: {', '.join(symbols)}"
     )
+
+
+def _window_size(bars: list[Bar], request: DataRequest) -> int:
+    """How many of the fetched bars fall in the window the caller asked for (gaps are judged there only)."""
+    limit = int(request.params.get("limit", 200))
+    since = request.params.get("since_ms")
+    if since is None:
+        return limit
+    start = datetime.fromtimestamp(int(since) / 1000, tz=UTC)
+    return max(1, min(limit, sum(1 for b in bars if b.ts >= start)))

@@ -236,6 +236,9 @@ terms allow display but forbid derived data, which the three-tag model could not
 - Corporate actions: an unexplained split-ratio jump blocks the series only when split dates come from a
   corporate-actions source; without one (Twelve Data today) it is a warning, because a genuine −33% or ×2 day cannot
   be told from an unadjusted split.
+- EIA catalogue series also carry a maximum weekly change (crude 40,000 kbbl, gasoline and distillate 25,000 kbbl,
+  working gas 500 Bcf — above any recorded weekly build or draw); a latest week beyond it is held.
+- Percent series (FRED) have a floor of −100% and no ceiling: hyperinflation and some lending rates exceed 100%.
 **Reason.** P1 review round 2 seeded each of these through the adapters and they passed QA; the bounds are wide
 enough that no genuine value approaches them.
 
@@ -262,3 +265,16 @@ series only until monthly/quarterly periods and release calendars are modelled; 
 earliest (Wednesday) release so a genuine release is never refused as "not yet published".
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
+
+### D-036 · 2026-10-21 · SEC company facts: scale errors, not restatements
+**Decision.** Within one concept, unit and period, a filing whose value is almost exactly a power of 1000 away
+(10^±3, 10^±6, within 0.02 in log10) from the filing closest to the concept's usual size is quarantined: the classic
+XBRL "thousands entered as units" error. A lone fact a power of 1000 from its concept's median is flagged, not held.
+Facts filed in the future or before their period ended are set aside with a warning instead of blocking the whole
+company. A provider whose responses fail QA (e.g. schema drift) shows its last quality failure on the status page and
+counts as degraded, without opening the circuit.
+**Alternatives.** Quarantine any cross-filing disagreement; MAD per concept.
+**Reason.** Measured on the recorded AMZN facts (9,052 multi-filing periods): legitimate restatements reach ratios of
+41 (a 20:1 split restates share counts), so "any disagreement" would hide real data; the power-of-1000 rule trips on
+none of them, while a ×1000 revenue fact in one filing is caught. Lone power-of-1000 outliers do occur genuinely
+(a $50.5B one-off revaluation), so they are only flagged (P1 review round 6).

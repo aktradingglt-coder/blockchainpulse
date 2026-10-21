@@ -185,6 +185,8 @@ class CircuitStatus:
     consecutive_failures: int
     opened_at: float | None
     last_error: str | None
+    #: Last blocking data-quality failure (e.g. schema drift): the provider answers, but its data is unusable.
+    last_quality_error: str | None = None
 
 
 class StateStore(Protocol):
@@ -259,6 +261,8 @@ class MemoryStateStore:
 #: The half-open probe held by the current task. An adapter sets it for a whole fetch, so every HTTP call of that
 #: fetch (FRED: series + observations; Kraken: instruments + data) belongs to the one probe it was admitted with.
 PROBE_TOKEN: ContextVar[str | None] = ContextVar("rd_probe_token", default=None)
+#: How long a data-quality failure stays on the status page without a newer fetch confirming or clearing it.
+QUALITY_NOTE_TTL_S = 24 * 3600
 #: Upper bound on one fetch: the 60 s retry-wait budget plus per-attempt timeouts.
 PROBE_MAX_FETCH_S = 300
 
@@ -286,7 +290,8 @@ class CircuitBreaker:
         if opened_at is not None:
             now = await self._store.now()
             state = CircuitState.HALF_OPEN if now - opened_at >= self._cooldown else CircuitState.OPEN
-        return CircuitStatus(provider, state, fails, opened_at, last_error)
+        quality = await self._store.get(self._k(provider, "quality"))
+        return CircuitStatus(provider, state, fails, opened_at, last_error, quality)
 
     async def before_call(self, provider: str) -> None:
         """Raise :class:`ProviderDown` while open; in half-open, admit exactly one probe per cool-down."""
@@ -305,6 +310,16 @@ class CircuitBreaker:
             if got_probe:
                 return
         raise ProviderDown(f"circuit open for {provider} (last error: {status.last_error})", provider=provider)
+
+    async def note_quality(self, provider: str, failure: str | None) -> None:
+        """Record (or clear, with ``None``) the provider's last blocking data-quality failure for the status page.
+
+        Kept apart from the failure count: one company's or series' bad data must not open the circuit for all."""
+        key = self._k(provider, "quality")
+        if failure is None:
+            await self._store.delete(key)
+        else:
+            await self._store.set(key, failure[:200], ttl_s=QUALITY_NOTE_TTL_S)
 
     async def release_probe(self, provider: str, token: str) -> None:
         """Give back a half-open probe that ended without a verdict (rate-limited, bad request): the next fetch may
