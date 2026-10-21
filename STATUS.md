@@ -86,6 +86,10 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   labelled stale; make `CircuitBreaker.release_probe` atomic on Valkey (compare-and-delete script).
 - Before FRED is enabled (from P1 review round 7, minor): per-series bounds for share-type percent series
   (unemployment, participation: 0–100%) — the global percent range has a −100% floor and no ceiling (D-033).
+- Before FRED is enabled (from P1 review round 8, minor): cap the freshness origin (`last_updated`) by the newest
+  observation plus its cadence, so an annual series refreshed yesterday but a year old is not labelled fresh.
+- P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after
+  holds; the ledger must store record identities (concept/period/accession, bar time), not positions.
 - P11 (from P1 review round 7, minor): keep status-page quality notes per request subject (one passing fetch of another
   subject clears the provider-level note today) and record failures raised inside `_parse` and after QA too.
 
