@@ -4,8 +4,8 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–8 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–12); awaiting review round 9.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–9 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–13); awaiting review round 10.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -88,6 +88,11 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   (unemployment, participation: 0–100%) — the global percent range has a −100% floor and no ceiling (D-033).
 - Before FRED is enabled (from P1 review round 8, minor): cap the freshness origin (`last_updated`) by the newest
   observation plus its cadence, so an annual series refreshed yesterday but a year old is not labelled fresh.
+- P11 (from P1 review round 9, minor): when the exchange itself lacks the 11+ bars of context bad-print QA needs (an
+  outage or a newly listed contract), hold the latest bar or mark freshness unverified instead of serving it with a
+  warning.
+- P2 (from P1 review round 9, minor): SEC facts held as likely scale errors must be treated as missing in backtests and
+  point-in-time panels (9 of 59 historical snapshots hold 1–4 genuine facts; D-036).
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after
   holds; the ledger must store record identities (concept/period/accession, bar time), not positions.
 - P11 (from P1 review round 7, minor): keep status-page quality notes per request subject (one passing fetch of another
