@@ -315,7 +315,15 @@ Every fact of the newest 10-Q at ×1000 is held, and the response is refused as 
 wrong scale. The round-6 rule left 158 of 158 newest-quarter seeds undetected, and the round-7 version (neighbours
 only) left 36 of 159 ÷1000 seeds undetected.
 
-**Limit (stated, not hidden).** A concept that first appears in the newest filing has no earlier period to be judged
-against, and nothing else in one EDGAR response can show its scale is wrong: such facts are not caught (see the
-misses above). A concept whose current-period facts are all near zero, or swing in sign, is weakly constrained for
-the same reason. (P1 review rounds 6–7.)
+**Limit (stated, not hidden).** What the misses are:
+- Under ×1000 and ×1e6, all 7 are of two kinds:
+  - Six concepts that first appear in the newest filing (derivative assets and liabilities, AFS gains and losses,
+    derivative OCI). There is no earlier period to judge them against, and nothing else in one EDGAR response can show
+    their scale is wrong.
+  - `PreferredStockValue` = 0, which scaling leaves unchanged (not an error).
+- Under ÷1000 there are 4 more:
+  - Two balance-sheet instants landing 10^2.1–10^2.4 from their neighbours (accumulated OCI; equity securities without
+    a readily determinable fair value). Instants form no sums.
+  - Two volatile equity-revaluation gains (one is flagged for its half-year fact).
+
+These are not caught from this one source. (P1 review rounds 6–7.)
