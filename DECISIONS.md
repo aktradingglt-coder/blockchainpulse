@@ -352,14 +352,13 @@ rules are built to err on (P2 backtests must treat held facts as missing).
   - annual-only footnote lines with volatile history;
   - sign-swinging gains and OCI.
 
-The 10-K misses are mostly annual-only footnote lines with volatile history: current and deferred federal, state and
-foreign tax, rate-reconciliation items, taxes paid. There are also concepts whose history has multi-year gaps (PP&E
-gross and net: 2019, then 2024) and sign-swinging items (equity-method income, OCI on securities). These have no
-quarterly parts, so neither the sum nor the same-year check applies.
+The footnote lines are things like current and deferred federal, state and foreign tax, rate-reconciliation items
+and taxes paid. They have no quarterly parts, so neither the sum check nor the same-year check applies. A balance
+whose history has multi-year gaps (PP&E gross: 2019, then 2024) is flagged by the balance-jump rule but not held.
 
-A rule on the step from the previous year was measured and rejected. The clean recorded facts already contain 10
-genuine moves of 10^2–10^3 in the 4 newest filings, in concepts of the same kind (unrealized-gain OCI, equity
-revaluations, FY2025 non-operating income). Any threshold that catches a ÷1000 on these lines would hold or flag
-real data.
+A hold rule on the step from the previous period was measured and rejected for flows. The clean recorded facts
+already contain 10 genuine moves of 10^2–10^3 in the 4 newest filings, in concepts of the same kind (unrealized-gain
+OCI, equity revaluations, FY2025 non-operating income). Any threshold that catches a ÷1000 on these lines would also
+hold real data.
 
-None of these are caught from this one source. (P1 review rounds 6–8.)
+None of these misses can be caught from this one source. (P1 review rounds 6–9.)
