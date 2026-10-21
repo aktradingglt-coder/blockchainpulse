@@ -50,4 +50,10 @@ jobs:
           git add -A packages/data/tests/cassettes
           if git diff --cached --quiet; then echo "no cassette changes"; exit 0; fi
           git commit -m "Record provider cassettes (CI run ${{ github.run_id }})"
-          git push origin "HEAD:${{ github.ref_name }}"
+          # The branch may have moved while recording (only cassette files are committed here, so a rebase onto
+          # the newest tip is conflict-free); retry a few times before failing.
+          for attempt in 1 2 3; do
+            git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}" && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1
