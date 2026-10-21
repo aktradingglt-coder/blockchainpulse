@@ -203,8 +203,11 @@ points is a bad print and is quarantined. An extreme move in the last two points
 apart from a bad print and is quarantined as *unconfirmed* until later bars confirm it; confirmed level shifts are
 kept with a warning. A move beyond ×10 in one bar is implausible, so its run and its confirmation extend to five
 points (three bad ticks in a row are not a market move). Volume is quarantined only when 100× away from the series'
-median. Macro/inventory series: values outside the series' physical range and reverting outliers are quarantined,
-but an extreme *latest* release is kept with a warning. Non-finite numbers are refused by every canonical schema.
+median. Macro series: values outside the series' physical range and reverting outliers are quarantined. For *flow*
+statistics (rates, indices, releases) an extreme *latest* release is kept with a warning. *Stock* levels — EIA
+inventories and COT open interest — are judged on relative changes and treated like prices: an extreme latest move is
+held until later releases confirm it, because a stock cannot halve or grow 50% in one week (P1 review round 3).
+Non-finite numbers are refused by every canonical schema.
 **Alternatives.** Quarantine only interior two-sided spikes (the original rule); quarantine every extreme latest
 value, macro included.
 **Reason.** A bad print on the latest bar is the most damaging error a report can repeat; holding it until
@@ -233,3 +236,12 @@ terms allow display but forbid derived data, which the three-tag model could not
   be told from an unadjusted split.
 **Reason.** P1 review round 2 seeded each of these through the adapters and they passed QA; the bounds are wide
 enough that no genuine value approaches them.
+
+### D-034 · 2026-10-21 · Circuit-breaker probes cover a whole fetch; bounded responses
+**Decision.** In half-open state the single admitted probe belongs to one *fetch* (a context token), so providers
+that need several HTTP calls per fetch (FRED: series + observations; Kraken: instruments + data) can complete it and
+close the circuit. Success is recorded only after a body parses and clears the last error shown on the status page.
+Responses above 64 MB are refused without buffering, and one call waits at most 60 s in total between retries
+(a longer `Retry-After` is reported as `RateLimited` with the hint, for the caller or scheduler to honour).
+**Reason.** P1 review round 3 showed a multi-call provider could never recover once its circuit opened (the second
+call met the taken probe), and that `Retry-After` × retries could stall a fetch for minutes.

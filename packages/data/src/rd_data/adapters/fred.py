@@ -25,7 +25,7 @@ from rd_data.adapters.base import (
     as_float,
     require_param,
 )
-from rd_data.errors import InvalidArgs, NotFound, ProviderDown
+from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import byo_key_only
 from rd_data.quality import DataQualityReport, check_provider_order, check_series, with_schema_rejections
 from rd_data.resilience import RateLimit
@@ -79,7 +79,11 @@ class FredAdapter(BaseAdapter):
         if not info:
             raise NotFound(f"fred: unknown series {request.params['series']}", provider=self.name)
         meta = info[0]
-        series = str(meta.get("id", request.params["series"]))
+        series = str(request.params["series"])
+        if str(meta.get("id")) != series:
+            raise DataQualityError(
+                f"fred: response describes series {meta.get('id')!r}, request was {series!r}", provider=self.name
+            )
         frequency = _FREQ.get(str(meta.get("frequency_short", "")), "daily")
         unit = str(meta.get("units_short") or meta.get("units") or "")
         obs: list[MacroObservation] = []
@@ -87,6 +91,9 @@ class FredAdapter(BaseAdapter):
         for row in body.get("observations", []):
             try:
                 ts = datetime.strptime(str(row["date"]), "%Y-%m-%d").replace(tzinfo=UTC)
+                if ts > raw.retrieved_at:
+                    rejected += 1  # an observation dated after we fetched it cannot be real
+                    continue
                 obs.append(
                     MacroObservation(
                         series_id=series, ts=ts, value=as_float(row.get("value")), unit=unit, frequency=frequency
@@ -106,7 +113,13 @@ class FredAdapter(BaseAdapter):
         if self.copyrighted(raw):
             notes.append("Series notes carry a third-party copyright notice: internal use only.")
             override = self.licence.model_copy(update={"commercial_use_allowed": False})
-        as_of = usable[-1].ts if usable else None
+        reported = [o for o in usable if o.value is not None]
+        if usable and not reported:
+            raise DataQualityError(
+                f"{self.name}: every observation is reported as missing; nothing to date the series by",
+                provider=self.name,
+            )
+        as_of = reported[-1].ts if reported else None  # FRED marks missing days with "."; never date data by one
         # Freshness is judged from the series' last update (its latest release), not from the observation date:
         # a monthly value dated the 1st is released weeks later, and judging it from the 1st would block it on
         # release day.

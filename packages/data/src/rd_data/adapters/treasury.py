@@ -14,10 +14,11 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from rd_data.adapters.base import BaseAdapter, DataRequest, FreshnessSpec, ParseResult, RawPayload, RequestKind
-from rd_data.errors import InvalidArgs, NotFound
+from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.freshness import ExchangeCalendar
 from rd_data.licence import public_domain
 from rd_data.quality import (
+    MAX_GAP_FRACTION,
     CheckResult,
     DataQualityReport,
     check_duplicates,
@@ -50,6 +51,10 @@ COLUMNS: Mapping[str, str] = {
 REQUIRED_COLUMNS = ("Date", "1 Mo", "3 Mo", "6 Mo", "1 Yr", "2 Yr", "5 Yr", "10 Yr", "30 Yr")
 #: Possible range for a par yield in percent; anything outside is a bad print (quarantined).
 YIELD_RANGE = (-5.0, 30.0)
+#: Business-day calendar for gap checks and freshness (bond-market-only holidays show up as small gaps, never blocking).
+NYSE = ExchangeCalendar("XNYS")
+#: Consecutive publication days with an identical full curve that mean the source stopped updating.
+FROZEN_DAYS = 5
 URL = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{year}/all"
 
 
@@ -79,6 +84,10 @@ class TreasuryAdapter(BaseAdapter):
         text = raw.bodies[0].decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text))
         header = [h.strip() for h in reader.fieldnames or []]
+        if "Date" not in header:
+            # Not the yield-curve CSV at all (e.g. an HTML maintenance page with HTTP 200): an outage, which the
+            # pipeline counts against the circuit breaker; a renamed tenor column is schema drift (below).
+            raise ProviderDown("us_treasury: malformed response (no CSV header with a Date column)", provider=self.name)
         missing_columns = [c for c in REQUIRED_COLUMNS if c not in header]
         points: list[TreasuryYieldPoint] = []
         raw_dates: list[datetime] = []
@@ -108,7 +117,10 @@ class TreasuryAdapter(BaseAdapter):
         bad_prints, jumps = _bad_prints_by_tenor(points, exclude=set(range_check.indices))
         quarantine = sorted({*range_check.indices, *bad_prints})
         usable = [p for i, p in enumerate(points) if i not in set(quarantine)]
+        days = sorted({p.ts for p in points})
         checks: list[CheckResult] = [
+            _missing_business_days(days),
+            _frozen_curve(points, days),
             CheckResult(
                 "csv_header",
                 passed=not missing_columns,
@@ -143,7 +155,7 @@ class TreasuryAdapter(BaseAdapter):
             tuple(usable),
             quality,
             as_of,
-            FreshnessSpec(DataType.DAILY_BAR, ExchangeCalendar("XNYS")),
+            FreshnessSpec(DataType.DAILY_BAR, NYSE),
             source_tz="America/New_York",
             quarantined=tuple(p for i, p in enumerate(points) if i in set(quarantine)),
         )
@@ -170,3 +182,38 @@ def _bad_prints_by_tenor(points: list[TreasuryYieldPoint], *, exclude: set[int])
         flagged.extend(idx[j] for j in (*scan.bad_prints, *scan.unconfirmed))
         jumps.extend(idx[j] for j in scan.jumps)
     return sorted(flagged), sorted(jumps)
+
+
+def _missing_business_days(days: list[datetime]) -> CheckResult:
+    """Business days without a curve between the first and last published day (blocking above 5%)."""
+    if len(days) < 2:
+        return CheckResult("calendar_gaps", passed=True, blocking=False, detail="fewer than two days")
+    have = {d.date() for d in days}
+    expected = [days[0].date()]
+    while True:
+        nxt = NYSE.closes_after(expected[-1], 1)[0].date()
+        if nxt > days[-1].date():
+            break
+        expected.append(nxt)
+    missing = [d for d in expected if d not in have]
+    fraction = len(missing) / len(expected)
+    detail = f"{len(missing)} of {len(expected)} NYSE business days without a curve"
+    if missing:
+        detail += f" (e.g. {', '.join(d.isoformat() for d in missing[:5])}; bond-market holidays differ from NYSE)"
+    return CheckResult("calendar_gaps", passed=not missing, blocking=fraction > MAX_GAP_FRACTION, detail=detail)
+
+
+def _frozen_curve(points: list[TreasuryYieldPoint], days: list[datetime]) -> CheckResult:
+    """The whole curve unchanged for the last FROZEN_DAYS publication days: the feed stopped updating."""
+    curves: dict[datetime, tuple[tuple[str, float], ...]] = {}
+    for p in points:
+        curves.setdefault(p.ts, ())
+        curves[p.ts] = (*curves[p.ts], (p.tenor, p.yield_pct))
+    tail = [curves[d] for d in days[-FROZEN_DAYS:]]
+    frozen = len(tail) == FROZEN_DAYS and all(c == tail[0] for c in tail)
+    return CheckResult(
+        "stale_quotes",
+        passed=not frozen,
+        blocking=True,
+        detail=f"identical curve on the last {FROZEN_DAYS} days" if frozen else "ok",
+    )

@@ -417,6 +417,27 @@ def check_gaps(
     return _ok("calendar_gaps", detail)
 
 
+def check_interval_gaps(
+    bars: Sequence[Bar], width: timedelta, calendar: TradingCalendar, *, max_gap_fraction: float = MAX_GAP_FRACTION
+) -> CheckResult:
+    """Intraday/weekly bars: bar starts missing between consecutive bars while the market is open."""
+    if len(bars) < 2:
+        return _ok("calendar_gaps", "fewer than two bars")
+    missing: list[datetime] = []
+    for prev, cur in itertools.pairwise(bars):
+        t, steps = prev.ts + width, 0
+        while t < cur.ts and steps < 10_000:
+            if calendar.is_open(t):
+                missing.append(t)
+            t, steps = t + width, steps + 1
+    expected = len(bars) + len(missing)
+    detail = f"{len(missing)} of {expected} expected {width} bars missing ({calendar.name})"
+    if missing:
+        detail += f" (e.g. {', '.join(m.isoformat() for m in missing[:3])})"
+        return _fail("calendar_gaps", detail, blocking=len(missing) / expected > max_gap_fraction)
+    return _ok("calendar_gaps", detail)
+
+
 def _session_of_close(close: datetime, calendar: TradingCalendar) -> date:
     """Session date for a close: exchange closes fall on the session day, 00:00 UTC closes on the day after."""
     if close.hour == 0 and close.minute == 0 and calendar.name in ("24/7", "weekdays"):
@@ -483,6 +504,7 @@ def check_bars(
     reference: Sequence[Bar] | None = None,
     split_dates: Sequence[date] | None = None,
     corporate_actions_known: bool = False,
+    bar_width: timedelta | None = None,
     allow_non_positive: bool = False,
     rejected_rows: int = 0,
 ) -> tuple[DataQualityReport, list[Bar]]:
@@ -502,6 +524,8 @@ def check_bars(
     checks.append(check_stale_run(closes, market_open_at_end=market_open_at_end))
     if calendar is not None and bars and bars[0].interval == "1d":
         checks.append(check_gaps(bars, calendar))
+    elif calendar is not None and bar_width is not None:
+        checks.append(check_interval_gaps(bars, bar_width, calendar))
     if reference is not None:
         checks.append(check_reconciliation(bars, reference))
     if split_dates is not None:
@@ -518,21 +542,28 @@ def check_series(
     subject: str,
     lo: float | None = None,
     hi: float | None = None,
+    stock: bool = False,
 ) -> tuple[DataQualityReport, list[MacroObservation]]:
     """Macro/inventory series: order, duplicates, finite values, physical range and bad prints.
 
-    Out-of-range values and extreme moves that revert are quarantined. An extreme *latest* value is kept with a
-    warning: official releases are revised rather than mis-printed, and hiding a genuine release (e.g. a record jump
-    in unemployment) would misstate the data. Missing values are allowed and counted.
+    Out-of-range values and extreme moves that revert are quarantined. For *flow* statistics (rates, indices,
+    releases) an extreme latest value is kept with a warning: official releases are revised rather than mis-printed,
+    and hiding a genuine record release would misstate the data. For *stock* levels (``stock=True``, e.g. inventories)
+    changes are judged relative to the level, and an extreme latest move is held like a price until later releases
+    confirm it: a stock cannot halve or jump 50% in one week, so such a value is a decimal or unit error (D-031).
+    Missing values are allowed and counted.
     """
     values = [o.value for o in observations]
     missing = sum(1 for v in values if v is None)
     nonfinite = tuple(i for i, v in enumerate(values) if v is not None and not math.isfinite(v))
     range_check = check_range(values, lo=lo, hi=hi, what="series")
     present = [(i, v) for i, v in enumerate(values) if v is not None and i not in range_check.indices]
-    scan = scan_spikes([v for _, v in present])
+    relative = stock and all(v > 0 for _, v in present)
+    scan = scan_spikes([math.log(v) if relative else v for _, v in present])
     reverted = tuple(present[j][0] for j in scan.bad_prints)
-    edge = tuple(present[j][0] for j in (*scan.unconfirmed, *scan.jumps))
+    unconfirmed = tuple(present[j][0] for j in scan.unconfirmed)
+    held = unconfirmed if stock else ()
+    edge = tuple(sorted({*(() if stock else unconfirmed), *(present[j][0] for j in scan.jumps)}))
     checks = [
         check_monotonic([o.ts for o in observations]),  # callers pass rows sorted; raw order: check_provider_order
         check_duplicates([o.ts for o in observations]),
@@ -540,17 +571,46 @@ def check_series(
         if nonfinite
         else _ok("finite_values"),
         range_check,
-        _fail("outliers", f"{len(reverted)} reverting outlier(s) quarantined", blocking=False, indices=reverted)
-        if reverted
+        _fail(
+            "outliers",
+            f"{len(reverted)} reverting outlier(s) and {len(held)} unconfirmed stock move(s) quarantined",
+            blocking=False,
+            indices=tuple(sorted({*reverted, *held})),
+        )
+        if reverted or held
         else _ok("outliers", "evaluated" if scan.evaluated else "fewer than 11 values: not evaluated", blocking=False),
         _fail("large_moves", f"{len(edge)} extreme move(s) kept for review", blocking=False, indices=edge)
         if edge
         else _ok("large_moves", blocking=False),
         _ok("missing_values", f"{missing} observation(s) reported as missing by the source", blocking=False),
     ]
-    quarantined = tuple(sorted({*range_check.indices, *reverted}))
+    quarantined = tuple(sorted({*range_check.indices, *reverted, *held}))
     usable = [o for i, o in enumerate(observations) if i not in set(quarantined)]
     return DataQualityReport(subject, tuple(checks), quarantined, len(observations)), usable
+
+
+def check_open_interest_moves(reports: Sequence[PositioningReport]) -> tuple[CheckResult, CheckResult]:
+    """Open interest is a stock of contracts: judged on relative weekly changes like an inventory (D-031).
+
+    Returns (quarantine, warning): reverting outliers and unconfirmed extreme latest weeks (e.g. every field x10, which
+    still balances) are quarantined; confirmed extreme moves are flagged. ``reports`` must be in date order.
+    """
+    levels = [r.open_interest for r in reports]
+    if any(v <= 0 for v in levels):
+        return _ok("open_interest_outliers", "not evaluated", blocking=False), _ok("large_moves", blocking=False)
+    scan = scan_spikes([math.log(v) for v in levels], implausible=IMPLAUSIBLE_LOG_MOVE)
+    held = tuple(sorted({*scan.bad_prints, *scan.unconfirmed}))
+    quarantine = (
+        _fail("open_interest_outliers", f"{len(held)} week(s) quarantined", blocking=False, indices=held)
+        if held
+        else _ok("open_interest_outliers", blocking=False)
+    )
+    moves = (
+        _fail("large_moves", f"{len(scan.jumps)} confirmed extreme move(s) kept", blocking=False, indices=scan.jumps)
+        if scan.jumps
+        else _ok("large_moves", blocking=False)
+    )
+    return quarantine, moves
 
 
 def check_positioning(
@@ -572,7 +632,13 @@ def check_positioning(
                 out.append(i)
         return tuple(out)
 
-    checks = [check_duplicates(keys)]
+    empty = tuple(i for i, r in enumerate(reports) if r.open_interest <= 0)
+    checks = [
+        check_duplicates(keys),
+        _fail("positive_open_interest", f"{len(empty)} row(s) with no open interest", blocking=True, indices=empty)
+        if empty
+        else _ok("positive_open_interest"),
+    ]
     for side in ("long", "short"):
         bad = unbalanced(side)
         name = f"{side}_side_equals_open_interest"

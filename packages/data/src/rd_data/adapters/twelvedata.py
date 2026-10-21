@@ -23,7 +23,7 @@ from rd_data.adapters.base import (
     RequestKind,
     require_param,
 )
-from rd_data.errors import InvalidArgs, NotFound, ProviderDown, RateLimited
+from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown, RateLimited
 from rd_data.freshness import ContinuousCalendar, ExchangeCalendar, TradingCalendar, WeekdayCalendar
 from rd_data.licence import byo_key_only
 from rd_data.quality import DataQualityReport, check_bars, check_provider_order
@@ -108,6 +108,11 @@ class TwelveDataAdapter(BaseAdapter):
                 raise NotFound(f"twelvedata: {message}", provider=self.name)
             raise InvalidArgs(f"twelvedata: {message}", provider=self.name)
         symbol = str(request.params["symbol"])
+        answered = str((body.get("meta") or {}).get("symbol", ""))
+        if answered.upper() != symbol.upper():
+            raise DataQualityError(
+                f"twelvedata: response is for symbol {answered!r}, request was {symbol!r}", provider=self.name
+            )
         interval = str(request.params.get("interval", "1d"))
         width = WIDTHS[interval]
         asset_class = str(request.params.get("asset_class", "fx"))
@@ -149,6 +154,7 @@ class TwelveDataAdapter(BaseAdapter):
             subject=f"twelvedata:{symbol}:{interval}",
             calendar=cal,
             market_open_at_end=cal.is_open(fetched),
+            bar_width=width,
             rejected_rows=rejected,
             split_dates=[] if asset_class == "equity" else None,
         )

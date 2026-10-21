@@ -29,6 +29,7 @@ from rd_data.licence import public_domain
 from rd_data.quality import (
     DataQualityReport,
     check_cadence,
+    check_open_interest_moves,
     check_positioning,
     check_provider_order,
     with_schema_rejections,
@@ -178,9 +179,10 @@ class CftcAdapter(BaseAdapter):
         records: list[PositioningReport] = []
         rejected = 0
         asked = str(request.params["market_code"])
+        kind = "FutOnly" if futures_only else "Combined"
         for row in rows:
-            if str(row.get("cftc_contract_market_code", asked)) != asked:
-                rejected += 1  # a row for another market: never relabel it as the one requested
+            if str(row.get("cftc_contract_market_code")) != asked or row.get("futonly_or_combined") != kind:
+                rejected += 1  # a row for another market or report kind: never relabel it as the one requested
                 continue
             try:
                 records.append(self._row(row, report_type, futures_only=futures_only))
@@ -190,10 +192,15 @@ class CftcAdapter(BaseAdapter):
         records.sort(key=lambda r: r.as_of)
         base = check_positioning(records, subject=f"cftc:{report_type}:{request.params['market_code']}")
         cadence = check_cadence([r.as_of for r in records], period=timedelta(days=7))
+        oi_outliers, oi_moves = check_open_interest_moves(records)
         quality = with_schema_rejections(
-            DataQualityReport(base.subject, (order, *base.checks, cadence), base.quarantined, base.record_count),
+            DataQualityReport(
+                base.subject, (order, *base.checks, cadence, oi_outliers, oi_moves), oi_outliers.indices, len(records)
+            ),
             rejected,
         )
+        quarantined = tuple(r for i, r in enumerate(records) if i in set(oi_outliers.indices))
+        records = [r for i, r in enumerate(records) if i not in set(oi_outliers.indices)]
         as_of = records[-1].as_of if records else None
         released = release_time(as_of) if as_of else None
         return ParseResult(
@@ -204,6 +211,7 @@ class CftcAdapter(BaseAdapter):
             source_tz="America/New_York",
             notes=("Positions as of Tuesday; released by the CFTC on the following Friday.",),
             freshness_as_of=released,
+            quarantined=quarantined,
         )
 
     def _row(self, row: Mapping[str, Any], report_type: ReportType, *, futures_only: bool) -> PositioningReport:

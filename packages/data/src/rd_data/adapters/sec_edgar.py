@@ -134,7 +134,10 @@ class SecEdgarAdapter(BaseAdapter):
         """The response is about the company we asked for (EDGAR keys files by CIK; a mismatch is a wrong body)."""
         asked = cik10(str(request.params["cik"]))
         got = data.get("cik")
-        ok = got is None or cik10(str(got)) == asked
+        try:
+            ok = got is not None and cik10(str(got)) == asked  # EDGAR always names the company; absent = wrong body
+        except InvalidArgs:
+            ok = False
         return CheckResult(
             "subject_matches_request",
             passed=ok,
@@ -225,8 +228,10 @@ class SecEdgarAdapter(BaseAdapter):
                         if form not in FUNDAMENTAL_FORMS:
                             continue
                         filed = _date_or_none([fact.get("filed")], 0)
-                        if filed is not None and filed > latest_allowed:
-                            rejected += 1  # a fact filed in the future cannot be point-in-time correct
+                        end = _date_or_none([fact.get("end")], 0)
+                        if filed is not None and (filed > latest_allowed or (end is not None and filed < end)):
+                            # filed in the future, or before the period it reports ended: not point-in-time correct
+                            rejected += 1
                             continue
                         try:
                             records.append(

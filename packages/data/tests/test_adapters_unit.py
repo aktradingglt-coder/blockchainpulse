@@ -47,6 +47,7 @@ def _tff_row(day: str, oi: float = 1000.0) -> dict[str, str]:
     return {
         "report_date_as_yyyy_mm_dd": f"{day}T00:00:00.000",
         "cftc_contract_market_code": "099741",
+        "futonly_or_combined": "FutOnly",
         "market_and_exchange_names": "EURO FX - CHICAGO MERCANTILE EXCHANGE",
         "open_interest_all": str(oi),
         "dealer_positions_long_all": "100",

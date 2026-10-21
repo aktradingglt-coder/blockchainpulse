@@ -24,7 +24,7 @@ from rd_data.adapters.base import (
     as_float,
     require_param,
 )
-from rd_data.errors import InvalidArgs, NotFound, ProviderDown
+from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
 from rd_data.quality import (
     CheckResult,
@@ -50,6 +50,8 @@ class SeriesInfo:
     #: Physically possible range in the series' unit; values outside are quarantined.
     lo: float | None = 0.0
     hi: float | None = None
+    #: A level of inventory (not a flow): judged on relative changes, extreme latest moves held (D-031).
+    stock: bool = True
 
 
 _WPSR = timedelta(days=5, hours=15, minutes=30)  # Weekly Petroleum Status Report: the following Wednesday
@@ -124,7 +126,7 @@ class EiaAdapter(BaseAdapter):
     def _parse(self, request: DataRequest, raw: RawPayload) -> ParseResult:
         payload = orjson.loads(raw.bodies[0])
         if "error" in payload:
-            raise InvalidArgs(f"eia: {payload['error']}", provider=self.name)
+            raise _error(payload, self.name)
         response = payload.get("response") or {}
         rows = response.get("data") or []
         series = str(request.params["series"])
@@ -136,12 +138,15 @@ class EiaAdapter(BaseAdapter):
         raw_times: list[datetime] = []
         rejected = 0
         for row in rows:
-            if str(row.get("series", series)) != series:
-                rejected += 1  # a row for a different series: never relabel another series' data
+            if str(row.get("series")) != series:
+                rejected += 1  # a row for a different (or unnamed) series: never relabel another series' data
                 continue
             try:
                 ts = datetime.strptime(str(row["period"])[:10], "%Y-%m-%d").replace(tzinfo=UTC)
                 raw_times.append(ts)
+                if ts > raw.retrieved_at:
+                    rejected += 1  # a period that has not happened yet
+                    continue
                 unit = str(row.get("units") or row.get("value-units") or "")
                 obs.append(
                     MacroObservation(
@@ -157,7 +162,11 @@ class EiaAdapter(BaseAdapter):
                 rejected += 1
         obs.sort(key=lambda o: o.ts)
         report, usable = check_series(
-            obs, subject=f"eia:{series}", lo=info.lo if info else None, hi=info.hi if info else None
+            obs,
+            subject=f"eia:{series}",
+            lo=info.lo if info else None,
+            hi=info.hi if info else None,
+            stock=info.stock if info else False,
         )
         units = sorted({o.unit for o in obs})
         extra = [
@@ -175,7 +184,13 @@ class EiaAdapter(BaseAdapter):
             DataQualityReport(report.subject, (*report.checks, *extra), report.quarantined, report.record_count),
             rejected,
         )
-        latest = usable[-1].ts if usable else None
+        reported = [o for o in usable if o.value is not None]
+        if usable and not reported:
+            raise DataQualityError(
+                f"{self.name}: every observation is reported as missing; nothing to date the series by",
+                provider=self.name,
+            )
+        latest = reported[-1].ts if reported else None  # the newest week with a value, never a missing one
         lag = info.release_lag if info else DEFAULT_RELEASE_LAG[frequency]
         released = datetime.combine(latest.date(), time(0, tzinfo=UTC)) + lag if latest else None
         return ParseResult(
@@ -198,3 +213,16 @@ class EiaAdapter(BaseAdapter):
             DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1", "length": 60}),
             DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "NW2_EPG0_SWO_R48_BCF", "length": 60}),
         ]
+
+
+def _error(payload: Mapping[str, Any], provider: str) -> Exception:
+    """EIA's ``{"error": ..., "code": ...}`` bodies: key and server problems are outages, the rest bad requests."""
+    message = str(payload.get("error"))
+    try:
+        code = int(payload.get("code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    lowered = message.lower()
+    if code in (401, 403) or code >= 500 or "api_key" in lowered or "unavailable" in lowered:
+        return ProviderDown(f"eia: {message}", provider=provider)
+    return InvalidArgs(f"eia: {message}", provider=provider)

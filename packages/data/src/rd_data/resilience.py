@@ -18,6 +18,7 @@ import json
 import random
 import time
 from collections.abc import Callable, Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -255,6 +256,11 @@ class MemoryStateStore:
         return self._clock()
 
 
+#: The half-open probe held by the current task. An adapter sets it for a whole fetch, so every HTTP call of that
+#: fetch (FRED: series + observations; Kraken: instruments + data) belongs to the one probe it was admitted with.
+PROBE_TOKEN: ContextVar[str | None] = ContextVar("rd_probe_token", default=None)
+
+
 class CircuitBreaker:
     """Consecutive-failure breaker shared through a :class:`StateStore`."""
 
@@ -286,15 +292,24 @@ class CircuitBreaker:
         if status.state is CircuitState.CLOSED:
             return
         if status.state is CircuitState.HALF_OPEN:
+            token = PROBE_TOKEN.get()
+            key = self._k(provider, "probe")
+            if token is not None and await self._store.get(key) == token:
+                return  # a later call of the fetch that already holds the probe
             got_probe = await self._store.set(
-                self._k(provider, "probe"), "1", ttl_s=max(1, int(self._cooldown)), only_if_absent=True
+                key, token or "probe", ttl_s=max(1, int(self._cooldown)), only_if_absent=True
             )
             if got_probe:
                 return
         raise ProviderDown(f"circuit open for {provider} (last error: {status.last_error})", provider=provider)
 
     async def record_success(self, provider: str) -> None:
-        await self._store.delete(self._k(provider, "fails"), self._k(provider, "opened_at"), self._k(provider, "probe"))
+        await self._store.delete(
+            self._k(provider, "fails"),
+            self._k(provider, "opened_at"),
+            self._k(provider, "probe"),
+            self._k(provider, "last_error"),
+        )
 
     async def record_failure(self, provider: str, error: str) -> None:
         await self._store.set(self._k(provider, "last_error"), error[:200])

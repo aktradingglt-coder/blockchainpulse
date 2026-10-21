@@ -57,6 +57,12 @@ SECRET_PARAMS = frozenset(
         "private_key",
         "license_key",
         "licence_key",
+        "pwd",
+        "pass",
+        "passwd",
+        "authorization",
+        "access_key_id",
+        "secret_access_key",
     }
 )
 #: Name endings that always mean a credential (``x_auth_token``, ``client_secret``, ``db_password``).
@@ -130,6 +136,8 @@ class HttpFetcher:
         rng: random.Random | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         record_ok: bool = True,
+        max_body_bytes: int = 64 * 1024 * 1024,
+        max_total_wait_s: float = 60.0,
     ) -> None:
         self.provider = provider
         self._hosts = allowed_hosts
@@ -149,6 +157,10 @@ class HttpFetcher:
         # When False, a 2xx is not yet a success for the circuit breaker: the caller records it once the body has
         # been understood, so a provider answering 200 with garbage still counts as failing (adapters do this).
         self._record_ok = record_ok
+        # A response bigger than this is never buffered (SEC company facts, the largest we use, are ~6 MB).
+        self._max_body = max_body_bytes
+        # Total time one call may spend waiting between retries, Retry-After included.
+        self._max_wait = max_total_wait_s
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -156,6 +168,38 @@ class HttpFetcher:
     async def report_malformed(self, detail: str) -> None:
         """Count a 2xx whose body the caller could not use as a provider failure (circuit breaker)."""
         await self._breaker.record_failure(self.provider, detail)
+
+    def _client_error(self, status: int, shown: str) -> Exception:
+        if status == 404:
+            return NotFound(f"{self.provider}: not found ({shown})", provider=self.provider)
+        if status in (401, 403):
+            return ProviderDown(
+                f"{self.provider}: authorization rejected (HTTP {status}); check the API key or plan",
+                provider=self.provider,
+            )
+        return InvalidArgs(f"{self.provider}: request rejected (HTTP {status}) {shown}", provider=self.provider)
+
+    async def _fetch_capped(
+        self, url: str, params: Mapping[str, Any], headers: Mapping[str, str] | None
+    ) -> tuple[int, dict[str, str], bytes]:
+        """One GET, reading at most ``max_body_bytes`` of the body (a larger response is an error, not a buffer)."""
+        request = self._client.build_request("GET", url, params=params, headers=dict(headers or {}))
+        response = await self._client.send(request, stream=True)
+        try:
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > self._max_body:
+                    await self._breaker.record_failure(self.provider, "response too large")
+                    raise ProviderDown(
+                        f"{self.provider}: response larger than {self._max_body // (1024 * 1024)} MB refused",
+                        provider=self.provider,
+                    )
+                chunks.append(chunk)
+            return response.status_code, dict(response.headers), b"".join(chunks)
+        finally:
+            await response.aclose()
 
     def _check_target(self, url: str) -> None:
         parts = urlsplit(url)
@@ -177,13 +221,14 @@ class HttpFetcher:
         secrets = secret_values(params)
         delays = backoff_delays(self._max_attempts - 1, rng=self._rng)
         last_error = "no attempt made"
+        waited = 0.0
         for attempt in range(1, self._max_attempts + 1):
             # Checked before every attempt: once failures (ours or other workers') open the circuit, retries stop.
             await self._breaker.before_call(self.provider)
             await self._limiter.acquire(self.provider, self._rate_limit)
             started = time.perf_counter()
             try:
-                resp = await self._client.get(url, params=params, headers=dict(headers or {}))
+                status, resp_headers, body = await self._fetch_capped(url, params, headers)
             except httpx.TransportError as exc:
                 last_error = f"{type(exc).__name__}"
                 self._log.warning(
@@ -191,8 +236,9 @@ class HttpFetcher:
                 )
                 await self._breaker.record_failure(self.provider, last_error)
                 delay = next(delays, None)
-                if delay is None:
+                if delay is None or waited + delay > self._max_wait:
                     break
+                waited += delay
                 await self._sleep(delay)
                 continue
             elapsed = time.perf_counter() - started
@@ -200,15 +246,14 @@ class HttpFetcher:
                 "provider.response",
                 provider=self.provider,
                 url=shown,
-                status=resp.status_code,
+                status=status,
                 attempt=attempt,
                 elapsed_ms=round(elapsed * 1000, 1),
             )
-            status = resp.status_code
-            if 200 <= status < 300 and status != 204 and resp.content:
+            if 200 <= status < 300 and status != 204 and body:
                 if self._record_ok:
                     await self._breaker.record_success(self.provider)
-                return FetchResult(status, shown, scrub_body(resp.content, secrets), dict(resp.headers), elapsed)
+                return FetchResult(status, shown, scrub_body(body, secrets), resp_headers, elapsed)
             if status < 400:
                 # Redirects are never followed (allow-list) and an empty 2xx carries no data: both mean the
                 # provider moved or broke the endpoint, which is an outage from our side, not a bad request.
@@ -219,27 +264,22 @@ class HttpFetcher:
                 last_error = f"HTTP {status}"
                 if status >= 500:
                     await self._breaker.record_failure(self.provider, last_error)
+                hinted = retry_after_seconds(resp_headers.get("retry-after"))
                 delay = next(delays, None)
-                if delay is None:
+                wait = None if delay is None else max(delay, hinted or 0.0)
+                if wait is None or waited + wait > self._max_wait:
                     if status == 429:
                         raise RateLimited(
                             f"{self.provider} rate-limited the request ({shown})",
                             provider=self.provider,
-                            retry_after_s=retry_after_seconds(resp.headers.get("retry-after")),
+                            retry_after_s=hinted,
                         )
                     break
-                hinted = retry_after_seconds(resp.headers.get("retry-after"))
-                await self._sleep(max(delay, hinted or 0.0))
+                waited += wait
+                await self._sleep(wait)
                 continue
             await self._breaker.record_success(self.provider)  # the service answered; the request was wrong
-            if status == 404:
-                raise NotFound(f"{self.provider}: not found ({shown})", provider=self.provider)
-            if status in (401, 403):
-                raise ProviderDown(
-                    f"{self.provider}: authorization rejected (HTTP {status}); check the API key or plan",
-                    provider=self.provider,
-                )
-            raise InvalidArgs(f"{self.provider}: request rejected (HTTP {status}) {shown}", provider=self.provider)
+            raise self._client_error(status, shown)
         raise ProviderDown(
             f"{self.provider}: unavailable after {self._max_attempts} attempt(s): {last_error}", provider=self.provider
         )

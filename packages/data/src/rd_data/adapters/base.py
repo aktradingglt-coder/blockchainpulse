@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -29,7 +30,15 @@ from rd_data.freshness import FreshnessResult, TradingCalendar, classify
 from rd_data.http import FetchResult, HttpFetcher
 from rd_data.licence import LicenceTag, LicenceTerms
 from rd_data.quality import DataQualityReport
-from rd_data.resilience import CircuitBreaker, CircuitStatus, RateLimit, RateLimiter, ResponseCache, request_fingerprint
+from rd_data.resilience import (
+    PROBE_TOKEN,
+    CircuitBreaker,
+    CircuitStatus,
+    RateLimit,
+    RateLimiter,
+    ResponseCache,
+    request_fingerprint,
+)
 from rd_data.schemas import AssetClass, CanonicalRecord, DataType
 
 ParamValue = str | int | float | bool
@@ -289,6 +298,14 @@ class BaseAdapter(ABC):
             raise ProviderDown(detail, provider=self.name) from exc
 
     async def fetch(self, request: DataRequest) -> DataResponse:
+        """Validated, quality-checked, freshness-labelled, licence-tagged data for ``request``."""
+        token = PROBE_TOKEN.set(uuid.uuid4().hex)  # one half-open probe covers every HTTP call of this fetch
+        try:
+            return await self._fetch(request)
+        finally:
+            PROBE_TOKEN.reset(token)
+
+    async def _fetch(self, request: DataRequest) -> DataResponse:
         if request.kind not in self.supported:
             raise InvalidArgs(f"{self.name} does not serve {request.kind.value}", provider=self.name)
         if not self.enabled:
@@ -314,6 +331,11 @@ class BaseAdapter(ABC):
                 assert self.ctx.cache is not None  # noqa: S101 - narrowed by ``cacheable``
                 await self.ctx.cache.put(fingerprint, raw.to_json(), self.cache_ttl_s[request.kind])
         parsed.quality.require_passed(provider=self.name)
+        if parsed.quarantined and not parsed.records:
+            raise DataQualityError(
+                f"{self.name}: every record was quarantined ({len(parsed.quarantined)}); nothing usable to show",
+                provider=self.name,
+            )
         now = self.ctx.clock.now()
         _require_not_future(parsed.as_of, now, provider=self.name)
         freshness: FreshnessResult | None = None

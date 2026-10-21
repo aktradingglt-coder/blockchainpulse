@@ -29,9 +29,9 @@ from rd_data.adapters.sec_edgar import SecEdgarAdapter
 from rd_data.adapters.treasury import TreasuryAdapter
 from rd_data.adapters.twelvedata import TwelveDataAdapter
 from rd_data.cassette import Cassette, RecordingTransport, ReplayTransport
-from rd_data.errors import DataQualityError, InvalidArgs, ProviderDown, Stale
+from rd_data.errors import DataQualityError, InvalidArgs, ProviderDown, RateLimited, Stale
 from rd_data.freshness import Freshness
-from rd_data.http import redact_params
+from rd_data.http import HttpFetcher, redact_params
 from rd_data.recording import cassette_name
 from rd_data.registry import provider_statuses
 from rd_data.resilience import (
@@ -683,7 +683,7 @@ async def test_eia_future_period_and_mixed_units_are_refused() -> None:
     def future(data: dict[str, Any]) -> None:
         data["response"]["data"].insert(0, {**data["response"]["data"][0], "period": "2026-10-30"})
 
-    with pytest.raises(DataQualityError, match="2026-10-30"):
+    with pytest.raises(DataQualityError, match="schema"):  # a period after retrieval is never accepted
         await _replay(EiaAdapter, request, {0: _json_edit(future)})
 
     def other_unit(data: dict[str, Any]) -> None:
@@ -880,3 +880,303 @@ async def test_status_shows_whether_credentials_are_configured() -> None:
     assert statuses["eia"]["configured"] is False
     assert statuses["cftc"]["configured"] is True
     assert statuses["fred"]["enabled"] is False
+
+
+# ------------------------------------------------------------------------------------- review round 3 (P1)
+
+
+def _fred_bodies(series: str = "DGS10") -> tuple[str, str]:
+    request = _plan(FredAdapter, RequestKind.MACRO_SERIES)
+    cassette = Cassette.load(CASSETTES / "fred" / cassette_name(request))
+    info = json.loads(cassette.interactions[0].body)
+    info["seriess"][0]["id"] = series
+    return json.dumps(info), cassette.interactions[1].body
+
+
+async def test_multi_call_providers_recover_after_a_half_open_probe(ctx_factory: Any) -> None:
+    """FRED makes two calls per fetch; the probe must cover both, or the circuit never closes again."""
+    info, observations = _fred_bodies()
+    healthy = [False]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if not healthy[0]:
+            return httpx.Response(503)
+        return httpx.Response(200, text=info if req.url.path.endswith("/series") else observations)
+
+    clock = [1_000.0]
+    ctx, _ = ctx_factory(handler, flags={"provider_fred": True}, cache=False, **SETTINGS)
+    ctx.clock = FixedClock(datetime(2026, 10, 21, 12, tzinfo=UTC))
+    ctx.breaker = CircuitBreaker(MemoryStateStore(clock=lambda: clock[0]), failure_threshold=2, cooldown_s=60)
+    adapter = FredAdapter(ctx)
+    adapter.http._sleep = _record_sleep([])  # no real waiting
+    request = DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"})
+    with pytest.raises(ProviderDown):
+        await adapter.fetch(request)
+    assert (await ctx.breaker.status("fred")).state is CircuitState.OPEN
+    healthy[0] = True
+    clock[0] += 61  # cool-down over: one probe fetch is admitted
+    resp = await adapter.fetch(request)
+    await adapter.aclose()
+    assert resp.records
+    status = await ctx.breaker.status("fred")
+    assert status.state is CircuitState.CLOSED
+    assert status.last_error is None  # the status page no longer shows the old error
+
+
+async def test_kraken_recovers_with_a_fresh_adapter_per_fetch() -> None:
+    request = _plan(KrakenFuturesAdapter, RequestKind.CRYPTO_DERIVATIVES)
+    cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request))
+    clock = [1_000.0]
+    breaker = CircuitBreaker(MemoryStateStore(clock=lambda: clock[0]), failure_threshold=1, cooldown_s=60)
+    await breaker.record_failure("kraken_futures", "HTTP 503")
+    clock[0] += 61
+
+    ctx = AdapterContext(
+        settings=Settings(),
+        limiter=LocalRateLimiter(),
+        breaker=breaker,
+        clock=FixedClock(cassette.replay_time),
+        transport=ReplayTransport([cassette]),
+    )
+    adapter = KrakenFuturesAdapter(ctx)  # instruments + tickers: two calls under one probe
+    await adapter.fetch(request)
+    await adapter.aclose()
+    assert (await breaker.status("kraken_futures")).state is CircuitState.CLOSED
+
+
+def _eia_body(values: list[float | None], series: str = "WCESTUS1", unit: str = "MBBL") -> dict[str, Any]:
+    end = datetime(2026, 10, 16, tzinfo=UTC)
+    rows = [
+        {"period": (end - timedelta(weeks=k)).strftime("%Y-%m-%d"), "series": series, "value": v, "units": unit}
+        for k, v in enumerate(reversed(values))
+    ]
+    return {"response": {"frequency": "weekly", "data": rows}}
+
+
+def _crude(n: int = 60) -> list[float | None]:
+    return [420_000.0 + 6_000 * math.sin(k / 2.3) + 900 * math.cos(k * 1.7) for k in range(n)]
+
+
+@pytest.mark.parametrize("factor", [0.1, 0.5, 1.5, 1.8])
+async def test_impossible_latest_inventory_change_is_held(ctx_factory: Any, factor: float) -> None:
+    """A stock level cannot halve or grow 50% in a week: a decimal/unit error, held until confirmed (D-031)."""
+    values = _crude()
+    values[-1] = (values[-1] or 0.0) * factor
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=_eia_body(values)), **SETTINGS)
+    adapter = EiaAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1"}))
+    await adapter.aclose()
+    assert len(resp.quarantined) == 1
+    assert resp.as_of == datetime(2026, 10, 9, tzinfo=UTC)
+
+
+async def test_eia_nulls_unnamed_series_and_error_bodies(ctx_factory: Any) -> None:
+    async def fetch(body: dict[str, Any]) -> DataResponse:
+        ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=body), **SETTINGS)
+        adapter = EiaAdapter(ctx)
+        try:
+            return await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1"}))
+        finally:
+            await adapter.aclose()
+
+    with pytest.raises(DataQualityError, match="missing"):
+        await fetch(_eia_body([None] * 20))
+    latest_missing = await fetch(_eia_body([*_crude(30), None]))
+    assert latest_missing.as_of == datetime(2026, 10, 9, tzinfo=UTC)  # dated by the newest week with a value
+    unnamed = _eia_body(_crude(30))
+    del unnamed["response"]["data"][0]["series"]
+    with pytest.raises(DataQualityError, match="schema"):
+        await fetch(unnamed)
+    with pytest.raises(ProviderDown, match="unavailable"):
+        await fetch({"error": "Service unavailable", "code": 503})
+    with pytest.raises(InvalidArgs):
+        await fetch({"error": "invalid facet value", "code": 400})
+
+
+async def test_treasury_maintenance_page_trips_the_breaker(ctx_factory: Any) -> None:
+    ctx, rec = ctx_factory(lambda _r: httpx.Response(200, text="<html>down</html>"), cache=False)
+    adapter = TreasuryAdapter(ctx)
+    request = DataRequest(kind=RequestKind.TREASURY_CURVE, params={"year": 2026})
+    for _ in range(5):
+        with pytest.raises(ProviderDown, match="malformed"):
+            await adapter.fetch(request)
+    with pytest.raises(ProviderDown, match="circuit open"):
+        await adapter.fetch(request)
+    await adapter.aclose()
+    assert len(rec.requests) == 5
+
+
+async def test_treasury_gaps_warn_and_a_frozen_curve_blocks() -> None:
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+
+    def drop_day(rows: list[list[str]]) -> None:
+        del rows[5]
+
+    resp = await _replay(TreasuryAdapter, request, {0: _csv_edit(drop_day)})
+    assert any("calendar_gaps" in w for w in resp.quality.warnings)
+
+    def freeze(rows: list[list[str]]) -> None:
+        for r in rows[2:6]:
+            r[1:] = rows[1][1:]  # the four days before the latest repeat its curve exactly
+
+    with pytest.raises(DataQualityError, match="stale_quotes"):
+        await _replay(TreasuryAdapter, request, {0: _csv_edit(freeze)})
+
+
+async def test_cot_empty_scaled_and_wrong_kind_rows() -> None:
+    request = _plan(CftcAdapter, RequestKind.COT, report_type="disaggregated", futures_only=None)
+
+    def zero(body: str) -> str:
+        rows = json.loads(body)
+        rows[0] = {k: ("0" if k.endswith("_all") or "positions" in k else v) for k, v in rows[0].items()}
+        return json.dumps(rows)
+
+    with pytest.raises(DataQualityError, match="positive_open_interest"):
+        await _replay(CftcAdapter, request, {0: zero})
+
+    def scaled(body: str) -> str:
+        rows = json.loads(body)
+        rows[0] = {
+            k: (str(float(v) * 10) if ("positions" in k or k == "open_interest_all") else v) for k, v in rows[0].items()
+        }
+        return json.dumps(rows)
+
+    resp = await _replay(CftcAdapter, request, {0: scaled})  # still balances, but OI jumped tenfold in a week
+    assert len(resp.quarantined) == 1
+    assert any("open_interest_outliers" in w for w in resp.quality.warnings)
+
+    def combined(body: str) -> str:
+        rows = json.loads(body)
+        rows[3]["futonly_or_combined"] = "Combined"
+        return json.dumps(rows)
+
+    with pytest.raises(DataQualityError, match="schema"):
+        await _replay(CftcAdapter, request, {0: combined})
+
+
+async def test_kraken_future_ticker_gap_and_misaligned_bar(ctx_factory: Any) -> None:
+    def future(t: dict[str, Any]) -> None:
+        t["lastTime"] = "2031-01-01T00:00:00.000Z"
+
+    resp = await _derivatives(future, symbol="PF_ETHUSD")
+    assert {m.symbol for m in resp.records if isinstance(m, CryptoDerivativeMetric)} == {"BTC/USD:USD"}
+
+    def everything_bad(t: dict[str, Any]) -> None:
+        t.update(openInterest=-1.0, markPrice=-1.0, indexPrice=-1.0, vol24h=-1.0, fundingRate=-5.0)
+
+    request = _plan(KrakenFuturesAdapter, RequestKind.CRYPTO_DERIVATIVES)
+    cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request))
+
+    def all_bad(body: str) -> str:
+        data = json.loads(body)
+        for t in data.get("tickers", []):
+            everything_bad(t)
+        return json.dumps(data)
+
+    with pytest.raises(DataQualityError, match="every record was quarantined"):
+        await _replay(KrakenFuturesAdapter, request, dict.fromkeys(range(len(cassette.interactions)), all_bad))
+
+    hour = datetime(2026, 10, 21, 10, tzinfo=UTC)
+    candles = [
+        {"time": int((hour - timedelta(hours=k + 1)).timestamp() * 1000), "open": "100", "high": "101",
+         "low": "99", "close": f"{100 + 0.1 * math.sin(k)}", "volume": "5"}
+        for k in range(40, -1, -1)
+        if not 10 <= k < 20  # a ten-hour hole
+    ]  # fmt: skip
+    ctx, _ = ctx_factory(_kraken_handler(candles), now=hour + timedelta(minutes=5), cache=False)
+    adapter = KrakenFuturesAdapter(ctx)
+    with pytest.raises(DataQualityError, match="calendar_gaps"):
+        await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "BTC/USD:USD", "timeframe": "1h"}))
+    await adapter.aclose()
+
+    day = datetime(2026, 10, 21, tzinfo=UTC)
+    daily = [
+        {"time": int((day - timedelta(days=k + 1, hours=-7 if k == 0 else 0)).timestamp() * 1000), "open": "100",
+         "high": "101", "low": "99", "close": "100.5", "volume": "5"}
+        for k in range(20, -1, -1)
+    ]  # fmt: skip
+    ctx, _ = ctx_factory(_kraken_handler(daily), now=day + timedelta(hours=12), cache=False)
+    adapter = KrakenFuturesAdapter(ctx)
+    with pytest.raises(DataQualityError, match="schema"):  # the newest "daily" bar starts at 07:00 UTC
+        await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "BTC/USD:USD", "timeframe": "1d"}))
+    await adapter.aclose()
+
+
+async def test_sec_fact_filed_before_period_end_and_missing_cik() -> None:
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+
+    def lookahead(data: dict[str, Any]) -> None:
+        concept = next(iter(data["facts"]["us-gaap"].values()))
+        unit = next(iter(concept["units"].values()))
+        fact = next(f for f in unit if f.get("form") in ("10-K", "10-Q"))
+        fact["filed"] = "2000-01-01"
+
+    with pytest.raises(DataQualityError, match="schema"):
+        await _replay(SecEdgarAdapter, request, {0: _json_edit(lookahead)})
+
+    def no_cik(data: dict[str, Any]) -> None:
+        del data["cik"]
+
+    with pytest.raises(DataQualityError, match="subject_matches_request"):
+        await _replay(SecEdgarAdapter, request, {0: _json_edit(no_cik)})
+
+
+async def test_fred_and_twelvedata_refuse_a_body_for_another_series(ctx_factory: Any) -> None:
+    info, observations = _fred_bodies(series="UNRATE")
+    ctx, _ = ctx_factory(
+        lambda r: httpx.Response(200, text=info if r.url.path.endswith("/series") else observations),
+        flags={"provider_fred": True},
+        **SETTINGS,
+    )
+    adapter = FredAdapter(ctx)
+    with pytest.raises(DataQualityError, match="UNRATE"):
+        await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"}))
+    await adapter.aclose()
+
+    request = _plan(TwelveDataAdapter, RequestKind.BARS)
+
+    def other_symbol(data: dict[str, Any]) -> None:
+        data["meta"]["symbol"] = "GBP/USD"
+
+    with pytest.raises(DataQualityError, match="GBP/USD"):
+        await _replay(TwelveDataAdapter, request, {0: _json_edit(other_symbol)})
+
+
+async def test_oversized_bodies_and_long_retry_after_are_bounded(ctx_factory: Any) -> None:
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, content=b"x" * 2048))
+    fetcher = HttpFetcher(
+        provider="cftc",
+        allowed_hosts=frozenset({"publicreporting.cftc.gov"}),
+        limiter=ctx.limiter,
+        rate_limit=RateLimit(),
+        breaker=ctx.breaker,
+        transport=ctx.transport,
+        max_body_bytes=1024,
+    )
+    with pytest.raises(ProviderDown, match="larger than"):
+        await fetcher.get("https://publicreporting.cftc.gov/resource/x.json")
+    await fetcher.aclose()
+
+    sleeps: list[float] = []
+    ctx, rec = ctx_factory(lambda _r: httpx.Response(429, headers={"retry-after": "120"}))
+    fetcher = HttpFetcher(
+        provider="cftc",
+        allowed_hosts=frozenset({"publicreporting.cftc.gov"}),
+        limiter=ctx.limiter,
+        rate_limit=RateLimit(),
+        breaker=ctx.breaker,
+        transport=ctx.transport,
+        sleep=_record_sleep(sleeps),
+        max_total_wait_s=60,
+    )
+    with pytest.raises(RateLimited) as exc:
+        await fetcher.get("https://publicreporting.cftc.gov/resource/x.json")
+    await fetcher.aclose()
+    assert sleeps == []  # a 120 s hint exceeds the 60 s budget: report the rate limit instead of stalling
+    assert exc.value.retry_after_s == 120
+    assert len(rec.requests) == 1
+
+
+@pytest.mark.parametrize("name", ["pwd", "pass", "authorization", "access_key_id", "Authorization"])
+def test_more_credential_names_are_redacted(name: str) -> None:
+    assert redact_params({name: "v" * 12}) == {name: "REDACTED"}

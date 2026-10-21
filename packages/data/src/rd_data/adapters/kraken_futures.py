@@ -61,6 +61,8 @@ METRIC_RANGES: Mapping[str, tuple[float | None, float | None]] = {
 #: Largest relative gap between mark and index price accepted; a perpetual's mark tracks its index closely, so a
 #: wider gap means one of the two (and the funding derived from the mark) is a bad print (D-033).
 MAX_MARK_INDEX_GAP = 0.10
+#: Clock skew tolerated before a ticker time counts as being in the future.
+FUTURE_SLACK = timedelta(minutes=5)
 #: How long the instrument list is reused before it is fetched again.
 MARKETS_TTL = timedelta(hours=1)
 #: A symbol whose ticker is older than the §5.4 block threshold for funding/OI is quarantined from the response.
@@ -194,7 +196,7 @@ class KrakenFuturesAdapter(BaseAdapter):
             )
         if request.kind is RequestKind.BARS:
             return self._parse_bars(request, parsed["ohlcv"], raw)
-        return self._parse_derivatives(request, parsed)
+        return self._parse_derivatives(request, parsed, raw)
 
     def _parse_bars(self, request: DataRequest, rows: list[list[Any]], raw: RawPayload) -> ParseResult:
         symbol = str(request.params["symbol"])
@@ -205,6 +207,9 @@ class KrakenFuturesAdapter(BaseAdapter):
         for row in rows:
             try:
                 ts = datetime.fromtimestamp(int(row[0]) / 1000, tz=UTC)
+                if int(ts.timestamp()) % int(width.total_seconds()):
+                    rejected += 1  # candle not aligned to its interval, e.g. a 07:00 "daily" bar
+                    continue
                 if ts + width > now:
                     continue  # candle still forming: never present an incomplete bar as a close
                 bars.append(
@@ -224,7 +229,11 @@ class KrakenFuturesAdapter(BaseAdapter):
         if not bars and not rejected:
             raise NotFound(f"kraken_futures: no closed {tf} candles for {symbol}", provider=self.name)
         report, usable = check_bars(
-            bars, subject=f"kraken_futures:{symbol}:{tf}", calendar=ContinuousCalendar(), rejected_rows=rejected
+            bars,
+            subject=f"kraken_futures:{symbol}:{tf}",
+            calendar=ContinuousCalendar(),
+            rejected_rows=rejected,
+            bar_width=width,
         )
         quarantined = tuple(b for b in bars if b not in usable)
         as_of = usable[-1].ts if usable else None
@@ -254,7 +263,7 @@ class KrakenFuturesAdapter(BaseAdapter):
             freshness_as_of=freshness_as_of,
         )
 
-    def _parse_derivatives(self, request: DataRequest, parsed: Mapping[str, Any]) -> ParseResult:
+    def _parse_derivatives(self, request: DataRequest, parsed: Mapping[str, Any], raw: RawPayload) -> ParseResult:
         metrics: list[CryptoDerivativeMetric] = []
         rejected = 0
         for symbol, fr in parsed["funding"].items():
@@ -293,7 +302,10 @@ class KrakenFuturesAdapter(BaseAdapter):
         ]
         out_of_range = {i for c in range_checks for i in c.indices}
         now = self.ctx.clock.now()
-        stale_symbols = sorted({m.symbol for m in metrics if now - m.ts > SYMBOL_MAX_AGE})
+        # Too old to use, or stamped after we fetched it (a clock or data error): either way not shown.
+        stale_symbols = sorted(
+            {m.symbol for m in metrics if now - m.ts > SYMBOL_MAX_AGE or m.ts > raw.retrieved_at + FUTURE_SLACK}
+        )
         diverged = _mark_index_divergence(metrics)
         quarantine_idx = sorted(
             out_of_range
@@ -304,7 +316,7 @@ class KrakenFuturesAdapter(BaseAdapter):
         requested = [x.strip() for x in str(request.params["symbols"]).split(",")]
         missing = [x for x in requested if x not in {m.symbol for m in metrics}]
         extra_checks = (
-            _warning(stale_symbols, f"older than {SYMBOL_MAX_AGE} quarantined", "stale_symbols"),
+            _warning(stale_symbols, f"older than {SYMBOL_MAX_AGE} or future-dated, quarantined", "stale_symbols"),
             _warning(diverged, f"mark and index more than {MAX_MARK_INDEX_GAP:.0%} apart quarantined", "mark_vs_index"),
             _warning(missing, "requested but not returned by the exchange", "missing_symbols"),
         )
