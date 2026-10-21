@@ -69,6 +69,7 @@ class TwelveDataAdapter(BaseAdapter):
         RequestKind.BARS: frozenset({"symbol", "interval", "asset_class", "outputsize"})
     }
     credential_setting = "twelvedata_api_key"
+    forbidden_is_licence = True
 
     def _api_key(self) -> str:
         key = self.ctx.settings.twelvedata_api_key

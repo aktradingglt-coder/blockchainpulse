@@ -205,6 +205,8 @@ class BaseAdapter(ABC):
     cache_ttl_s: ClassVar[Mapping[RequestKind, int]] = {}
     #: Parameter names each request kind accepts; anything else is refused (it would also split the cache key).
     params_allowed: ClassVar[Mapping[RequestKind, frozenset[str]]]
+    #: Whether HTTP 403 means "not covered by the plan" for this vendor (a licence limit) rather than a bad key.
+    forbidden_is_licence: ClassVar[bool] = False
     #: Settings field holding the credential this provider needs (``None`` = keyless), for the status page.
     credential_setting: ClassVar[str | None] = None
 
@@ -219,6 +221,7 @@ class BaseAdapter(ABC):
             transport=ctx.transport,
             user_agent=self.user_agent(),
             record_ok=False,  # success is recorded after the body parses (_parse_checked)
+            forbidden_is_licence=self.forbidden_is_licence,
         )
 
     def user_agent(self) -> str:
@@ -328,9 +331,9 @@ class BaseAdapter(ABC):
         if raw is None or parsed is None:
             raw = await self._download_checked(request)
             parsed = await self._parse_checked(request, raw, from_cache=False)
-            await self.ctx.breaker.note_quality(
-                self.name, None if parsed.quality.passed else "; ".join(parsed.quality.failures)
-            )
+            # The status page is public: it names the failing checks, never the request (company, series, symbol).
+            failing = sorted({c.name for c in parsed.quality.checks if not c.passed and c.blocking})
+            await self.ctx.breaker.note_quality(self.name, ", ".join(failing) if failing else None)
             parsed.quality.require_passed(provider=self.name)
             if cacheable:  # only payloads that passed QA are cached
                 assert self.ctx.cache is not None  # noqa: S101 - narrowed by ``cacheable``

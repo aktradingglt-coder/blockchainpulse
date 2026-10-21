@@ -202,7 +202,9 @@ class KrakenFuturesAdapter(BaseAdapter):
             raise NotFound(f"kraken_futures: {exc}", provider=self.name) from exc
         except (ccxt_async.RateLimitExceeded, ccxt_async.DDoSProtection) as exc:
             raise RateLimited(f"kraken_futures: {type(exc).__name__}", provider=self.name) from exc
-        except ccxt_async.BadRequest as exc:  # our request was wrong; the exchange is up
+        except ccxt_async.BadRequest as exc:  # our request was wrong (or names something the exchange no longer has)
+            if "notfound" in str(exc).lower().replace(" ", ""):
+                raise NotFound(f"kraken_futures: {exc}", provider=self.name) from exc
             raise InvalidArgs(f"kraken_futures: {exc}", provider=self.name) from exc
         except ccxt_async.BaseError as exc:
             # The exchange answered with an error body (maintenance, unavailable, auth): an outage for the breaker.
@@ -425,4 +427,6 @@ def _window_size(bars: list[Bar], request: DataRequest) -> int:
     if since is None:
         return limit
     start = datetime.fromtimestamp(int(since) / 1000, tz=UTC)
-    return max(1, min(limit, sum(1 for b in bars if b.ts >= start)))
+    in_window = min(limit, sum(1 for b in bars if b.ts >= start))
+    # One more: the bar before the window, so a hole right at the start of the window is still seen as a gap.
+    return max(1, in_window + 1)

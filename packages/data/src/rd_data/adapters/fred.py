@@ -78,8 +78,11 @@ class FredAdapter(BaseAdapter):
         return "copyright" in notes.lower()
 
     def _parse(self, request: DataRequest, raw: RawPayload) -> ParseResult:
-        info = orjson.loads(raw.bodies[0]).get("seriess") or []
+        info_body = orjson.loads(raw.bodies[0])
         body = orjson.loads(raw.bodies[1])
+        if "seriess" not in info_body or "observations" not in body:
+            raise ProviderDown("fred: malformed response (not a FRED series payload)", provider=self.name)
+        info = info_body["seriess"]
         if not info:
             raise NotFound(f"fred: unknown series {request.params['series']}", provider=self.name)
         meta = info[0]
@@ -128,7 +131,8 @@ class FredAdapter(BaseAdapter):
             override = self.licence.model_copy(update={"commercial_use_allowed": False})
         if projections:
             notes.append(f"{projections} observation(s) dated after retrieval (projections) left out.")
-        latest_held = bool(obs) and obs[-1] not in usable
+        valued = [o for o in obs if o.value is not None]  # a trailing "." holiday row is not the latest value
+        latest_held = bool(valued) and valued[-1] not in usable
         start = _start_of(request)
         held = tuple(o for o in obs if o not in usable and (start is None or o.ts >= start))
         if start is not None:

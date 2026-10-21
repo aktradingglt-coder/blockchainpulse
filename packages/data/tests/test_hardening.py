@@ -11,7 +11,7 @@ import io
 import json
 import math
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +32,7 @@ from rd_data.cassette import Cassette, RecordingTransport, ReplayTransport
 from rd_data.errors import DataQualityError, InvalidArgs, LicenceBlocked, NotFound, ProviderDown, RateLimited, Stale
 from rd_data.freshness import ExchangeCalendar, Freshness
 from rd_data.http import HttpFetcher, redact_params
-from rd_data.quality import check_interval_gaps
+from rd_data.quality import check_cadence, check_interval_gaps
 from rd_data.recording import cassette_name
 from rd_data.registry import provider_statuses
 from rd_data.resilience import (
@@ -1120,7 +1120,7 @@ async def test_sec_fact_filed_before_period_end_and_missing_cik() -> None:
     def no_cik(data: dict[str, Any]) -> None:
         del data["cik"]
 
-    with pytest.raises(DataQualityError, match="subject_matches_request"):
+    with pytest.raises(ProviderDown, match="malformed"):  # EDGAR always names the company: not an EDGAR payload
         await _replay(SecEdgarAdapter, request, {0: _json_edit(no_cik)})
 
 
@@ -1781,7 +1781,7 @@ async def test_schema_drift_shows_on_the_status_page_without_opening_the_circuit
     await adapter.aclose()
     statuses = await provider_statuses({}, breaker, Settings())
     assert statuses["us_treasury"]["circuit"] == "closed"
-    assert "10 Yr" in statuses["us_treasury"]["last_quality_error"]
+    assert statuses["us_treasury"]["last_quality_error"] == "csv_header"  # check names only: the page is public
 
 
 async def test_physically_impossible_weekly_storage_change_is_held(ctx_factory: Any) -> None:
@@ -1820,3 +1820,157 @@ async def test_kraken_since_poll_gaps_outside_the_window_do_not_block(ctx_factor
     )
     await adapter.aclose()
     assert resp.records
+
+
+# ------------------------------------------------------------------------------------- review round 7 (P1)
+
+NEWEST_10Q = "0001018724-26-000026"
+
+
+def _scale_filing(accession: str, factor: float, *, concept: str | None = None, end: str | None = None) -> Mutator:
+    def edit(data: dict[str, Any]) -> None:
+        for name, body in data["facts"]["us-gaap"].items():
+            if concept is not None and name != concept:
+                continue
+            for facts in body["units"].values():
+                for f in facts:
+                    if f["accn"] == accession and (end is None or f["end"] == end):
+                        f["val"] = f["val"] * factor
+
+    return _json_edit(edit)
+
+
+@pytest.mark.parametrize("factor", [1000.0, 0.001])
+async def test_scale_error_in_the_newest_quarter_is_held(factor: float) -> None:
+    """The newest quarter exists in one filing only: it is judged against the same concept's neighbouring quarters."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    concept = "RevenueFromContractWithCustomerExcludingAssessedTax"
+    resp = await _replay(
+        SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10Q, factor, concept=concept, end="2026-06-30")}
+    )
+    newest = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept == concept and f.accession == NEWEST_10Q
+        and f.period_end.isoformat() == "2026-06-30"
+    ]  # fmt: skip
+    assert newest == []  # neither the quarter nor the half-year at the wrong scale is shown
+    held = [f for f in resp.quarantined if isinstance(f, FundamentalFact) and f.concept == concept]
+    assert len(held) >= 2
+
+
+async def test_a_mis_scaled_filing_is_held_whole() -> None:
+    """Every fact of the newest 10-Q x1000: the whole filing is withheld, and what is left (the April filing) is more
+    than 120 days old, so the response is honestly refused as stale rather than served with the wrong scale."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    with pytest.raises(Stale, match="2026-04-30"):
+        await _replay(SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10Q, 1000.0)})
+
+
+async def test_undecidable_scale_disagreement_holds_both_filings() -> None:
+    """Never serve the x1000 copy: when the neighbours cannot decide between two filings, both are held."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    concept = "AmortizationOfAcquiredIntangibleAssets"
+    resp = await _replay(SecEdgarAdapter, request, {0: _scale_filing("0001193125-13-028520", 1000.0, concept=concept)})
+    shown_2010 = [
+        f.value
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept == concept and f.period_end.isoformat() == "2010-12-31"
+        and f.period_start is not None and (f.period_end - f.period_start).days > 300
+    ]  # fmt: skip
+    # Two filings, each contradicting the other by x1000, and no third filing to side with either: nothing for this
+    # concept is shown from either filing (a guess could pick the wrong scale), and the hold is reported.
+    assert shown_2010 == []
+    assert all(f.value < 1e9 for f in resp.records if isinstance(f, FundamentalFact) and f.concept == concept)
+    assert any("scale_consistency" in w for w in resp.quality.warnings)
+
+
+async def test_hole_at_the_start_of_a_since_window_is_reported(ctx_factory: Any) -> None:
+    end = datetime(2026, 10, 21, 0, tzinfo=UTC)
+    server = _kraken_range_server(end, timedelta(hours=1), bad_last=False)
+    since_dt = end - timedelta(hours=6)
+
+    def holed(req: httpx.Request) -> httpx.Response:
+        resp = server(req)
+        if "/charts/" not in req.url.path:
+            return resp
+        data = json.loads(resp.content)
+        hole = {int((since_dt + timedelta(hours=h)).timestamp() * 1000) for h in range(3)}  # 18:00-20:00 missing
+        data["candles"] = [c for c in data["candles"] if c["time"] not in hole]
+        return httpx.Response(200, json=data)
+
+    ctx, _ = ctx_factory(holed, now=end + timedelta(minutes=5), cache=False)
+    adapter = KrakenFuturesAdapter(ctx)
+    params = {"symbol": "BTC/USD:USD", "timeframe": "1h", "since_ms": int(since_dt.timestamp() * 1000)}
+    with pytest.raises(DataQualityError, match="calendar_gaps"):
+        await adapter.fetch(DataRequest(kind=RequestKind.BARS, params=params))
+    await adapter.aclose()
+
+
+async def test_fred_trailing_holiday_row_and_wrong_shape(ctx_factory: Any) -> None:
+    values = [4.08 + 0.03 * math.sin(k) for k in range(60)]
+    values[-1] *= 10
+    info, obs_text = _fred_daily(values)
+    obs = json.loads(obs_text)
+    obs["observations"].append({"date": "2026-10-21", "value": "."})  # holiday row after the held value
+    ctx, _ = ctx_factory(
+        lambda r: httpx.Response(200, text=info if r.url.path.endswith("/series") else json.dumps(obs)),
+        now=datetime(2026, 10, 23, 12, tzinfo=UTC),
+        flags={"provider_fred": True},
+        **SETTINGS,
+    )
+    adapter = FredAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"}))
+    await adapter.aclose()
+    assert resp.freshness is not None
+    assert resp.freshness.as_of == resp.as_of
+
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json={}), flags={"provider_fred": True}, **SETTINGS)
+    adapter = FredAdapter(ctx)
+    with pytest.raises(ProviderDown, match="malformed"):
+        await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"}))
+    await adapter.aclose()
+
+
+async def test_sec_wrong_shape_is_an_outage_and_undated_facts_are_set_aside() -> None:
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    with pytest.raises(ProviderDown, match="malformed"):
+        await _replay(SecEdgarAdapter, request, {0: lambda _b: "{}"})
+
+    def undated(data: dict[str, Any]) -> None:
+        _revenue_fact(data)["filed"] = "not-a-date"
+
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(undated)})
+    assert any("point_in_time" in w for w in resp.quality.warnings)  # one bad date never blocks the company
+
+
+async def test_twelvedata_http_403_is_a_plan_limit(ctx_factory: Any) -> None:
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(403, json={}), flags={"provider_twelvedata": True}, **SETTINGS)
+    adapter = TwelveDataAdapter(ctx)
+    for _ in range(6):
+        with pytest.raises(LicenceBlocked):
+            await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "XAU/USD"}))
+    await adapter.aclose()
+    assert (await ctx.breaker.status("twelvedata")).state is CircuitState.CLOSED
+
+
+def test_single_missing_bar_warns_instead_of_blocking() -> None:
+    days = [date(2026, 10, 13) - timedelta(days=7 * i) for i in range(10) if i != 4]
+    res = check_cadence(days, period=timedelta(days=7))
+    assert not res.passed
+    assert not res.blocking  # 1 of 10 weeks: shown with a warning, not refused
+
+
+async def test_eia_weekly_change_hold_is_in_the_report(ctx_factory: Any) -> None:
+    storage = [3_500.0]
+    for k in range(59):
+        storage.append(storage[-1] + 90 * math.sin(k * 1.3) + 40 * math.cos(k * 2.1))
+    storage[-1] += 700
+    body = _eia_body(storage, series="NW2_EPG0_SWO_R48_BCF", unit="BCF")
+    ctx, _ = ctx_factory(
+        lambda _r: httpx.Response(200, json=body), now=datetime(2026, 10, 23, 12, tzinfo=UTC), **SETTINGS
+    )
+    adapter = EiaAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "NW2_EPG0_SWO_R48_BCF"}))
+    await adapter.aclose()
+    assert len(resp.quality.quarantined) == len(resp.quarantined) == 1

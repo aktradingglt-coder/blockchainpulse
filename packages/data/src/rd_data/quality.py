@@ -141,7 +141,7 @@ def check_cadence(
     """Regular series (weekly COT and inventories): missing periods between the first and last observation.
 
     Holiday shifts within ``tolerance`` are fine; a longer gap counts the periods it skips. Blocking above
-    ``max_gap_fraction`` of the expected periods, otherwise a warning that names the gaps.
+    ``max_gap_fraction`` of the expected periods (and more than one missing), otherwise a warning naming the gaps.
     """
     ordered = sorted({_as_date(t) for t in times})
     if len(ordered) < 2:
@@ -157,7 +157,7 @@ def check_cadence(
         return _ok("cadence_gaps", f"{len(ordered)} consecutive periods")
     sample = ", ".join(d.isoformat() for d in missing[:5])
     detail = f"{len(missing)} of {expected} expected periods missing (e.g. {sample})"
-    return _fail("cadence_gaps", detail, blocking=len(missing) / expected > max_gap_fraction)
+    return _fail("cadence_gaps", detail, blocking=len(missing) > 1 and len(missing) / expected > max_gap_fraction)
 
 
 def _as_date(value: datetime | date) -> date:
@@ -420,7 +420,7 @@ def check_gaps(
     if missing:
         sample = ", ".join(d.isoformat() for d in missing[:5])
         detail += f" (e.g. {sample})"
-        return _fail("calendar_gaps", detail, blocking=fraction > max_gap_fraction)
+        return _fail("calendar_gaps", detail, blocking=len(missing) > 1 and fraction > max_gap_fraction)
     return _ok("calendar_gaps", detail)
 
 
@@ -441,7 +441,7 @@ def check_interval_gaps(
     detail = f"{len(missing)} of {expected} expected {width} bars missing ({calendar.name})"
     if missing:
         detail += f" (e.g. {', '.join(m.isoformat() for m in missing[:3])})"
-        return _fail("calendar_gaps", detail, blocking=len(missing) / expected > max_gap_fraction)
+        return _fail("calendar_gaps", detail, blocking=len(missing) > 1 and len(missing) / expected > max_gap_fraction)
     return _ok("calendar_gaps", detail)
 
 

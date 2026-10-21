@@ -206,7 +206,7 @@ class EiaAdapter(BaseAdapter):
                         detail=f"latest week moved more than {info.max_step if info else 0:,.0f} in one week; held",
                     ),
                 ),
-                quality.quarantined,
+                tuple(sorted({*quality.quarantined, obs.index(step)})),
                 quality.record_count,
             )
         wanted = int(request.params.get("length", 260))

@@ -102,6 +102,12 @@ class SecEdgarAdapter(BaseAdapter):
 
     def _parse(self, request: DataRequest, raw: RawPayload) -> ParseResult:
         data = orjson.loads(raw.bodies[0])
+        shape = {RequestKind.FILINGS: "filings", RequestKind.COMPANY_FACTS: "facts"}.get(request.kind)
+        if not isinstance(data, dict) or (shape is not None and (shape not in data or "cik" not in data)):
+            # Not an EDGAR payload of the requested kind (e.g. {} or another document): an outage, never "not found"
+            raise ProviderDown(
+                f"sec: malformed response (expected an EDGAR {shape or 'ticker'} payload)", provider=self.name
+            )
         if request.kind is RequestKind.INSTRUMENTS:
             return self._parse_tickers(data)
         if request.kind is RequestKind.FILINGS:
@@ -232,7 +238,7 @@ class SecEdgarAdapter(BaseAdapter):
                             continue
                         filed = _date_or_none([fact.get("filed")], 0)
                         end = _date_or_none([fact.get("end")], 0)
-                        if filed is not None and (filed > latest_allowed or (end is not None and filed < end)):
+                        if filed is None or end is None or filed > latest_allowed or filed < end:
                             # filed in the future, or before the period it reports ended: not point-in-time correct.
                             # One such fact is set aside (reported) rather than blocking the company's other facts.
                             impossible += 1
@@ -269,16 +275,14 @@ class SecEdgarAdapter(BaseAdapter):
                 "scale_consistency",
                 passed=not held,
                 blocking=False,
-                detail=f"{len(held)} fact(s) a power of 1000 away from another filing of the same period quarantined"
-                if held
-                else "ok",
+                detail=f"{len(held)} fact(s) with a likely scale error (x1000) quarantined" if held else "ok",
                 indices=tuple(sorted(held)),
             ),
             CheckResult(
                 "point_in_time",
                 passed=not impossible,
                 blocking=False,
-                detail=f"{impossible} fact(s) filed in the future or before their period ended, left out"
+                detail=f"{impossible} fact(s) undated, filed in the future or before their period ended, left out"
                 if impossible
                 else "ok",
             ),
@@ -286,7 +290,7 @@ class SecEdgarAdapter(BaseAdapter):
                 "scale_outliers",
                 passed=not flagged,
                 blocking=False,
-                detail=f"{len(flagged)} fact(s) a power of 1000 from the concept's usual size, kept for review"
+                detail=f"{len(flagged)} recent fact(s) over 300x from their neighbouring periods, kept for review"
                 if flagged
                 else "ok",
                 indices=tuple(sorted(flagged)),
@@ -316,52 +320,147 @@ class SecEdgarAdapter(BaseAdapter):
         ]
 
 
-#: How close (in log10) a ratio must be to 10^3, 10^6, ... to count as a units/decimals scale error.
+#: How close (in log10) two filings' values must be to a ratio of 10^3, 10^6, ... to count as a scale error.
 SCALE_TOLERANCE = 0.02
-#: A single fact this many orders of magnitude from its concept's median is only flagged if it is also scale-like.
-SCALE_FLAG_DISTANCE = 2.5
+#: Neighbouring periods (same concept, unit and duration) a fact is compared with.
+NEIGHBOURS = 4
+#: Orders of magnitude from the neighbours beyond which a fact is flagged (genuine one-offs reach ~3 on real data).
+FLAG_DISTANCE = 2.5
+#: Flags (not holds) are raised only on the most recent filings, so years-old one-offs do not clutter every response.
+FLAG_FILINGS = 4
+#: Orders of magnitude from the neighbours beyond which a fact is held whatever the concept (none on real data).
+HOLD_DISTANCE = 3.5
+#: A concept whose facts usually sit within 10^0.15 (x1.4) of their neighbours is "stable": there, a fact about a power
+#: of 1000 (+/- 10^0.5) from its neighbours is held, not just flagged.
+STABLE_SPREAD = 0.15
+NEAR_POWER = 0.5
+#: How much closer (orders of magnitude) to its neighbours the reference filing must be to decide a disagreement.
+DECISIVE_MARGIN = 1.0
+#: Share of an accession's comparative facts that must be a power of 1000 from other filings to hold the whole filing.
+FILING_SCALE_SHARE = 0.5
 
 
-def _scale_like(log_ratio: float) -> bool:
+def _scale_like(log_ratio: float, tolerance: float = SCALE_TOLERANCE) -> bool:
     k = round(log_ratio / 3)
-    return k != 0 and abs(log_ratio - 3 * k) < SCALE_TOLERANCE
+    return k != 0 and abs(log_ratio - 3 * k) < tolerance
+
+
+def _duration(f: FundamentalFact) -> int | None:
+    return None if f.period_start is None else round((f.period_end - f.period_start).days / 91)
 
 
 def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
-    """XBRL scale errors (thousands entered as units, millions as thousands): (quarantine, flag).
+    """XBRL scale errors (thousands entered as units, millions as thousands): (quarantine, flag). See D-036.
 
-    Restatements legitimately change a period's value across filings (a 20:1 split restates share counts; real
-    AMZN data has cross-filing ratios up to 41), so only disagreements of almost exactly a power of 1000 count. Within
-    one period, the filing closest to the concept's usual size is the reference and filings a power of 1000 away
-    from it are quarantined (none of the 9,000 multi-filing periods in the recorded AMZN facts trips this). A lone
-    fact a power of 1000 from the concept's median is flagged but kept: genuine one-off items do that (D-036).
+    Each fact is compared with the nearest NEIGHBOURS periods of the same concept, unit and duration. Measured on the
+    recorded AMZN company facts (28,891 facts, 9,052 periods filed more than once): legitimate restatements reach a
+    cross-filing ratio of 41 (a 20:1 split), and genuine one-offs sit up to ~10^3 from their neighbours, so:
+
+    * held — within one period, filings a power of 1000 from the filing closest to the neighbours; a fact ~a power of
+      1000 from its neighbours on a stable concept; any fact more than 10^HOLD_DISTANCE from its neighbours; and every
+      fact of a filing whose comparatives are mostly a power of 1000 from the other filings (a mis-scaled filing);
+    * flagged — any other fact more than 10^FLAG_DISTANCE from its neighbours (kept, for review).
     """
-    logs: dict[tuple[str, str], list[float]] = {}
-    for f in records:
-        if f.value:
-            logs.setdefault((f.concept, f.unit), []).append(math.log10(abs(f.value)))
-    medians = {k: statistics.median(v) for k, v in logs.items()}
-    groups: dict[tuple[str, str, date | None, date], list[int]] = {}
+    logs = [math.log10(abs(f.value)) if f.value else None for f in records]
+    by_period: dict[_PeriodKey, list[int]] = {}
     for i, f in enumerate(records):
-        if f.value:
-            groups.setdefault((f.concept, f.unit, f.period_start, f.period_end), []).append(i)
+        if logs[i] is not None:
+            by_period.setdefault((f.concept, f.unit, _duration(f), f.period_end), []).append(i)
+    distance = _neighbour_distances(records, logs, by_period)
+    held, flagged = _fact_holds(records, distance)
+    held |= _filing_disagreements(records, logs, by_period, distance)
+    return held, flagged - held
+
+
+_SeriesKey = tuple[str, str, int | None]
+_PeriodKey = tuple[str, str, int | None, date]
+
+
+def _neighbour_distances(
+    records: list[FundamentalFact], logs: list[float | None], by_period: dict[_PeriodKey, list[int]]
+) -> dict[int, float]:
+    """Orders of magnitude between each fact and the nearest NEIGHBOURS periods of its series, as reported by *other*
+    filings (a mis-scaled filing cannot vouch for itself)."""
+    series: dict[_SeriesKey, dict[date, list[tuple[str, float]]]] = {}
+    for (concept, unit, dur, end), idx in by_period.items():
+        series.setdefault((concept, unit, dur), {})[end] = [
+            (records[i].accession, v) for i in idx if (v := logs[i]) is not None
+        ]
+    distance: dict[int, float] = {}
+    for (concept, unit, dur, end), idx in by_period.items():
+        periods = sorted((e for e in series[(concept, unit, dur)] if e != end), key=lambda e: abs((e - end).days))
+        for i in idx:
+            levels: list[float] = []
+            for e in periods:
+                values = [v for acc, v in series[(concept, unit, dur)][e] if acc != records[i].accession]
+                if values:
+                    levels.append(statistics.median(values))
+                if len(levels) == NEIGHBOURS:
+                    break
+            value = logs[i]
+            if len(levels) >= 2 and value is not None:
+                distance[i] = abs(value - statistics.median(levels))
+    return distance
+
+
+def _fact_holds(records: list[FundamentalFact], distance: dict[int, float]) -> tuple[set[int], set[int]]:
+    """Per fact: held when far beyond what its series ever does, flagged (recent filings only) when unusual."""
+    spread: dict[_SeriesKey, list[float]] = {}
+    for i, d in distance.items():
+        f = records[i]
+        spread.setdefault((f.concept, f.unit, _duration(f)), []).append(d)
+    typical = {k: statistics.median(v) for k, v in spread.items()}
+    filed_on: dict[str, date] = {}
+    for f in records:
+        filed_on[f.accession] = max(filed_on.get(f.accession, f.filed), f.filed)
+    recent = set(sorted(filed_on, key=filed_on.__getitem__)[-FLAG_FILINGS:])
     held: set[int] = set()
-    for (concept, unit, _, _), idx in groups.items():
-        if len(idx) < 2:
-            continue
-        med = medians[(concept, unit)]
-        ref = min(idx, key=lambda i: abs(math.log10(abs(records[i].value)) - med))
-        ref_log = math.log10(abs(records[ref].value))
-        held.update(i for i in idx if _scale_like(math.log10(abs(records[i].value)) - ref_log))
-    flagged = {
-        i
-        for i, f in enumerate(records)
-        if f.value
-        and i not in held
-        and abs(d := math.log10(abs(f.value)) - medians[(f.concept, f.unit)]) > SCALE_FLAG_DISTANCE
-        and _scale_like(d)
-    }
+    flagged: set[int] = set()
+    for i, d in distance.items():
+        f = records[i]
+        stable = typical[(f.concept, f.unit, _duration(f))] < STABLE_SPREAD
+        if d > HOLD_DISTANCE or (d > FLAG_DISTANCE and stable and _scale_like(d, NEAR_POWER)):
+            held.add(i)
+        elif d > FLAG_DISTANCE and f.accession in recent:
+            flagged.add(i)  # history is not re-flagged on every response: only the filings reports actually use
     return held, flagged
+
+
+def _filing_disagreements(
+    records: list[FundamentalFact],
+    logs: list[float | None],
+    by_period: dict[_PeriodKey, list[int]],
+    distance: dict[int, float],
+) -> set[int]:
+    """Periods filed more than once: filings a power of 1000 from the reference filing (the one closest to its
+    independent neighbours) are held. When the neighbours do not clearly side with one filing, the disagreeing
+    filings' facts of that concept are all held (a guess could pick the wrong scale). A filing whose comparatives
+    mostly disagree by a power of 1000 is held whole."""
+    held: set[int] = set()
+    off_by_accession: dict[str, list[bool]] = {}
+    ambiguous: set[tuple[str, str, str]] = set()
+    for idx in by_period.values():
+        if len({records[i].accession for i in idx}) < 2:
+            continue
+        ref = min(idx, key=lambda i: distance.get(i, math.inf))
+        ref_log = logs[ref]
+        offs = [i for i in idx if (v := logs[i]) is not None and ref_log is not None and _scale_like(v - ref_log)]
+        if not offs:
+            continue
+        margin = min(distance.get(i, math.inf) for i in offs) - distance.get(ref, math.inf)
+        if not margin >= DECISIVE_MARGIN:
+            ambiguous.update((records[i].concept, records[i].unit, records[i].accession) for i in idx)
+            continue
+        held.update(offs)
+        for i in idx:
+            if i != ref:
+                off_by_accession.setdefault(records[i].accession, []).append(i in offs)
+    held.update(i for i, f in enumerate(records) if (f.concept, f.unit, f.accession) in ambiguous)
+    bad_filings = {
+        acc for acc, offs in off_by_accession.items() if sum(offs) >= 3 and sum(offs) / len(offs) >= FILING_SCALE_SHARE
+    }
+    held.update(i for i, f in enumerate(records) if f.accession in bad_filings)
+    return held
 
 
 def _date_or_none(values: Any, i: int) -> date | None:  # noqa: ANN401 - provider arrays are untyped

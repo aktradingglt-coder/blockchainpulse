@@ -21,7 +21,7 @@ import orjson
 
 from rd_core.logging import get_logger
 from rd_core.redaction import redact_text
-from rd_data.errors import InvalidArgs, NotFound, ProviderDown, RateLimited
+from rd_data.errors import InvalidArgs, LicenceBlocked, NotFound, ProviderDown, RateLimited
 from rd_data.resilience import (
     RETRYABLE_STATUS,
     CircuitBreaker,
@@ -155,6 +155,7 @@ class HttpFetcher:
         record_ok: bool = True,
         max_body_bytes: int = 64 * 1024 * 1024,
         max_total_wait_s: float = 60.0,
+        forbidden_is_licence: bool = False,
     ) -> None:
         self.provider = provider
         self._hosts = allowed_hosts
@@ -178,6 +179,9 @@ class HttpFetcher:
         self._max_body = max_body_bytes
         # Total time one call may spend waiting between retries, Retry-After included.
         self._max_wait = max_total_wait_s
+        # Some vendors answer HTTP 403 for a symbol or endpoint the plan does not cover: a licence limit for that
+        # request, not an outage (it must not open the circuit for every other request).
+        self._forbidden_is_licence = forbidden_is_licence
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -192,6 +196,9 @@ class HttpFetcher:
             status = 401  # e.g. FRED answers an unregistered or revoked key with HTTP 400
         if status == 400 and "does not exist" in text:
             status = 404  # e.g. FRED answers an unknown series with HTTP 400
+        if status == 403 and self._forbidden_is_licence:
+            await self._breaker.record_success(self.provider)
+            return LicenceBlocked(f"{self.provider}: not covered by the plan (HTTP 403)", provider=self.provider)
         if status in (401, 403):
             # A rejected key or plan makes the provider unusable until someone acts: count it, so the status page
             # shows the source as down rather than healthy.
