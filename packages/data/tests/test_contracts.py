@@ -17,6 +17,7 @@ import pytest
 from rd_core.clock import FixedClock
 from rd_core.settings import Settings
 from rd_data.adapters.base import AdapterContext, BaseAdapter, DataRequest, DataResponse
+from rd_data.adapters.cftc import DATASETS
 from rd_data.cassette import Cassette, ReplayTransport
 from rd_data.recording import cassette_name
 from rd_data.registry import ADAPTERS
@@ -173,3 +174,15 @@ async def test_schema_derived_macro_series_parse() -> None:
             assert cassette.provenance == "schema-derived"
             obs = [r for r in response.records if isinstance(r, MacroObservation)]
             assert obs == sorted(obs, key=lambda o: o.ts)
+
+
+def test_every_cftc_dataset_id_is_verified_by_a_real_recording() -> None:
+    """Each Socrata dataset ID in the adapter was answered by the live CFTC API in CI (not taken from memory)."""
+    recorded_urls = {
+        i.url
+        for path in (CASSETTES / "cftc").glob("*.json")
+        for i in Cassette.load(path).interactions
+        if Cassette.load(path).provenance == "recorded" and i.status == 200
+    }
+    for key, dataset in DATASETS.items():
+        assert f"https://publicreporting.cftc.gov/resource/{dataset}.json" in recorded_urls, key

@@ -4,8 +4,8 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — built; awaiting the independent P1 review**
-(`CRITIC_LEDGER.md`). P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review round 1 returned ONE MORE PASS; all its
+findings fixed (ledger round 5); awaiting review round 2.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -40,13 +40,15 @@ _Last updated: 2026-10-21_
 | Shared rate limits (atomic Lua token buckets), circuit breaker, response cache — on real Valkey | `test_resilience.py`, `tests/integration/test_data_redis.py` |
 | Freshness per §5.4 with exchange calendars; COT measured from release (D-027) | `test_freshness.py` |
 | QA checks catch seeded bad data (gaps, spikes, duplicates, non-monotonic, OHLC violations, rejected rows) | `test_quality.py` |
+| Seeded bad data end to end through the adapters, mostly by corrupting real cassettes (bad prints, impossible values, NaN, wrong subject/series/year, renamed columns, malformed payloads, stale symbols) | `test_hardening.py` |
+| Provider circuit state on the status page | `/v1/status` → `providers`, `tests/integration/test_services.py` |
 | Adapters: CFTC (6 datasets), SEC EDGAR, US Treasury, EIA, Kraken Futures (CCXT), FRED (flag off), Twelve Data (flag off) | `test_adapters_unit.py`, `test_kraken_unit.py` |
-| Contract tests replay **real** responses recorded by CI (CFTC ×3, SEC ×3, Treasury, Kraken ×2) | `test_contracts.py`, `cassettes/`, workflow `record-cassettes.yml` |
+| Contract tests replay **real** responses recorded by CI (CFTC ×6 = every dataset ID, SEC ×3, Treasury, Kraken ×2) | `test_contracts.py`, `cassettes/`, workflow `record-cassettes.yml` |
 | Nightly live drift check against providers | `.github/workflows/live-smoke.yml`, `rd_data.recording --check-drift` |
-| Per-package coverage gate: rd_data 97.3% lines / 92.9% branches (floor 90%) | `make coverage`, `scripts/check_coverage.py` |
+| Per-package coverage gate: rd_data ≥ 90% lines and branches (measured in `CRITIC_LEDGER.md`) | `make coverage`, `scripts/check_coverage.py` |
 
 Schema-derived (synthetic, labelled) cassettes remain for keyed vendors EIA, FRED and Twelve Data until keys exist
-(D-011); the P11 release gate fails while any remain. Cassette size: ~10.5 MB in total, mostly SEC company facts (7.4 MB).
+(D-011); the P11 release gate fails while any remain. Cassette size: ~12 MB in total, mostly SEC company facts (7.4 MB).
 
 ## Next
 

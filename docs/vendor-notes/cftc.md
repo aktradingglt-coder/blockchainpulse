@@ -18,12 +18,15 @@ The IDs are constants in `packages/data/src/rd_data/adapters/cftc.py` (`DATASETS
 
 | Report | Dataset ID | Verified |
 | --- | --- | --- |
-| Legacy futures-only | `6dca-aqww` | recorded by CI run 39568643206 (S&P 500, 60 weeks parsed, long side = open interest) |
-| Disaggregated futures-only | `72hh-3qpy` | recorded by CI run 39568643206 (WTI crude) |
-| TFF futures-only | `gpe5-46if` | recorded by CI run 39568643206 (EUR FX) |
-| Legacy combined | `jun7-fc8e` | recording requested (`.github/recording-request.json`); **[unverified]** until recorded |
-| Disaggregated combined | `kh3c-gbw2` | recording requested; **[unverified]** until recorded |
-| TFF combined | `yw9f-hn96` | recording requested; **[unverified]** until recorded |
+| Legacy futures-only | `6dca-aqww` | recorded by CI runs 39568643206 and 39574074933 (S&P 500, 60 weeks, long side = open interest) |
+| Disaggregated futures-only | `72hh-3qpy` | recorded by CI runs 39568643206 and 39574074933 (WTI crude) |
+| TFF futures-only | `gpe5-46if` | recorded by CI runs 39568643206 and 39574074933 (EUR FX) |
+| Legacy combined | `jun7-fc8e` | recorded by CI run 39574074933 (S&P 500, 60 weeks, QA passed) |
+| Disaggregated combined | `kh3c-gbw2` | recorded by CI run 39574074933 (WTI crude, 60 weeks, QA passed) |
+| TFF combined | `yw9f-hn96` | recorded by CI run 39574074933 (EUR FX, 60 weeks, QA passed) |
+
+`test_every_cftc_dataset_id_is_verified_by_a_real_recording` fails if an ID in `DATASETS` has no recorded 200
+response.
 
 Field-name quirks seen in the recorded responses (handled in `FIELDS`): `noncomm_postions_spread_all` (sic),
 `swap__positions_short_all` (double underscore), and category fields without the `_all` suffix in the

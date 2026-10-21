@@ -226,11 +226,14 @@ class CftcAdapter(BaseAdapter):
 
     @staticmethod
     def recording_plan() -> list[DataRequest]:
-        """Requests the CI recording workflow captures (EUR FX TFF, WTI crude disaggregated, S&P legacy)."""
-        return [
-            DataRequest(kind=RequestKind.COT, params={"report_type": "tff", "market_code": "099741", "weeks": 60}),
-            DataRequest(
-                kind=RequestKind.COT, params={"report_type": "disaggregated", "market_code": "067651", "weeks": 60}
-            ),
-            DataRequest(kind=RequestKind.COT, params={"report_type": "legacy", "market_code": "13874A", "weeks": 60}),
-        ]
+        """Requests the CI recording workflow captures: every dataset in :data:`DATASETS`, futures-only and
+        combined (EUR FX TFF, WTI crude disaggregated, S&P 500 legacy)."""
+        markets = {"tff": "099741", "disaggregated": "067651", "legacy": "13874A"}
+        plan = []
+        for futures_only in (True, False):
+            for report_type, code in markets.items():
+                params: dict[str, str | int | bool] = {"report_type": report_type, "market_code": code, "weeks": 60}
+                if not futures_only:
+                    params["futures_only"] = False
+                plan.append(DataRequest(kind=RequestKind.COT, params=params))
+        return plan

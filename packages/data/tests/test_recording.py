@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from rd_data import recording
+from rd_data.adapters.cftc import CftcAdapter
 from rd_data.cassette import Cassette, RecordingTransport
 from rd_data.registry import ADAPTERS
 
@@ -43,10 +44,10 @@ def test_record_then_check_drift(
     summaries = [
         json.loads(line.removeprefix("RECORDING ")) for line in out.splitlines() if line.startswith("RECORDING {")
     ]
-    assert len(summaries) == 3  # the CFTC recording plan
+    assert len(summaries) == len(CftcAdapter.recording_plan())
     assert all(s["provider"] == "cftc" for s in summaries)
     written = sorted(tmp_path.glob("cftc/*.json"))
-    assert len(written) == 3
+    assert len(written) == len(CftcAdapter.recording_plan())
     assert Cassette.load(written[0]).provenance == "recorded"
     assert code in (0, 1)  # the synthetic rows only fit one market; others fail QA or market checks
 
@@ -59,7 +60,7 @@ def test_record_then_check_drift(
         for line in out.splitlines()
         if line.startswith("RECORDING {")
     ]
-    assert drift_lists == [[], [], []]
+    assert drift_lists == [[] for _ in CftcAdapter.recording_plan()]
     changed = [{**r, "open_interest_all": 1000} for r in rows]  # string -> number
     _patch_network(monkeypatch, changed)
     assert recording.main(["--providers", "cftc", "--out", str(tmp_path), "--check-drift"]) == 1
