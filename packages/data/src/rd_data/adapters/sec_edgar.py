@@ -7,10 +7,11 @@ fact carries its ``filed`` date and is usable only from then on (never by period
 
 from __future__ import annotations
 
+import itertools
 import math
 import re
 import statistics
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any, ClassVar
 
@@ -338,6 +339,9 @@ NEAR_POWER = 0.5
 DECISIVE_MARGIN = 1.0
 #: Share of an accession's comparative facts that must be a power of 1000 from other filings to hold the whole filing.
 FILING_SCALE_SHARE = 0.5
+#: Relative tolerance for "January-June = January-March + April-June" (each value is rounded where it was reported).
+ADDITIVITY_TOLERANCE = 0.01
+_CURRENCY = re.compile(r"^[A-Z]{3}$")
 
 
 def _scale_like(log_ratio: float, tolerance: float = SCALE_TOLERANCE) -> bool:
@@ -359,6 +363,8 @@ def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     * held — within one period, filings a power of 1000 from the filing closest to the neighbours; a fact ~a power of
       1000 from its neighbours on a stable concept; any fact more than 10^HOLD_DISTANCE from its neighbours; and every
       fact of a filing whose comparatives are mostly a power of 1000 from the other filings (a mis-scaled filing);
+    * held — facts that break "a period = its two halves" (e.g. January-June = January-March + April-June) when
+      scaling one filing's facts in that sum by a power of 1000 makes it add up;
     * flagged — any other fact more than 10^FLAG_DISTANCE from its neighbours (kept, for review).
     """
     logs = [math.log10(abs(f.value)) if f.value else None for f in records]
@@ -369,6 +375,7 @@ def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     distance = _neighbour_distances(records, logs, by_period)
     held, flagged = _fact_holds(records, distance)
     held |= _filing_disagreements(records, logs, by_period, distance)
+    held |= _additivity_errors(records, distance)
     return held, flagged - held
 
 
@@ -461,6 +468,66 @@ def _filing_disagreements(
     }
     held.update(i for i, f in enumerate(records) if f.accession in bad_filings)
     return held
+
+
+def _additivity_errors(records: list[FundamentalFact], distance: dict[int, float]) -> set[int]:
+    """Currency flows add up across periods: a fact for a period equals the facts for its two consecutive parts
+    (year-to-date = earlier year-to-date + latest quarter). The parts usually come from different filings, so a
+    mis-scaled filing breaks the sum even when the newest values have no other filing to be compared with."""
+    spans: dict[tuple[str, str, date, date], list[int]] = {}
+    for i, f in enumerate(records):
+        if f.period_start is not None and _CURRENCY.match(f.unit):
+            spans.setdefault((f.concept, f.unit, f.period_start, f.period_end), []).append(i)
+    starts: dict[tuple[str, str, date], list[date]] = {}
+    for concept, unit, start, end in spans:
+        starts.setdefault((concept, unit, end), []).append(start)
+    held: set[int] = set()
+    for (concept, unit, start, end), whole in spans.items():
+        for split in starts[(concept, unit, end)]:
+            first = spans.get((concept, unit, start, split - timedelta(days=1)))
+            if split > start and first:
+                for combo in itertools.product(whole, first, spans[(concept, unit, split, end)]):
+                    held |= _misscaled_in(records, combo, distance)
+    return held
+
+
+def _adds_up(values: Sequence[float]) -> bool:
+    whole, first, second = values
+    return abs(whole - first - second) <= ADDITIVITY_TOLERANCE * max(abs(v) for v in values)
+
+
+def _adds_up_with_every_term(values: Sequence[float]) -> bool:
+    """The sum holds and needs all three terms: rescaling one term into insignificance proves nothing."""
+    return _adds_up(values) and not any(
+        _adds_up([0.0 if j == k else v for j, v in enumerate(values)]) for k in range(3)
+    )
+
+
+def _misscaled_in(records: list[FundamentalFact], combo: tuple[int, ...], distance: dict[int, float]) -> set[int]:
+    """The facts of one ``whole = first + second`` sum that a power-of-1000 scale error in one filing explains."""
+    values = [records[i].value for i in combo]
+    accessions = {records[i].accession for i in combo}
+    if len(accessions) < 2 or _adds_up(values):
+        return set()  # one filing alone cannot show its own scale error; a sum that adds up shows none
+    fixes: list[list[int]] = []
+    for acc in sorted(accessions):
+        part = [i for i in combo if records[i].accession == acc]
+        for k in (-2, -1, 1, 2):
+            scaled = [v * 1000.0**k if records[i].accession == acc else v for i, v in zip(combo, values, strict=True)]
+            if _adds_up_with_every_term(scaled):
+                fixes.append(part)
+    if not fixes:
+        return set()  # not a scale error (e.g. a restatement): left to the other checks
+
+    def far(part: list[int]) -> float:
+        return statistics.mean(distance.get(i, math.nan) for i in part)
+
+    # Scaling one filing up is the same as scaling the other down: the side far from its neighbouring periods is the
+    # mis-scaled one. Without a clear answer every candidate is held (a guess could serve the wrong scale).
+    ranked = sorted(fixes, key=lambda part: -far(part) if not math.isnan(far(part)) else math.inf)
+    if len(ranked) == 1 or far(ranked[0]) - far(ranked[1]) >= DECISIVE_MARGIN:
+        return set(ranked[0])
+    return {i for part in fixes for i in part}
 
 
 def _date_or_none(values: Any, i: int) -> date | None:  # noqa: ANN401 - provider arrays are untyped

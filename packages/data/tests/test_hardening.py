@@ -20,6 +20,7 @@ import pytest
 
 from rd_core.clock import FixedClock
 from rd_core.settings import Settings
+from rd_data.adapters import sec_edgar
 from rd_data.adapters.base import AdapterContext, BaseAdapter, DataRequest, DataResponse, RequestKind
 from rd_data.adapters.cftc import CftcAdapter
 from rd_data.adapters.eia import EiaAdapter
@@ -1841,10 +1842,20 @@ def _scale_filing(accession: str, factor: float, *, concept: str | None = None, 
 
 
 @pytest.mark.parametrize("factor", [1000.0, 0.001])
-async def test_scale_error_in_the_newest_quarter_is_held(factor: float) -> None:
-    """The newest quarter exists in one filing only: it is judged against the same concept's neighbouring quarters."""
+@pytest.mark.parametrize(
+    "concept",
+    [
+        "RevenueFromContractWithCustomerExcludingAssessedTax",  # stable: judged against its neighbouring quarters
+        # volatile flows, where /1000 stays within 10^2.5 of the neighbours: caught because H1 != Q1 + Q2
+        "IncomeTaxExpenseBenefit",
+        "ComprehensiveIncomeNetOfTax",
+        "OtherNonoperatingIncomeExpense",
+    ],
+)
+async def test_scale_error_in_the_newest_quarter_is_held(factor: float, concept: str) -> None:
+    """The newest quarter exists in one filing only: it is judged against the same concept's neighbouring quarters
+    and against the sum it belongs to (the half-year = the earlier filing's first quarter + the newest quarter)."""
     request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
-    concept = "RevenueFromContractWithCustomerExcludingAssessedTax"
     resp = await _replay(
         SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10Q, factor, concept=concept, end="2026-06-30")}
     )
@@ -1857,6 +1868,46 @@ async def test_scale_error_in_the_newest_quarter_is_held(factor: float) -> None:
     assert newest == []  # neither the quarter nor the half-year at the wrong scale is shown
     held = [f for f in resp.quarantined if isinstance(f, FundamentalFact) and f.concept == concept]
     assert len(held) >= 2
+
+
+def _fact(start: str, end: str, value: float, accession: str) -> FundamentalFact:
+    return FundamentalFact(
+        cik="0000000001", concept="NetIncomeLoss", taxonomy="us-gaap", unit="USD", value=value,
+        period_start=date.fromisoformat(start), period_end=date.fromisoformat(end), form="10-Q",
+        filed=date.fromisoformat(end) + timedelta(days=30), accession=accession,
+    )  # fmt: skip
+
+
+def test_rounded_or_restated_sums_are_not_scale_errors() -> None:
+    """Values rounded to millions (2 != 1 + 2) and reclassified halves do not add up, but no power of 1000 explains
+    them: shrinking one term into insignificance is not evidence (both seen in the recorded AMZN facts)."""
+    rounded = [
+        _fact("2014-01-01", "2014-06-30", 1e6, "a"),
+        _fact("2014-07-01", "2014-09-30", 2e6, "b"),
+        _fact("2014-01-01", "2014-09-30", 2e6, "b"),
+    ]
+    restated = [
+        _fact("2020-01-01", "2020-03-31", 693e6, "a"),
+        _fact("2020-04-01", "2020-06-30", 9_918e6, "b"),
+        _fact("2020-01-01", "2020-06-30", 9_994e6, "b"),
+    ]
+    assert sec_edgar._additivity_errors(rounded, {}) == set()
+    assert sec_edgar._additivity_errors(restated, {}) == set()
+
+
+def test_scale_error_found_by_a_sum_is_pinned_on_the_side_far_from_its_neighbours() -> None:
+    q1, q2, h1 = (
+        _fact("2026-01-01", "2026-03-31", 30.25e9, "old"),
+        _fact("2026-04-01", "2026-06-30", 62.65e6, "new"),
+        _fact("2026-01-01", "2026-06-30", 92.9e6, "new"),
+    )
+    records = [q1, q2, h1]
+    # x1000 on "new" or /1000 on "old" both make it add up: the neighbouring periods decide which is wrong
+    assert sec_edgar._additivity_errors(records, {0: 0.2, 1: 2.4, 2: 2.3}) == {1, 2}
+    # no neighbours to decide: nothing in the disagreeing sum is served
+    assert sec_edgar._additivity_errors(records, {}) == {0, 1, 2}
+    # one filing alone cannot show its own scale error
+    assert sec_edgar._additivity_errors([q2, h1, _fact("2026-01-01", "2026-03-31", 30.25e9, "new")], {}) == set()
 
 
 async def test_a_mis_scaled_filing_is_held_whole() -> None:
