@@ -175,10 +175,20 @@ def test_seeded_unadjusted_split_blocks_unless_recorded() -> None:
     closes = _walk(30)
     closes = closes[:15] + [c / 4 for c in closes[15:]]  # 4:1 split not adjusted
     bars = _bars(closes)
-    report, _ = check_bars(bars, subject="split", split_dates=[])
+    report, _ = check_bars(bars, subject="split", split_dates=[], corporate_actions_known=True)
     assert any("corporate_actions" in f for f in report.failures)
-    report, _ = check_bars(bars, subject="split-known", split_dates=[bars[15].ts.date()])
+    report, _ = check_bars(bars, subject="split-known", split_dates=[bars[15].ts.date()], corporate_actions_known=True)
     assert next(c for c in report.checks if c.name == "corporate_actions").passed
+
+
+def test_split_like_jump_only_warns_without_a_corporate_actions_source() -> None:
+    """A genuine -33% day matches the 3:2 ratio; with no corporate-actions feed it is flagged, not blocking."""
+    closes = _walk(30)
+    closes = closes[:15] + [c / 1.5 for c in closes[15:]]
+    report, usable = check_bars(_bars(closes), subject="drop", split_dates=[])
+    assert report.passed
+    assert len(usable) == 30
+    assert any("corporate_actions" in w for w in report.warnings)
 
 
 def test_schema_rejections_block() -> None:
@@ -287,6 +297,10 @@ def test_positioning_balance_check() -> None:
     assert not rep.passed
     assert any("long_side" in f for f in rep.failures)
     assert any("no_duplicates" in f for f in rep.failures)
+    shorts = dict(good.categories)
+    shorts["commercial"] = PositionCounts(long=500, short=7000)  # one short field x10, longs untouched
+    rep = check_positioning([good.model_copy(update={"categories": shorts})], subject="cot-short")
+    assert [f.split(":")[0] for f in rep.failures] == ["short_side_equals_open_interest"]
 
 
 def test_robust_z_helpers() -> None:

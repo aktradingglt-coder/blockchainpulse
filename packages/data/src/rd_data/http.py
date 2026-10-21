@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -50,15 +51,26 @@ SECRET_PARAMS = frozenset(
         "signature",
         "sig",
         "auth",
+        "api_token",
+        "api_secret",
+        "session_token",
+        "private_key",
+        "license_key",
+        "licence_key",
     }
 )
+#: Name endings that always mean a credential (``x_auth_token``, ``client_secret``, ``db_password``).
+SECRET_SUFFIXES = ("_token", "_secret", "_password", "_passphrase", "_private_key")
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 REDACTED_PARAM = "REDACTED"
 #: Secrets shorter than this are not scrubbed from bodies (too likely to match ordinary text).
 _MIN_SCRUB_LEN = 8
 
 
 def is_secret_param(name: str) -> bool:
-    return name.lower().replace("-", "_") in SECRET_PARAMS
+    """Credential parameter names, normalised: camelCase and kebab-case become snake_case (``accessToken``)."""
+    norm = _CAMEL.sub("_", name).lower().replace("-", "_")
+    return norm in SECRET_PARAMS or norm.endswith(SECRET_SUFFIXES)
 
 
 def redact_params(params: Mapping[str, Any]) -> dict[str, str]:
@@ -117,6 +129,7 @@ class HttpFetcher:
         max_attempts: int = 4,
         rng: random.Random | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        record_ok: bool = True,
     ) -> None:
         self.provider = provider
         self._hosts = allowed_hosts
@@ -133,13 +146,24 @@ class HttpFetcher:
         self._rng = rng or random.Random()  # noqa: S311 - jitter only
         self._sleep = sleep
         self._log = get_logger("rd_data.http")
+        # When False, a 2xx is not yet a success for the circuit breaker: the caller records it once the body has
+        # been understood, so a provider answering 200 with garbage still counts as failing (adapters do this).
+        self._record_ok = record_ok
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def report_malformed(self, detail: str) -> None:
+        """Count a 2xx whose body the caller could not use as a provider failure (circuit breaker)."""
+        await self._breaker.record_failure(self.provider, detail)
+
     def _check_target(self, url: str) -> None:
         parts = urlsplit(url)
-        if parts.scheme != "https" or parts.hostname not in self._hosts:
+        try:
+            port = parts.port
+        except ValueError:
+            port = -1  # unparseable port
+        if parts.scheme != "https" or parts.hostname not in self._hosts or port not in (None, 443):
             raise InvalidArgs(
                 f"{self.provider}: refusing request to non-allow-listed URL {redact_text(url)}", provider=self.provider
             )
@@ -182,7 +206,8 @@ class HttpFetcher:
             )
             status = resp.status_code
             if 200 <= status < 300 and status != 204 and resp.content:
-                await self._breaker.record_success(self.provider)
+                if self._record_ok:
+                    await self._breaker.record_success(self.provider)
                 return FetchResult(status, shown, scrub_body(resp.content, secrets), dict(resp.headers), elapsed)
             if status < 400:
                 # Redirects are never followed (allow-list) and an empty 2xx carries no data: both mean the

@@ -47,6 +47,8 @@ _DGS10_TITLE = "Market Yield on U.S. Treasury Securities at 10-Year Constant Mat
 
 def eia_body(request: httpx.Request) -> dict[str, Any]:
     series = dict(request.url.params)["facets[series][]"]
+    # Latest week whose release (petroleum: Wednesday, gas: Thursday) precedes the fixture clock, AS_OF.
+    latest = date(2026, 10, 16) if series.startswith("W") else date(2026, 10, 9)
     unit, base, desc = (
         ("MBBL", 400_000.0, "U.S. Ending Stocks excluding SPR of Crude Oil (Thousand Barrels)")
         if series.startswith("W")
@@ -54,7 +56,7 @@ def eia_body(request: httpx.Request) -> dict[str, Any]:
     )
     rows = [
         {"period": d.isoformat(), "series": series, "series-description": desc, "value": base + 10 * k, "units": unit}
-        for k, d in enumerate(_weeks(60, date(2026, 10, 16)))
+        for k, d in enumerate(_weeks(60, latest))
     ]
     return {
         "response": {

@@ -61,6 +61,12 @@ class SecEdgarAdapter(BaseAdapter):
         RequestKind.COMPANY_FACTS: 6 * 3600,
         RequestKind.INSTRUMENTS: 24 * 3600,
     }
+    params_allowed: ClassVar[Mapping[RequestKind, frozenset[str]]] = {
+        RequestKind.FILINGS: frozenset({"cik", "forms"}),
+        RequestKind.COMPANY_FACTS: frozenset({"cik", "concepts"}),
+        RequestKind.INSTRUMENTS: frozenset(),
+    }
+    credential_setting = "sec_edgar_user_agent"
 
     def user_agent(self) -> str:
         ua = self.ctx.settings.sec_edgar_user_agent

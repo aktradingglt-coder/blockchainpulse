@@ -4,8 +4,8 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review round 1 returned ONE MORE PASS; all its
-findings fixed (ledger round 5); awaiting review round 2.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1 and 2 returned ONE MORE PASS; all
+findings fixed (ledger rounds 5–6); awaiting review round 3.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -68,6 +68,8 @@ Schema-derived (synthetic, labelled) cassettes remain for keyed vendors EIA, FRE
 | H7 | Sanctions/jurisdiction list review by counsel | Legal | config/jurisdiction_rules.yaml |
 
 | H8 | `EIA_API_KEY` repository secret so CI can record real EIA cassettes (and Twelve Data / FRED keys once contracted/cleared) | Vendor keys | `.github/workflows/record-cassettes.yml` |
+
+| H9 | Confirm the repository name `blockchainpulse` (in local paths, CI links and recorded cassette sources) is not a third-party trading-signals brand; the product's working name is "Research Desk (working name)" | Brand rule (PROMPT §1) | docs/OWNER_LAUNCH_CHECKLIST.md |
 
 Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
 

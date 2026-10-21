@@ -61,6 +61,7 @@ class TreasuryAdapter(BaseAdapter):
     allowed_hosts = frozenset({"home.treasury.gov"})
     supported = frozenset({RequestKind.TREASURY_CURVE})
     cache_ttl_s: ClassVar[Mapping[RequestKind, int]] = {RequestKind.TREASURY_CURVE: 3600}
+    params_allowed: ClassVar[Mapping[RequestKind, frozenset[str]]] = {RequestKind.TREASURY_CURVE: frozenset({"year"})}
 
     def _validate(self, request: DataRequest) -> None:
         year = request.params.get("year")
@@ -104,7 +105,7 @@ class TreasuryAdapter(BaseAdapter):
             raise NotFound(f"us_treasury: no curve rows for {year}", provider=self.name)
         points.sort(key=lambda p: (p.ts, p.tenor))
         range_check = check_range([p.yield_pct for p in points], lo=YIELD_RANGE[0], hi=YIELD_RANGE[1], what="yield")
-        bad_prints = _bad_prints_by_tenor(points, exclude=set(range_check.indices))
+        bad_prints, jumps = _bad_prints_by_tenor(points, exclude=set(range_check.indices))
         quarantine = sorted({*range_check.indices, *bad_prints})
         usable = [p for i, p in enumerate(points) if i not in set(quarantine)]
         checks: list[CheckResult] = [
@@ -121,8 +122,17 @@ class TreasuryAdapter(BaseAdapter):
                 "outliers",
                 passed=not bad_prints,
                 blocking=False,
-                detail=f"{len(bad_prints)} reverting outlier(s) quarantined" if bad_prints else "ok",
+                detail=f"{len(bad_prints)} bad print(s) or unconfirmed extreme move(s) quarantined"
+                if bad_prints
+                else "ok",
                 indices=tuple(bad_prints),
+            ),
+            CheckResult(
+                "large_moves",
+                passed=not jumps,
+                blocking=False,
+                detail=f"{len(jumps)} confirmed extreme move(s) kept for review" if jumps else "ok",
+                indices=tuple(jumps),
             ),
         ]
         quality = with_schema_rejections(
@@ -143,14 +153,20 @@ class TreasuryAdapter(BaseAdapter):
         return [DataRequest(kind=RequestKind.TREASURY_CURVE, params={"year": 2026})]
 
 
-def _bad_prints_by_tenor(points: list[TreasuryYieldPoint], *, exclude: set[int]) -> list[int]:
-    """Indices (into ``points``) of yields that jump and come straight back, scanned per tenor in date order."""
+def _bad_prints_by_tenor(points: list[TreasuryYieldPoint], *, exclude: set[int]) -> tuple[list[int], list[int]]:
+    """Per tenor in date order: (quarantine, confirmed extreme moves).
+
+    Par yields are daily market prices, so the price rule applies (D-031): a jump that comes straight back is a bad
+    print, and an extreme move on the latest days is held until later days confirm it.
+    """
     by_tenor: dict[str, list[int]] = {}
     for i, p in enumerate(points):
         if i not in exclude:
             by_tenor.setdefault(p.tenor, []).append(i)
     flagged: list[int] = []
+    jumps: list[int] = []
     for idx in by_tenor.values():
         scan = scan_spikes([points[i].yield_pct for i in idx])
-        flagged.extend(idx[j] for j in scan.bad_prints)
-    return sorted(flagged)
+        flagged.extend(idx[j] for j in (*scan.bad_prints, *scan.unconfirmed))
+        jumps.extend(idx[j] for j in scan.jumps)
+    return sorted(flagged), sorted(jumps)

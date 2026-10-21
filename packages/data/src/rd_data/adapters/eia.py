@@ -27,6 +27,7 @@ from rd_data.adapters.base import (
 from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
 from rd_data.quality import (
+    CheckResult,
     DataQualityReport,
     check_cadence,
     check_provider_order,
@@ -53,12 +54,14 @@ class SeriesInfo:
 
 _WPSR = timedelta(days=5, hours=15, minutes=30)  # Weekly Petroleum Status Report: the following Wednesday
 _WNGSR = timedelta(days=6, hours=15, minutes=30)  # Weekly Natural Gas Storage Report: the following Thursday
-#: Well-known weekly series (stocks cannot be negative; upper bounds are far above any recorded level).
+#: Well-known weekly series. Stocks cannot be negative, and cannot exceed the storage that exists to hold them: the
+#: upper bounds are round figures above total U.S. working storage for each product (D-033), so a value beyond them
+#: is a unit or decimal error, not a market event.
 SERIES: Mapping[str, SeriesInfo] = {
-    "WCESTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 2_000_000.0),  # crude excl. SPR, thousand barrels
-    "WGTSTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 1_000_000.0),  # motor gasoline, thousand barrels
-    "WDISTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 1_000_000.0),  # distillate, thousand barrels
-    "NW2_EPG0_SWO_R48_BCF": SeriesInfo("natural-gas/stor/wkly", _WNGSR, 0.0, 10_000.0),  # Lower-48 storage, Bcf
+    "WCESTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 800_000.0),  # crude excl. SPR, thousand barrels
+    "WGTSTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 400_000.0),  # motor gasoline, thousand barrels
+    "WDISTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 300_000.0),  # distillate, thousand barrels
+    "NW2_EPG0_SWO_R48_BCF": SeriesInfo("natural-gas/stor/wkly", _WNGSR, 0.0, 6_000.0),  # Lower-48 storage, Bcf
 }
 SERIES_ROUTES: Mapping[str, str] = {k: v.route for k, v in SERIES.items()}
 #: For series outside the catalogue: the latest a value of that frequency can be released after its period date.
@@ -79,6 +82,10 @@ class EiaAdapter(BaseAdapter):
     allowed_hosts = frozenset({"api.eia.gov"})
     supported = frozenset({RequestKind.MACRO_SERIES})
     cache_ttl_s: ClassVar[Mapping[RequestKind, int]] = {RequestKind.MACRO_SERIES: 3600}
+    params_allowed: ClassVar[Mapping[RequestKind, frozenset[str]]] = {
+        RequestKind.MACRO_SERIES: frozenset({"series", "route", "length", "frequency"})
+    }
+    credential_setting = "eia_api_key"
 
     def _validate(self, request: DataRequest) -> None:
         if self.ctx.settings.eia_api_key is None:
@@ -152,7 +159,16 @@ class EiaAdapter(BaseAdapter):
         report, usable = check_series(
             obs, subject=f"eia:{series}", lo=info.lo if info else None, hi=info.hi if info else None
         )
-        extra = [check_provider_order(raw_times, descending=True)]
+        units = sorted({o.unit for o in obs})
+        extra = [
+            check_provider_order(raw_times, descending=True),
+            CheckResult(
+                "consistent_units",
+                passed=len(units) <= 1,
+                blocking=True,
+                detail=f"one unit ({units[0] if units else 'none'})" if len(units) <= 1 else f"mixed units {units}",
+            ),
+        ]
         if frequency in _PERIODS:
             extra.append(check_cadence([o.ts for o in obs], period=_PERIODS[frequency]))
         quality = with_schema_rejections(

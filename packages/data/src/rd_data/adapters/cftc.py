@@ -130,6 +130,9 @@ class CftcAdapter(BaseAdapter):
     allowed_hosts = frozenset({"publicreporting.cftc.gov"})
     supported = frozenset({RequestKind.COT})
     cache_ttl_s: ClassVar[Mapping[RequestKind, int]] = {RequestKind.COT: 6 * 3600}
+    params_allowed: ClassVar[Mapping[RequestKind, frozenset[str]]] = {
+        RequestKind.COT: frozenset({"report_type", "market_code", "weeks", "futures_only"})
+    }
     base_url: ClassVar[str] = "https://publicreporting.cftc.gov/resource"
 
     def _validate(self, request: DataRequest) -> None:
@@ -174,7 +177,11 @@ class CftcAdapter(BaseAdapter):
             )
         records: list[PositioningReport] = []
         rejected = 0
+        asked = str(request.params["market_code"])
         for row in rows:
+            if str(row.get("cftc_contract_market_code", asked)) != asked:
+                rejected += 1  # a row for another market: never relabel it as the one requested
+                continue
             try:
                 records.append(self._row(row, report_type, futures_only=futures_only))
             except (KeyError, ValueError, TypeError):

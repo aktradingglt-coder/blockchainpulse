@@ -50,7 +50,7 @@ def _tff_row(day: str, oi: float = 1000.0) -> dict[str, str]:
         "market_and_exchange_names": "EURO FX - CHICAGO MERCANTILE EXCHANGE",
         "open_interest_all": str(oi),
         "dealer_positions_long_all": "100",
-        "dealer_positions_short_all": "300",
+        "dealer_positions_short_all": "200",
         "dealer_positions_spread_all": "50",
         "asset_mgr_positions_long": "400",
         "asset_mgr_positions_short": "100",

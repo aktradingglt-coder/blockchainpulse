@@ -82,9 +82,11 @@ async def status(request: Request) -> dict[str, Any]:
     try:
         rt = state.runtime
         breaker = CircuitBreaker(RedisStateStore(state.redis))
-        providers = await provider_statuses(effective_flags(rt.config, rt.settings), breaker)
+        providers = await provider_statuses(effective_flags(rt.config, rt.settings), breaker, rt.settings)
         degraded = sorted(
-            name for name, p in providers.items() if p["enabled"] and p["circuit"] != CircuitState.CLOSED.value
+            name
+            for name, p in providers.items()
+            if p["enabled"] and (not p["configured"] or p["circuit"] != CircuitState.CLOSED.value)
         )
     except Exception as exc:  # noqa: BLE001 - status reports, never raises
         providers, degraded = {"error": type(exc).__name__}, []

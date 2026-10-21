@@ -16,6 +16,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import ccxt.async_support as ccxt_async
 
 from rd_data.adapters.base import (
+    AdapterContext,
     BaseAdapter,
     DataRequest,
     FreshnessSpec,
@@ -49,12 +50,19 @@ TIMEFRAMES: Mapping[str, tuple[str, timedelta]] = {
 FUNDING_INTERVAL_HOURS = 1.0
 #: Physically possible range per derivative metric; values outside are quarantined, not shown.
 METRIC_RANGES: Mapping[str, tuple[float | None, float | None]] = {
-    "funding_rate": (-1.0, 1.0),  # a rate of ±100% per hourly interval does not occur; beyond it is a bad print
+    # ±1% per hourly interval (≈ ±8,760% a year) is far beyond funding on the majors this adapter serves; a value
+    # outside is a bad print or a unit error (D-033), quarantined for review rather than shown.
+    "funding_rate": (-0.01, 0.01),
     "mark_price": (0.0, None),
     "index_price": (0.0, None),
     "open_interest": (0.0, None),
     "volume_24h": (0.0, None),
 }
+#: Largest relative gap between mark and index price accepted; a perpetual's mark tracks its index closely, so a
+#: wider gap means one of the two (and the funding derived from the mark) is a bad print (D-033).
+MAX_MARK_INDEX_GAP = 0.10
+#: How long the instrument list is reused before it is fetched again.
+MARKETS_TTL = timedelta(hours=1)
 #: A symbol whose ticker is older than the §5.4 block threshold for funding/OI is quarantined from the response.
 SYMBOL_MAX_AGE = timedelta(hours=6)
 
@@ -78,6 +86,11 @@ class _RoutedKrakenFutures(ccxt_async.krakenfutures):  # type: ignore[misc]  # c
         self.rd_urls.append(result.url)
         text = result.text
         parsed = self.parse_json(text)
+        if not isinstance(parsed, (dict, list)):
+            # e.g. an HTML maintenance page with HTTP 200: an outage, never "symbol not found"
+            detail = "kraken_futures: malformed response (not JSON)"
+            await self._rd_http.report_malformed(detail)
+            raise ProviderDown(detail, provider="kraken_futures")
         self.handle_errors(result.status, "", url, method, dict(result.headers), text, parsed, {}, None)
         return parsed
 
@@ -97,6 +110,27 @@ class KrakenFuturesAdapter(BaseAdapter):
     supported = frozenset({RequestKind.BARS, RequestKind.CRYPTO_DERIVATIVES})
     # Not cached: CCXT parses responses itself, and funding/OI data is minutes-fresh anyway.
     cache_ttl_s: ClassVar[Mapping[RequestKind, int]] = {}
+    params_allowed: ClassVar[Mapping[RequestKind, frozenset[str]]] = {
+        RequestKind.BARS: frozenset({"symbol", "timeframe", "since_ms", "limit"}),
+        RequestKind.CRYPTO_DERIVATIVES: frozenset({"symbols"}),
+    }
+
+    def __init__(self, ctx: AdapterContext) -> None:
+        super().__init__(ctx)
+        self._markets: tuple[datetime, list[Any]] | None = None
+
+    async def _load_markets(self, exchange: _RoutedKrakenFutures) -> None:
+        """Instrument list, fetched at most once per :data:`MARKETS_TTL` per adapter (it is ~0.9 MB)."""
+        now = self.ctx.clock.now()
+        if self._markets is not None and now - self._markets[0] < MARKETS_TTL:
+            exchange.set_markets(self._markets[1])
+            return
+        await exchange.load_markets()
+        if not exchange.markets:
+            detail = "kraken_futures: instrument list is empty or malformed"
+            await self.http.report_malformed(detail)
+            raise ProviderDown(detail, provider=self.name)
+        self._markets = (now, list(exchange.markets.values()))
 
     def _validate(self, request: DataRequest) -> None:
         if request.kind is RequestKind.BARS:
@@ -121,7 +155,7 @@ class KrakenFuturesAdapter(BaseAdapter):
     async def _download(self, request: DataRequest) -> RawPayload:
         exchange = _RoutedKrakenFutures(self.http)
         try:
-            await exchange.load_markets()
+            await self._load_markets(exchange)
             if request.kind is RequestKind.BARS:
                 tf = TIMEFRAMES[str(request.params.get("timeframe", "1d"))][0]
                 since = request.params.get("since_ms")
@@ -159,13 +193,13 @@ class KrakenFuturesAdapter(BaseAdapter):
                 "kraken_futures: no decoded payload (this provider is never served from cache)", provider=self.name
             )
         if request.kind is RequestKind.BARS:
-            return self._parse_bars(request, parsed["ohlcv"])
-        return self._parse_derivatives(parsed)
+            return self._parse_bars(request, parsed["ohlcv"], raw)
+        return self._parse_derivatives(request, parsed)
 
-    def _parse_bars(self, request: DataRequest, rows: list[list[Any]]) -> ParseResult:
+    def _parse_bars(self, request: DataRequest, rows: list[list[Any]], raw: RawPayload) -> ParseResult:
         symbol = str(request.params["symbol"])
         tf, width = TIMEFRAMES[str(request.params.get("timeframe", "1d"))]
-        now = self.ctx.clock.now()
+        now = raw.retrieved_at  # "forming" is judged at fetch time (the payload is never re-parsed later anyway)
         bars: list[Bar] = []
         rejected = 0
         for row in rows:
@@ -220,7 +254,7 @@ class KrakenFuturesAdapter(BaseAdapter):
             freshness_as_of=freshness_as_of,
         )
 
-    def _parse_derivatives(self, parsed: Mapping[str, Any]) -> ParseResult:
+    def _parse_derivatives(self, request: DataRequest, parsed: Mapping[str, Any]) -> ParseResult:
         metrics: list[CryptoDerivativeMetric] = []
         rejected = 0
         for symbol, fr in parsed["funding"].items():
@@ -260,13 +294,28 @@ class KrakenFuturesAdapter(BaseAdapter):
         out_of_range = {i for c in range_checks for i in c.indices}
         now = self.ctx.clock.now()
         stale_symbols = sorted({m.symbol for m in metrics if now - m.ts > SYMBOL_MAX_AGE})
-        quarantine_idx = sorted(out_of_range | {i for i, m in enumerate(metrics) if m.symbol in stale_symbols})
+        diverged = _mark_index_divergence(metrics)
+        quarantine_idx = sorted(
+            out_of_range
+            | {i for i, m in enumerate(metrics) if m.symbol in stale_symbols}
+            | {i for i, m in enumerate(metrics) if m.symbol in diverged and m.metric in _MARK_DERIVED}
+        )
         usable = [m for i, m in enumerate(metrics) if i not in set(quarantine_idx)]
-        stale_check = _stale_symbols_check(stale_symbols) if stale_symbols else ()
+        requested = [x.strip() for x in str(request.params["symbols"]).split(",")]
+        missing = [x for x in requested if x not in {m.symbol for m in metrics}]
+        extra_checks = (
+            _warning(stale_symbols, f"older than {SYMBOL_MAX_AGE} quarantined", "stale_symbols"),
+            _warning(diverged, f"mark and index more than {MAX_MARK_INDEX_GAP:.0%} apart quarantined", "mark_vs_index"),
+            _warning(missing, "requested but not returned by the exchange", "missing_symbols"),
+        )
         quality = with_schema_rejections(
             DataQualityReport(
                 "kraken_futures:derivatives",
-                (check_duplicates([(m.symbol, m.metric) for m in metrics]), *range_checks, *stale_check),
+                (
+                    check_duplicates([(m.symbol, m.metric) for m in metrics]),
+                    *range_checks,
+                    *(c for c in extra_checks if c is not None),
+                ),
                 tuple(quarantine_idx),
                 len(metrics),
             ),
@@ -296,12 +345,25 @@ class KrakenFuturesAdapter(BaseAdapter):
         ]
 
 
-def _stale_symbols_check(symbols: list[str]) -> tuple[CheckResult, ...]:
-    return (
-        CheckResult(
-            "stale_symbols",
-            passed=False,
-            blocking=False,
-            detail=f"{len(symbols)} symbol(s) older than {SYMBOL_MAX_AGE} quarantined: {', '.join(symbols)}",
-        ),
+#: Metrics computed from the mark price; quarantined with it when mark and index disagree.
+_MARK_DERIVED = frozenset({"mark_price", "index_price", "funding_rate"})
+
+
+def _mark_index_divergence(metrics: list[CryptoDerivativeMetric]) -> list[str]:
+    values: dict[str, dict[str, float]] = {}
+    for m in metrics:
+        values.setdefault(m.symbol, {})[m.metric] = m.value
+    out = []
+    for symbol, v in values.items():
+        mark, index = v.get("mark_price"), v.get("index_price")
+        if mark is not None and index is not None and index > 0 and abs(mark / index - 1) > MAX_MARK_INDEX_GAP:
+            out.append(symbol)
+    return sorted(out)
+
+
+def _warning(symbols: list[str], what: str, name: str) -> CheckResult | None:
+    if not symbols:
+        return None
+    return CheckResult(
+        name, passed=False, blocking=False, detail=f"{len(symbols)} symbol(s) {what}: {', '.join(symbols)}"
     )

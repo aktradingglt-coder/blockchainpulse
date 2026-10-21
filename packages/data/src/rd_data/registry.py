@@ -51,8 +51,10 @@ def build_adapters(ctx: AdapterContext) -> Mapping[str, BaseAdapter]:
     return {cls.name: cls(ctx) for cls in ADAPTERS}
 
 
-async def provider_statuses(flags: Mapping[str, bool], breaker: CircuitBreaker) -> dict[str, dict[str, Any]]:
-    """Per-provider state for the status page (PROMPT §5.1): feature flag, circuit breaker and licence status.
+async def provider_statuses(
+    flags: Mapping[str, bool], breaker: CircuitBreaker, settings: Settings
+) -> dict[str, dict[str, Any]]:
+    """Per-provider state for the status page (PROMPT §5.1): feature flag, credentials, circuit breaker, licence.
 
     Read straight from the shared breaker state, without building adapters or opening HTTP clients.
     """
@@ -61,6 +63,7 @@ async def provider_statuses(flags: Mapping[str, bool], breaker: CircuitBreaker) 
         circuit = await breaker.status(cls.name)
         out[cls.name] = {
             "enabled": cls.feature_flag is None or bool(flags.get(cls.feature_flag, False)),
+            "configured": cls.credential_setting is None or bool(getattr(settings, cls.credential_setting)),
             "circuit": circuit.state.value,
             "consecutive_failures": circuit.consecutive_failures,
             "last_error": circuit.last_error,

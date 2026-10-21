@@ -68,6 +68,10 @@ class TradingCalendar(Protocol):
         """Whether the market trades at ``at`` (stale-quote checks only apply while it does)."""
         ...
 
+    def advance(self, start: datetime, trading_time: timedelta) -> datetime:
+        """The instant at which ``trading_time`` of open-market time has elapsed after ``start``."""
+        ...
+
 
 class ContinuousCalendar:
     """Crypto: a session every calendar day, closing at 00:00 UTC of the next day (PROMPT §3.2 crypto rule)."""
@@ -82,6 +86,9 @@ class ContinuousCalendar:
 
     def is_open(self, at: datetime) -> bool:  # noqa: ARG002 - crypto trades around the clock
         return True
+
+    def advance(self, start: datetime, trading_time: timedelta) -> datetime:
+        return ensure_utc(start) + trading_time
 
 
 class WeekdayCalendar:
@@ -100,6 +107,18 @@ class WeekdayCalendar:
 
     def is_open(self, at: datetime) -> bool:
         return ensure_utc(at).weekday() < 5
+
+    def advance(self, start: datetime, trading_time: timedelta) -> datetime:
+        at, left = ensure_utc(start), trading_time
+        while True:
+            if at.weekday() >= 5:  # weekend: jump to Monday 00:00 UTC
+                at = datetime.combine(at.date() + timedelta(days=7 - at.weekday()), time(0, tzinfo=UTC))
+                continue
+            day_end = datetime.combine(at.date() + timedelta(days=1), time(0, tzinfo=UTC))
+            if at + left <= day_end:
+                return at + left
+            left -= day_end - at
+            at = day_end
 
 
 class ExchangeCalendar:
@@ -122,6 +141,21 @@ class ExchangeCalendar:
         if not self._cal.first_minute <= minute <= self._cal.last_minute:
             return False
         return bool(self._cal.is_trading_minute(minute))
+
+    def advance(self, start: datetime, trading_time: timedelta) -> datetime:
+        at, left = ensure_utc(start), trading_time
+        first = pd.Timestamp(at.date()) - pd.Timedelta(days=1)
+        last = min(first + pd.Timedelta(days=60 + 2 * left.days), self._cal.last_session)
+        for session in self._cal.sessions_in_range(max(first, self._cal.first_session), last):
+            open_ = ensure_utc(self._cal.session_open(session).to_pydatetime())
+            close = ensure_utc(self._cal.session_close(session).to_pydatetime())
+            begin = max(open_, at)
+            if begin >= close:
+                continue
+            if begin + left <= close:
+                return begin + left
+            left -= close - begin
+        raise InvalidArgs(f"{self.name} calendar does not cover {at.isoformat()} + {trading_time}")
 
 
 @lru_cache(maxsize=16)
@@ -190,7 +224,7 @@ def classify(
     elif data_type is DataType.DAILY_BAR:
         return _classify_daily(as_of_dt, now, calendar)
     elif data_type is DataType.INTERVAL_BAR:
-        stale_after, blocked_after, reason = _interval_bounds(as_of_dt, bar_width, delay_minutes)
+        stale_after, blocked_after, reason = _interval_bounds(as_of_dt, bar_width, delay_minutes, calendar)
     elif data_type is DataType.MACRO_RELEASE:
         if next_release_at is None:
             if release_frequency not in RELEASE_INTERVALS:
@@ -216,21 +250,29 @@ def classify(
 
 
 def _interval_bounds(
-    close: datetime, bar_width: timedelta | None, delay_minutes: int
+    close: datetime, bar_width: timedelta | None, delay_minutes: int, calendar: TradingCalendar | None
 ) -> tuple[datetime, datetime, str]:
-    """Fixed-width bars (D-030): stale once the next bar is overdue, blocked after three missed bars."""
+    """Fixed-width bars (D-030): stale once the next bar is overdue, blocked after three missed bars.
+
+    Intraday bars are measured in open-market time of the instrument's calendar (a Friday-afternoon equity bar is
+    not overdue over the weekend); bars a day or wider, or without a calendar, in wall-clock time.
+    """
     if bar_width is None or bar_width <= timedelta(0):
         raise InvalidArgs("interval-bar freshness needs a positive bar_width")
     delay = timedelta(minutes=delay_minutes)
+    stale_in = bar_width + delay + timedelta(minutes=5)
+    block_in = 3 * bar_width + delay + timedelta(minutes=30)
+    if calendar is None or bar_width >= timedelta(days=1):  # weekly bars already span their weekends
+        calendar = None
+        stale_after, blocked_after = close + stale_in, close + block_in
+    else:
+        stale_after, blocked_after = calendar.advance(close, stale_in), calendar.advance(close, block_in)
+    clock = f"{calendar.name} trading time" if calendar else "wall-clock time"
     reason = (
         f"{bar_width} bars closed at {close.isoformat()}: stale once the next bar is overdue "
-        "(width + delay + 5 min), blocked after three missed bars (+30 min)"
+        f"(width + delay + 5 min), blocked after three missed bars (+30 min), in {clock}"
     )
-    return (
-        close + bar_width + delay + timedelta(minutes=5),
-        close + 3 * bar_width + delay + timedelta(minutes=30),
-        reason,
-    )
+    return stale_after, blocked_after, reason
 
 
 def _classify_daily(as_of: datetime, now: datetime, calendar: TradingCalendar | None) -> FreshnessResult:

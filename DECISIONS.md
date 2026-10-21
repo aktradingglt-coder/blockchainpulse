@@ -184,8 +184,12 @@ labelled 10:00 is as of 11:00). Macro and inventory series are judged from their
 `last_updated`, EIA weekly series from the scheduled release (petroleum Wednesday, natural gas Thursday, 15:30 UTC
 after the week-ending Friday), capped at the time we retrieved the data. Bars of a fixed width other than one
 session (1h, 4h, 1w) get a rule derived from the daily-bar row of §5.4: stale once the next bar is overdue
-(close + width + delay + 5 min), blocked after three missed bars (close + 3 × width + delay + 30 min). The delay of a
-delayed feed comes from the provider's recorded licence terms, never from the caller.
+(close + width + delay + 5 min), blocked after three missed bars (close + 3 × width + delay + 30 min). Intraday bars
+count open-market time of the instrument's calendar (a Friday 15:00 ET equity bar is not overdue over the weekend);
+bars a day or wider count wall-clock time. The delay of a delayed feed comes from the provider's recorded licence
+terms, never from the caller. Because an estimated release is capped at retrieval time, two guards keep the cap
+from hiding bad rows: the newest record may not be dated in the future, and an estimated release more than 12 hours
+after retrieval (data held before it was published) refuses the response.
 **Alternatives.** Measure from the observation/period date (the literal timestamp on the record); treat intraday bars
 as crypto funding/OI.
 **Reason.** The independent P1 review showed the literal reading blocks monthly and quarterly releases on release
@@ -193,12 +197,14 @@ day, labels EIA data stale three days after its release, and makes 1h bars perma
 the time. §5.4 does not list fixed-width bars; the daily-bar rule (1 missed bar stale, 3 blocked) is its closest row.
 
 ### D-031 · 2026-10-21 · Bad prints vs genuine moves: what is quarantined
-**Decision.** Price series: an extreme change (robust z > 10 on log returns, MAD with a mean-absolute-deviation
-fallback) that comes back within two points is a bad print and is quarantined. An extreme move in the last two
-points, or in the first two, cannot be told apart from a bad print and is quarantined as *unconfirmed* until later
-bars confirm it; confirmed level shifts are kept with a warning. Macro/inventory series: values outside the series'
-physical range (e.g. negative stocks, yields outside −5…30%) and reverting outliers are quarantined, but an extreme
-*latest* release is kept with a warning. Non-finite numbers are refused by every canonical schema.
+**Decision.** Price series (bar closes, highs and lows; Treasury par yields, which are daily market prices): an
+extreme change (robust z > 10 on log returns, MAD with a mean-absolute-deviation fallback) that comes back within two
+points is a bad print and is quarantined. An extreme move in the last two points, or in the first two, cannot be told
+apart from a bad print and is quarantined as *unconfirmed* until later bars confirm it; confirmed level shifts are
+kept with a warning. A move beyond ×10 in one bar is implausible, so its run and its confirmation extend to five
+points (three bad ticks in a row are not a market move). Volume is quarantined only when 100× away from the series'
+median. Macro/inventory series: values outside the series' physical range and reverting outliers are quarantined,
+but an extreme *latest* release is kept with a warning. Non-finite numbers are refused by every canonical schema.
 **Alternatives.** Quarantine only interior two-sided spikes (the original rule); quarantine every extreme latest
 value, macro included.
 **Reason.** A bad print on the latest bar is the most damaging error a report can repeat; holding it until
@@ -210,3 +216,20 @@ mis-printed, and hiding a genuine record release (e.g. April 2020 unemployment) 
 `ensure_displayable` passes `display_ok`/`display_only`; `ensure_derivable` passes `display_ok`/`derived_only`.
 **Reason.** PROMPT §5.1 makes derived analytics conditional on `derived_data_allowed` alone; some exchange and vendor
 terms allow display but forbid derived data, which the three-tag model could not represent (P1 review round 1).
+
+### D-033 · 2026-10-21 · Physical bounds and consistency checks (P1 review round 2)
+**Decision.** Values that cannot be true are quarantined, never shown:
+- EIA weekly stocks: ≥ 0 and below round figures above total U.S. working storage for the product (crude excl. SPR
+  800,000 thousand barrels; gasoline 400,000; distillate 300,000; Lower-48 working gas 6,000 Bcf). These are
+  engineering ceilings, not market data shown to users; refine against EIA's *Working and Shell Storage Capacity*
+  report when the host is reachable. A series mixing units is refused.
+- Kraken perpetuals: prices > 0, open interest and volume ≥ 0, funding within ±1% per hourly interval, and mark within
+  10% of index (otherwise mark, index and the funding derived from the mark are quarantined). A requested symbol the
+  exchange did not return is reported.
+- COT: both the long and the short side (with spreading) must sum to open interest; rows for another market are
+  rejected.
+- Corporate actions: an unexplained split-ratio jump blocks the series only when split dates come from a
+  corporate-actions source; without one (Twelve Data today) it is a warning, because a genuine −33% or ×2 day cannot
+  be told from an unadjusted split.
+**Reason.** P1 review round 2 seeded each of these through the adapters and they passed QA; the bounds are wide
+enough that no genuine value approaches them.

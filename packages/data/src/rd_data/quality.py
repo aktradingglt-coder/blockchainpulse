@@ -195,6 +195,11 @@ def robust_z_scores(values: Sequence[float]) -> list[float]:
 
 #: Longest run of consecutive points treated as a bad print when the series returns to its prior level afterwards.
 MAX_BAD_RUN = 2
+#: For an implausible move (beyond ``implausible`` in :func:`scan_spikes`, e.g. x10 in one bar) the run, and the
+#: confirmation a genuine shift needs, extend to this many points: three bad ticks in a row are not a market move.
+LONG_BAD_RUN = 5
+#: A single-bar price move beyond x10 (or ÷10) is implausible for any instrument we cover (D-031).
+IMPLAUSIBLE_LOG_MOVE = math.log(10.0)
 
 
 @dataclass(frozen=True)
@@ -207,13 +212,16 @@ class SpikeScan:
     jumps: tuple[int, ...] = ()  # extreme move confirmed by more than MAX_BAD_RUN later points
 
 
-def scan_spikes(levels: Sequence[float], *, threshold: float = OUTLIER_Z) -> SpikeScan:
+def scan_spikes(
+    levels: Sequence[float], *, threshold: float = OUTLIER_Z, implausible: float | None = None
+) -> SpikeScan:
     """Bad prints vs genuine moves, on point-to-point changes of ``levels`` scored by robust z (MAD).
 
     An extreme change is a *bad print* when the series comes back (within half the move) after at most
     :data:`MAX_BAD_RUN` points. One that does not come back is a genuine level shift once more than
     :data:`MAX_BAD_RUN` points sit at the new level; with fewer (at the end of the series), or when the shift is
     within the first :data:`MAX_BAD_RUN` points, it is *unconfirmed*: the move cannot be told apart from a bad print.
+    Changes larger than ``implausible`` (absolute, in the units of ``levels``) use :data:`LONG_BAD_RUN` instead.
     """
     n = len(levels)
     if n < 11:
@@ -227,13 +235,14 @@ def scan_spikes(levels: Sequence[float], *, threshold: float = OUTLIER_Z) -> Spi
     for k, is_extreme in enumerate(extreme):
         if not is_extreme or k in return_legs:
             continue
-        run = _reversal_run(levels, changes, extreme, k)
+        limit = LONG_BAD_RUN if implausible is not None and abs(changes[k]) > implausible else MAX_BAD_RUN
+        run = _reversal_run(levels, changes, extreme, k, limit)
         if run:
             bad.update(range(k + 1, k + 1 + run))
             return_legs.add(k + run)
-        elif k + 1 <= MAX_BAD_RUN:
+        elif k + 1 <= limit:
             unconfirmed.update(range(k + 1))  # the first point(s) may be the bad print: nothing before to compare
-        elif n - 1 - k <= MAX_BAD_RUN:
+        elif n - 1 - k <= limit:
             unconfirmed.update(range(k + 1, n))  # too few points at the new level to confirm the move
         else:
             jumps.append(k + 1)
@@ -245,10 +254,12 @@ def scan_spikes(levels: Sequence[float], *, threshold: float = OUTLIER_Z) -> Spi
     )
 
 
-def _reversal_run(levels: Sequence[float], changes: Sequence[float], extreme: Sequence[bool], k: int) -> int:
+def _reversal_run(
+    levels: Sequence[float], changes: Sequence[float], extreme: Sequence[bool], k: int, limit: int
+) -> int:
     """Length of the run of points after change ``k`` from which the series comes back, or 0 if it does not."""
     n = len(levels)
-    for run in range(1, MAX_BAD_RUN + 1):
+    for run in range(1, limit + 1):
         back = k + run  # index of the change out of the candidate run
         if back > n - 2:
             return 0
@@ -269,7 +280,7 @@ def check_price_spikes(closes: Sequence[float], *, threshold: float = OUTLIER_Z)
     if len(closes) < 11 or any(c <= 0 for c in closes):
         skipped = _ok("price_spikes", "fewer than 11 positive closes: not evaluated", blocking=False)
         return skipped, _ok("large_moves", "not evaluated", blocking=False)
-    scan = scan_spikes([math.log(c) for c in closes], threshold=threshold)
+    scan = scan_spikes([math.log(c) for c in closes], threshold=threshold, implausible=IMPLAUSIBLE_LOG_MOVE)
     quarantined = tuple(sorted({*scan.bad_prints, *scan.unconfirmed}))
     spike_res = (
         _fail(
@@ -292,6 +303,37 @@ def check_price_spikes(closes: Sequence[float], *, threshold: float = OUTLIER_Z)
         else _ok("large_moves", blocking=False)
     )
     return spike_res, jump_res
+
+
+def check_field_spikes(bars: Sequence[Bar], *, threshold: float = OUTLIER_Z) -> CheckResult:
+    """Bad prints in highs, lows and volume (closes are scanned by :func:`check_price_spikes`).
+
+    A wick 50 times the close or a volume a million times its neighbours is a bad tick even when the close is
+    sound; such bars are quarantined like a bad close.
+    """
+    flagged: dict[str, set[int]] = {}
+    for name, values in (("high", [b.high for b in bars]), ("low", [b.low for b in bars])):
+        if len(values) < 11 or any(v <= 0 for v in values):
+            continue
+        scan = scan_spikes([math.log(v) for v in values], threshold=threshold, implausible=IMPLAUSIBLE_LOG_MOVE)
+        hits = {*scan.bad_prints, *scan.unconfirmed}
+        if hits:
+            flagged[name] = hits
+    volumes = [b.volume for b in bars]
+    if len(volumes) >= 11 and all(v is not None and v > 0 for v in volumes):
+        # Volume bursts of 10x are ordinary; only a bar 100x away from the series' median volume is a bad tick.
+        logs = [math.log(v) for v in volumes if v is not None]
+        mid = statistics.median(logs)
+        hits = {i for i, v in enumerate(logs) if abs(v - mid) > 2 * IMPLAUSIBLE_LOG_MOVE}
+        if hits:
+            flagged["volume"] = hits
+    indices = tuple(sorted(set().union(*flagged.values()))) if flagged else ()
+    if indices:
+        detail = ", ".join(f"{name}: {len(idx)}" for name, idx in sorted(flagged.items()))
+        return _fail(
+            "field_spikes", f"bad high/low/volume prints quarantined ({detail})", blocking=False, indices=indices
+        )
+    return _ok("field_spikes", blocking=False)
 
 
 def check_range(values: Sequence[float | None], *, lo: float | None, hi: float | None, what: str) -> CheckResult:
@@ -405,8 +447,14 @@ def check_reconciliation(
     return _ok("cross_source", f"{compared} closes within {tolerance:.2%}", blocking=False)
 
 
-def check_splits(bars: Sequence[Bar], split_dates: Sequence[date] = (), *, tolerance: float = 0.03) -> CheckResult:
-    """Unexplained close-to-close jumps matching a split ratio mean the history is not split-adjusted."""
+def check_splits(
+    bars: Sequence[Bar], split_dates: Sequence[date] = (), *, tolerance: float = 0.03, blocking: bool = True
+) -> CheckResult:
+    """Unexplained close-to-close jumps matching a split ratio mean the history is not split-adjusted.
+
+    Blocking only when ``split_dates`` comes from a corporate-actions source: without one, a genuine -33% or x2 day
+    cannot be told from a split, and the jump is flagged for review instead of blocking the series (D-033).
+    """
     known = set(split_dates)
     hits = []
     for i in range(1, len(bars)):
@@ -420,7 +468,7 @@ def check_splits(bars: Sequence[Bar], split_dates: Sequence[date] = (), *, toler
         return _fail(
             "corporate_actions",
             f"{len(hits)} jump(s) match a split ratio with no recorded corporate action",
-            blocking=True,
+            blocking=blocking,
             indices=tuple(hits),
         )
     return _ok("corporate_actions")
@@ -434,6 +482,7 @@ def check_bars(
     market_open_at_end: bool = True,
     reference: Sequence[Bar] | None = None,
     split_dates: Sequence[date] | None = None,
+    corporate_actions_known: bool = False,
     allow_non_positive: bool = False,
     rejected_rows: int = 0,
 ) -> tuple[DataQualityReport, list[Bar]]:
@@ -448,15 +497,16 @@ def check_bars(
     ]
     closes = [b.close for b in bars]
     spikes, jumps = check_price_spikes(closes)
-    checks.extend([spikes, jumps])
+    fields = check_field_spikes(bars)
+    checks.extend([spikes, jumps, fields])
     checks.append(check_stale_run(closes, market_open_at_end=market_open_at_end))
     if calendar is not None and bars and bars[0].interval == "1d":
         checks.append(check_gaps(bars, calendar))
     if reference is not None:
         checks.append(check_reconciliation(bars, reference))
     if split_dates is not None:
-        checks.append(check_splits(bars, split_dates))
-    quarantined = spikes.indices
+        checks.append(check_splits(bars, split_dates, blocking=corporate_actions_known))
+    quarantined = tuple(sorted({*spikes.indices, *fields.indices}))
     usable = [b for i, b in enumerate(bars) if i not in set(quarantined)]
     report = DataQualityReport(subject, tuple(checks), quarantined, len(bars))
     return report, usable
@@ -506,22 +556,34 @@ def check_series(
 def check_positioning(
     reports: Sequence[PositioningReport], *, subject: str, tolerance: float = 0.01
 ) -> DataQualityReport:
-    """COT rows: one row per market/date, and the long side (incl. spreading) must sum to open interest."""
+    """COT rows: one row per market/date, and *each* side (incl. spreading) must sum to open interest.
+
+    Every reportable and non-reportable position is counted once long and once short, so both sums equal open
+    interest exactly in the published data; a mismatch on either side means a corrupted or misparsed field (and the
+    net positioning built from it would be wrong).
+    """
     keys = [(r.market_code, r.as_of, r.report_type, r.futures_only) for r in reports]
-    unbalanced = []
-    for i, r in enumerate(reports):
-        long_total = sum(c.long + (c.spreading or 0.0) for c in r.categories.values())
-        if r.open_interest > 0 and abs(long_total / r.open_interest - 1) > tolerance:
-            unbalanced.append(i)
-    checks = [
-        check_duplicates(keys),
-        _fail(
-            "long_side_equals_open_interest",
-            f"{len(unbalanced)} row(s) where long positions do not sum to open interest within {tolerance:.0%}",
-            blocking=True,
-            indices=tuple(unbalanced),
+
+    def unbalanced(side: str) -> tuple[int, ...]:
+        out = []
+        for i, r in enumerate(reports):
+            total = sum(getattr(c, side) + (c.spreading or 0.0) for c in r.categories.values())
+            if r.open_interest > 0 and abs(total / r.open_interest - 1) > tolerance:
+                out.append(i)
+        return tuple(out)
+
+    checks = [check_duplicates(keys)]
+    for side in ("long", "short"):
+        bad = unbalanced(side)
+        name = f"{side}_side_equals_open_interest"
+        checks.append(
+            _fail(
+                name,
+                f"{len(bad)} row(s) where {side} positions do not sum to open interest within {tolerance:.0%}",
+                blocking=True,
+                indices=bad,
+            )
+            if bad
+            else _ok(name)
         )
-        if unbalanced
-        else _ok("long_side_equals_open_interest"),
-    ]
     return DataQualityReport(subject, tuple(checks), (), len(reports))

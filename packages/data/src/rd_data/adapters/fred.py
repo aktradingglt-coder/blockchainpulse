@@ -44,6 +44,10 @@ class FredAdapter(BaseAdapter):
     supported = frozenset({RequestKind.MACRO_SERIES})
     feature_flag = "provider_fred"
     cache_ttl_s: ClassVar[Mapping[RequestKind, int]] = {RequestKind.MACRO_SERIES: 3600}
+    params_allowed: ClassVar[Mapping[RequestKind, frozenset[str]]] = {
+        RequestKind.MACRO_SERIES: frozenset({"series", "start"})
+    }
+    credential_setting = "fred_api_key"
 
     def _validate(self, request: DataRequest) -> None:
         if self.ctx.settings.fred_api_key is None:

@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from rd_core.clock import Clock, SystemClock, isoformat_z
 from rd_core.settings import DeploymentMode, Settings
-from rd_data.errors import DataError, FeatureDisabled, InvalidArgs, ProviderDown
+from rd_data.errors import DataError, DataQualityError, FeatureDisabled, InvalidArgs, ProviderDown
 from rd_data.freshness import FreshnessResult, TradingCalendar, classify
 from rd_data.http import FetchResult, HttpFetcher
 from rd_data.licence import LicenceTag, LicenceTerms
@@ -194,6 +194,10 @@ class BaseAdapter(ABC):
     feature_flag: ClassVar[str | None] = None
     #: Cache TTL per request kind in seconds (0 = do not cache).
     cache_ttl_s: ClassVar[Mapping[RequestKind, int]] = {}
+    #: Parameter names each request kind accepts; anything else is refused (it would also split the cache key).
+    params_allowed: ClassVar[Mapping[RequestKind, frozenset[str]]]
+    #: Settings field holding the credential this provider needs (``None`` = keyless), for the status page.
+    credential_setting: ClassVar[str | None] = None
 
     def __init__(self, ctx: AdapterContext) -> None:
         self.ctx = ctx
@@ -205,6 +209,7 @@ class BaseAdapter(ABC):
             breaker=ctx.breaker,
             transport=ctx.transport,
             user_agent=self.user_agent(),
+            record_ok=False,  # success is recorded after the body parses (_parse_checked)
         )
 
     def user_agent(self) -> str:
@@ -252,17 +257,35 @@ class BaseAdapter(ABC):
         A malformed live response counts as a provider failure for the circuit breaker.
         """
         try:
-            return self._parse(request, raw)
+            parsed = self._parse(request, raw)
         except ProviderDown as exc:
             if not from_cache:
                 await self.ctx.breaker.record_failure(self.name, str(exc))
-            raise
-        except DataError:
             raise
         except MALFORMED as exc:
             detail = f"{self.name}: malformed response ({type(exc).__name__})"
             if not from_cache:
                 await self.ctx.breaker.record_failure(self.name, detail)
+            raise ProviderDown(detail, provider=self.name) from exc
+        except DataError:
+            # The provider answered with something we understood (e.g. "not found"): it is up.
+            if not from_cache:
+                await self.ctx.breaker.record_success(self.name)
+            raise
+        if not from_cache:
+            await self.ctx.breaker.record_success(self.name)
+        return parsed
+
+    async def _download_checked(self, request: DataRequest) -> RawPayload:
+        """Download; a client library choking on a malformed body (CCXT parses responses itself) is a provider
+        failure, never a raw exception."""
+        try:
+            return await self._download(request)
+        except DataError:
+            raise
+        except MALFORMED as exc:
+            detail = f"{self.name}: malformed response ({type(exc).__name__})"
+            await self.ctx.breaker.record_failure(self.name, detail)
             raise ProviderDown(detail, provider=self.name) from exc
 
     async def fetch(self, request: DataRequest) -> DataResponse:
@@ -270,6 +293,11 @@ class BaseAdapter(ABC):
             raise InvalidArgs(f"{self.name} does not serve {request.kind.value}", provider=self.name)
         if not self.enabled:
             raise FeatureDisabled(f"{self.name} is disabled (feature flag {self.feature_flag!r})", provider=self.name)
+        unknown = sorted(set(request.params) - self.params_allowed.get(request.kind, frozenset()))
+        if unknown:
+            raise InvalidArgs(
+                f"{self.name}: unknown parameter(s) {unknown} for {request.kind.value}", provider=self.name
+            )
         self._validate(request)
         fingerprint = request.fingerprint(self.name)
         cacheable = self.ctx.cache is not None and self.cache_ttl_s.get(request.kind, 0) > 0
@@ -279,7 +307,7 @@ class BaseAdapter(ABC):
             raw, parsed = await self._from_cache(request, fingerprint)
         from_cache = parsed is not None
         if raw is None or parsed is None:
-            raw = await self._download(request)
+            raw = await self._download_checked(request)
             parsed = await self._parse_checked(request, raw, from_cache=False)
             parsed.quality.require_passed(provider=self.name)
             if cacheable:  # only payloads that passed QA are cached
@@ -287,12 +315,13 @@ class BaseAdapter(ABC):
                 await self.ctx.cache.put(fingerprint, raw.to_json(), self.cache_ttl_s[request.kind])
         parsed.quality.require_passed(provider=self.name)
         now = self.ctx.clock.now()
+        _require_not_future(parsed.as_of, now, provider=self.name)
         freshness: FreshnessResult | None = None
         if parsed.freshness is not None and parsed.as_of is not None:
             spec = parsed.freshness
             freshness = classify(
                 spec.data_type,
-                _freshness_origin(parsed, raw.retrieved_at),
+                _freshness_origin(parsed, raw.retrieved_at, provider=self.name),
                 now,
                 delay_minutes=spec.delay_minutes,
                 calendar=spec.calendar,
@@ -321,17 +350,44 @@ class BaseAdapter(ABC):
         )
 
 
-def _freshness_origin(parsed: ParseResult, retrieved_at: datetime) -> datetime | date:
-    """Where freshness is measured from. An *estimated* release time (``freshness_as_of``) is capped at the moment
-    the data was retrieved: a value cannot have been published after we already held it (e.g. a release that came
-    out earlier than the scheduled time we assume)."""
+#: Clock skew and timezone slack allowed when checking that data is not from the future.
+FUTURE_TOLERANCE = timedelta(minutes=5)
+#: How far an *estimated* scheduled release may lie after the moment we already held the data (summer-time offsets,
+#: early publication). Beyond it the row cannot be genuine: its data was not yet published.
+EARLY_RELEASE_TOLERANCE = timedelta(hours=12)
+
+
+def _require_not_future(as_of: datetime | date | None, now: datetime, *, provider: str) -> None:
+    """The newest record may not describe a time that has not happened yet."""
+    if as_of is None:
+        return
+    future = as_of > now + FUTURE_TOLERANCE if isinstance(as_of, datetime) else as_of > (now + FUTURE_TOLERANCE).date()
+    if future:
+        raise DataQualityError(
+            f"{provider}: latest record is dated {as_of.isoformat()}, after {now.isoformat()}", provider=provider
+        )
+
+
+def _freshness_origin(parsed: ParseResult, retrieved_at: datetime, *, provider: str) -> datetime | date:
+    """Where freshness is measured from.
+
+    An *estimated* release time (``freshness_as_of``) is capped at the moment the data was retrieved: a value
+    cannot have been published after we already held it. If the estimate lies far beyond retrieval, the data was
+    not yet scheduled for publication — a mislabelled or fabricated row — and the response is refused.
+    """
     estimate = parsed.freshness_as_of
     if estimate is None:
         assert parsed.as_of is not None  # noqa: S101 - caller checks
         return parsed.as_of
-    if isinstance(estimate, datetime):
-        return min(estimate, retrieved_at)
-    return estimate
+    if not isinstance(estimate, datetime):
+        return estimate
+    if estimate > retrieved_at + EARLY_RELEASE_TOLERANCE:
+        raise DataQualityError(
+            f"{provider}: data as of {parsed.as_of} is not scheduled for release until {estimate.isoformat()}, "
+            f"but was retrieved at {retrieved_at.isoformat()}",
+            provider=provider,
+        )
+    return min(estimate, retrieved_at)
 
 
 #: Exceptions a parser raises on a payload it cannot understand (wrong type, missing key, not JSON, bad number).

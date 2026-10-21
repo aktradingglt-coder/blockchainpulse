@@ -22,6 +22,11 @@ cannot complete these and never pretends to. Each line links to where the produc
       Lemon Squeezy (`docs/vendor-notes/billing.md`, D-013).
 - [ ] Confirm prices (`config/product.yaml → commercial`, D-023) after the P11 measured cost model.
 
+## Brand
+- [ ] Confirm the repository name `blockchainpulse` is not a third-party trading-signals brand (it appears in local
+      paths, CI links and the `source` field of cassettes recorded before 2026-10-21 run 2; new recordings cite only
+      the CI run ID). Rename the repository if it is.
+
 ## Data vendors
 - [ ] Contracts for any commercial data vendor and display/redistribution rights per crypto exchange
       (`docs/vendor-notes/commercial-data.md`, `crypto-exchanges.md`, D-024).

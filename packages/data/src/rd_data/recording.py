@@ -59,6 +59,7 @@ async def _run_one(
     *,
     check_drift: bool,
     source: str,
+    failed_out: Path | None = None,
 ) -> dict[str, Any]:
     transport = RecordingTransport()
     adapter = cls(_context(settings, transport, {**flags, **({cls.feature_flag: True} if cls.feature_flag else {})}))
@@ -96,8 +97,14 @@ async def _run_one(
             summary["drift"] = ["no stored cassette"]
     elif transport.interactions:
         cassette = transport.to_cassette(cls.name, source)
-        cassette.save(path)
-        summary["cassette"] = str(path)
+        if summary.get("ok"):
+            cassette.save(path)
+            summary["cassette"] = str(path)
+        elif failed_out is not None:
+            # A failed exchange never replaces a working cassette; it is kept aside for diagnosis (CI artifact).
+            failed_path = failed_out / cls.name / cassette_name(request)
+            cassette.save(failed_path)
+            summary["failed_cassette"] = str(failed_path)
     return summary
 
 
@@ -119,6 +126,7 @@ async def run(
     check_drift: bool,
     source: str,
     extra: Sequence[tuple[str, DataRequest]] = (),
+    failed_out: Path | None = None,
 ) -> list[dict[str, Any]]:
     settings = Settings()
     flags = effective_flags(load_config(settings.config_dir), settings)
@@ -138,7 +146,11 @@ async def run(
         jobs.extend((cls, request) for request in plan())
     jobs.extend((by_name[name], request) for name, request in extra)
     for cls, request in jobs:
-        results.append(await _run_one(cls, request, settings, flags, out, check_drift=check_drift, source=source))
+        results.append(
+            await _run_one(
+                cls, request, settings, flags, out, check_drift=check_drift, source=source, failed_out=failed_out
+            )
+        )
     return results
 
 
@@ -149,6 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--check-drift", action="store_true")
     parser.add_argument("--source", default="manual run")
     parser.add_argument("--requests", type=Path, help="JSON file whose 'requests' list adds requests to record")
+    parser.add_argument("--failed-out", type=Path, help="where to keep recordings of failed fetches (not committed)")
     args = parser.parse_args(argv)
     configure_logging(service="rd-recorder", level="WARNING", fmt="json")
     results = asyncio.run(
@@ -158,6 +171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             check_drift=args.check_drift,
             source=args.source,
             extra=load_extra_requests(args.requests) if args.requests else (),
+            failed_out=args.failed_out,
         )
     )
     for r in results:

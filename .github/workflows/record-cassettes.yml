@@ -37,9 +37,11 @@ jobs:
           if [ -z "${EIA_API_KEY}" ]; then providers=$(echo "$providers" | tr ',' '\n' | grep -v '^eia$' | paste -sd, -); fi
           set +e
           uv run python -m rd_data.recording --providers "$providers" --requests .github/recording-request.json \
-            --source "GitHub Actions run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          echo "recorder exit code: $?"
+            --failed-out .recordings-failed --source "GitHub Actions run ${{ github.run_id }}"
+          code=$?
           set -e
+          echo "recorder exit code: $code"
+          echo "RECORDER_EXIT=$code" >> "$GITHUB_ENV"
       - name: secret scan of recorded cassettes
         run: make tools && ./scripts/scan_committable.sh
       - name: commit cassettes to this branch
@@ -57,3 +59,13 @@ jobs:
             sleep $((attempt * 5))
           done
           exit 1
+      - name: keep failed recordings for diagnosis
+        if: env.RECORDER_EXIT != '0'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: failed-recordings
+          path: .recordings-failed
+          if-no-files-found: ignore
+      - name: fail the run if any recording failed (successful ones are already committed)
+        if: env.RECORDER_EXIT != '0'
+        run: exit 1

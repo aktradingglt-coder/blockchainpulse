@@ -57,6 +57,10 @@ class TwelveDataAdapter(BaseAdapter):
     supported = frozenset({RequestKind.BARS})
     feature_flag = "provider_twelvedata"
     cache_ttl_s: ClassVar[Mapping[RequestKind, int]] = {RequestKind.BARS: 300}
+    params_allowed: ClassVar[Mapping[RequestKind, frozenset[str]]] = {
+        RequestKind.BARS: frozenset({"symbol", "interval", "asset_class", "outputsize"})
+    }
+    credential_setting = "twelvedata_api_key"
 
     def _api_key(self) -> str:
         key = self.ctx.settings.twelvedata_api_key
@@ -96,6 +100,10 @@ class TwelveDataAdapter(BaseAdapter):
             message = str(body.get("message", "error"))
             if code == 429:
                 raise RateLimited(f"twelvedata: {message}", provider=self.name)
+            if code in (401, 403):
+                raise ProviderDown(
+                    f"twelvedata: authorization rejected ({code}); check the API key or plan", provider=self.name
+                )
             if code == 404 or "not found" in message.lower():
                 raise NotFound(f"twelvedata: {message}", provider=self.name)
             raise InvalidArgs(f"twelvedata: {message}", provider=self.name)
@@ -104,7 +112,9 @@ class TwelveDataAdapter(BaseAdapter):
         width = WIDTHS[interval]
         asset_class = str(request.params.get("asset_class", "fx"))
         cal = calendar_for(asset_class)
-        now = self.ctx.clock.now()
+        # Judge "still forming" and "market open" at the moment the payload was fetched, not now: a cached payload
+        # re-parsed later must not turn the partial bar it holds into a final close.
+        fetched = raw.retrieved_at
         bars: list[Bar] = []
         rejected = 0
         forming = 0
@@ -113,7 +123,7 @@ class TwelveDataAdapter(BaseAdapter):
                 text = str(row["datetime"])
                 fmt = "%Y-%m-%d %H:%M:%S" if " " in text else "%Y-%m-%d"
                 ts = datetime.strptime(text, fmt).replace(tzinfo=UTC)
-                if _closes_at(ts, interval, width, cal) > now:
+                if _closes_at(ts, interval, width, cal) > fetched:
                     forming += 1
                     continue  # candle still forming: never present an incomplete bar as a close
                 bars.append(
@@ -138,7 +148,7 @@ class TwelveDataAdapter(BaseAdapter):
             bars,
             subject=f"twelvedata:{symbol}:{interval}",
             calendar=cal,
-            market_open_at_end=cal.is_open(now),
+            market_open_at_end=cal.is_open(fetched),
             rejected_rows=rejected,
             split_dates=[] if asset_class == "equity" else None,
         )
@@ -150,7 +160,7 @@ class TwelveDataAdapter(BaseAdapter):
             spec = FreshnessSpec(DataType.DAILY_BAR, cal)
             freshness_as_of = None
         else:
-            spec = FreshnessSpec(DataType.INTERVAL_BAR, delay_minutes=delay, bar_width=width)
+            spec = FreshnessSpec(DataType.INTERVAL_BAR, cal, delay_minutes=delay, bar_width=width)
             freshness_as_of = as_of + width if as_of is not None else None
         notes = (f"{forming} forming bar(s) dropped.",) if forming else ()
         return ParseResult(

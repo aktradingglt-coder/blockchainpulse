@@ -39,17 +39,23 @@ def test_record_then_check_drift(
 ) -> None:
     rows = _recorded_tff_rows(2)
     _patch_network(monkeypatch, rows)
-    code = recording.main(["--providers", "cftc", "--out", str(tmp_path), "--source", "unit test"])
+    failed_dir = tmp_path / "failed"
+    code = recording.main(
+        ["--providers", "cftc", "--out", str(tmp_path), "--source", "unit test", "--failed-out", str(failed_dir)]
+    )
     out = capsys.readouterr().out
     summaries = [
         json.loads(line.removeprefix("RECORDING ")) for line in out.splitlines() if line.startswith("RECORDING {")
     ]
     assert len(summaries) == len(CftcAdapter.recording_plan())
     assert all(s["provider"] == "cftc" for s in summaries)
+    ok = [s for s in summaries if s["ok"]]
+    assert {s["params"]["report_type"] for s in ok} == {"tff"}  # the EUR FX rows answer only the TFF requests
     written = sorted(tmp_path.glob("cftc/*.json"))
-    assert len(written) == len(CftcAdapter.recording_plan())
+    assert len(written) == len(ok)  # a failed fetch never becomes (or replaces) a contract cassette
     assert Cassette.load(written[0]).provenance == "recorded"
-    assert code in (0, 1)  # the synthetic rows only fit one market; others fail QA or market checks
+    assert len(list(failed_dir.glob("cftc/*.json"))) == len(summaries) - len(ok)
+    assert code == 1
 
     # Drift: same shape -> no drift entries; changed type -> drift reported and non-zero exit
     _patch_network(monkeypatch, rows)
@@ -60,7 +66,8 @@ def test_record_then_check_drift(
         for line in out.splitlines()
         if line.startswith("RECORDING {")
     ]
-    assert drift_lists == [[] for _ in CftcAdapter.recording_plan()]
+    assert drift_lists.count([]) == len(ok)  # the others have no stored cassette to compare against
+    assert drift_lists.count(["no stored cassette"]) == len(summaries) - len(ok)
     changed = [{**r, "open_interest_all": 1000} for r in rows]  # string -> number
     _patch_network(monkeypatch, changed)
     assert recording.main(["--providers", "cftc", "--out", str(tmp_path), "--check-drift"]) == 1
