@@ -1,0 +1,174 @@
+"""HTTP access for provider adapters: allow-listed hosts, rate limits, retries, circuit breaker, typed errors.
+
+Every outbound call goes through :class:`HttpFetcher`. It enforces HTTPS to the adapter's allow-listed hosts only
+(SSRF guard), takes a shared rate-limit token, retries 429/5xx with full-jitter backoff (honouring ``Retry-After``),
+records circuit-breaker outcomes, maps failures to typed errors and logs with secrets redacted.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import random
+import time
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlencode, urlsplit
+
+import httpx
+import orjson
+
+from rd_core.logging import get_logger
+from rd_core.redaction import redact_text
+from rd_data.errors import InvalidArgs, NotFound, ProviderDown, RateLimited
+from rd_data.resilience import (
+    RETRYABLE_STATUS,
+    CircuitBreaker,
+    RateLimit,
+    RateLimiter,
+    backoff_delays,
+    retry_after_seconds,
+)
+
+#: Query parameters that carry credentials; never logged, never stored in cassettes.
+SECRET_PARAMS = frozenset({"api_key", "apikey", "token", "key", "access_key", "secret"})
+REDACTED_PARAM = "REDACTED"
+
+
+def redact_params(params: Mapping[str, Any]) -> dict[str, str]:
+    return {k: (REDACTED_PARAM if k.lower() in SECRET_PARAMS else str(v)) for k, v in params.items()}
+
+
+def display_url(url: str, params: Mapping[str, Any]) -> str:
+    """URL with credentials masked, suitable for logs, evidence and cassettes."""
+    query = urlencode(sorted(redact_params(params).items()))
+    return redact_text(f"{url}?{query}" if query else url)
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    status: int
+    url: str  # redacted display URL
+    body: bytes
+    headers: Mapping[str, str]
+    elapsed_s: float
+
+    def json(self) -> Any:  # noqa: ANN401 - provider JSON is untyped until normalised
+        try:
+            return orjson.loads(self.body)
+        except orjson.JSONDecodeError as exc:
+            raise ProviderDown(f"invalid JSON from {self.url}: {exc}") from exc
+
+    @property
+    def text(self) -> str:
+        return self.body.decode("utf-8", errors="replace")
+
+
+class HttpFetcher:
+    def __init__(
+        self,
+        *,
+        provider: str,
+        allowed_hosts: frozenset[str],
+        limiter: RateLimiter,
+        rate_limit: RateLimit,
+        breaker: CircuitBreaker,
+        transport: httpx.AsyncBaseTransport | None = None,
+        user_agent: str = "ResearchDesk/0.1 (+support@example.com)",
+        timeout_s: float = 30.0,
+        max_attempts: int = 4,
+        rng: random.Random | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self.provider = provider
+        self._hosts = allowed_hosts
+        self._limiter = limiter
+        self._rate_limit = rate_limit
+        self._breaker = breaker
+        self._client = httpx.AsyncClient(
+            transport=transport or httpx.AsyncHTTPTransport(retries=0),
+            timeout=httpx.Timeout(timeout_s, connect=10.0),
+            headers={"User-Agent": user_agent, "Accept": "application/json"},
+            follow_redirects=False,
+        )
+        self._max_attempts = max_attempts
+        self._rng = rng or random.Random()  # noqa: S311 - jitter only
+        self._sleep = sleep
+        self._log = get_logger("rd_data.http")
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    def _check_target(self, url: str) -> None:
+        parts = urlsplit(url)
+        if parts.scheme != "https" or parts.hostname not in self._hosts:
+            raise InvalidArgs(
+                f"{self.provider}: refusing request to non-allow-listed URL {redact_text(url)}", provider=self.provider
+            )
+
+    async def get(
+        self, url: str, params: Mapping[str, Any] | None = None, headers: Mapping[str, str] | None = None
+    ) -> FetchResult:
+        params = dict(params or {})
+        self._check_target(url)
+        shown = display_url(url, params)
+        await self._breaker.before_call(self.provider)
+        delays = backoff_delays(self._max_attempts - 1, rng=self._rng)
+        last_error = "no attempt made"
+        for attempt in range(1, self._max_attempts + 1):
+            await self._limiter.acquire(self.provider, self._rate_limit)
+            started = time.perf_counter()
+            try:
+                resp = await self._client.get(url, params=params, headers=dict(headers or {}))
+            except httpx.TransportError as exc:
+                last_error = f"{type(exc).__name__}"
+                self._log.warning(
+                    "provider.transport_error", provider=self.provider, url=shown, attempt=attempt, error=last_error
+                )
+                await self._breaker.record_failure(self.provider, last_error)
+                delay = next(delays, None)
+                if delay is None:
+                    break
+                await self._sleep(delay)
+                continue
+            elapsed = time.perf_counter() - started
+            self._log.info(
+                "provider.response",
+                provider=self.provider,
+                url=shown,
+                status=resp.status_code,
+                attempt=attempt,
+                elapsed_ms=round(elapsed * 1000, 1),
+            )
+            status = resp.status_code
+            if status < 400:
+                await self._breaker.record_success(self.provider)
+                return FetchResult(status, shown, resp.content, dict(resp.headers), elapsed)
+            if status in RETRYABLE_STATUS:
+                last_error = f"HTTP {status}"
+                if status >= 500:
+                    await self._breaker.record_failure(self.provider, last_error)
+                delay = next(delays, None)
+                if delay is None:
+                    if status == 429:
+                        raise RateLimited(
+                            f"{self.provider} rate-limited the request ({shown})",
+                            provider=self.provider,
+                            retry_after_s=retry_after_seconds(resp.headers.get("retry-after")),
+                        )
+                    break
+                hinted = retry_after_seconds(resp.headers.get("retry-after"))
+                await self._sleep(max(delay, hinted or 0.0))
+                continue
+            await self._breaker.record_success(self.provider)  # the service answered; the request was wrong
+            if status == 404:
+                raise NotFound(f"{self.provider}: not found ({shown})", provider=self.provider)
+            if status in (401, 403):
+                raise ProviderDown(
+                    f"{self.provider}: authorization rejected (HTTP {status}); check the API key or plan",
+                    provider=self.provider,
+                )
+            raise InvalidArgs(f"{self.provider}: request rejected (HTTP {status}) {shown}", provider=self.provider)
+        raise ProviderDown(
+            f"{self.provider}: unavailable after {self._max_attempts} attempt(s): {last_error}", provider=self.provider
+        )

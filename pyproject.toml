@@ -5,6 +5,7 @@ description = "Workspace root for Research Desk (working name). Not a distributa
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "rd-core",
+    "rd-data",
     "rd-db",
     "rd-api",
     "rd-worker",
@@ -26,6 +27,7 @@ dev = [
     "httpx2==2.15.1",  # required by starlette.testclient (FastAPI TestClient); httpx alone is deprecated there
     "import-linter==2.15",
     "pip-licenses==5.5.5",
+    "pandas-stubs==3.0.5.260914",
 ]
 
 [tool.uv]
@@ -36,6 +38,7 @@ members = ["packages/*", "apps/api", "apps/worker", "apps/scheduler"]
 
 [tool.uv.sources]
 rd-core = { workspace = true }
+rd-data = { workspace = true }
 rd-db = { workspace = true }
 rd-api = { workspace = true }
 rd-worker = { workspace = true }
@@ -56,6 +59,7 @@ ignore = [
     "PLR0913",  # analytics functions legitimately take many keyword parameters
     "TRY003",   # descriptive exception messages are preferred
     "PLR2004",  # magic values in tests and thresholds are named where they matter
+    "N818",     # error names follow PROMPT §7.4 (NotFound, Stale, LicenceBlocked, ...), not an "Error" suffix
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -85,6 +89,11 @@ mypy_path = [
     "apps/api/src", "apps/worker/src", "apps/scheduler/src",
 ]
 
+# exchange_calendars and ccxt ship without type information; their call sites are wrapped in typed functions.
+[[tool.mypy.overrides]]
+module = ["exchange_calendars", "exchange_calendars.*", "ccxt", "ccxt.*"]
+ignore_missing_imports = true
+
 # dramatiq ships py.typed but leaves RedisBroker.__init__ and its CLI entry points unannotated; these two thin modules
 # are the only call sites.
 [[tool.mypy.overrides]]
@@ -105,7 +114,7 @@ consider_namespace_packages = true
 
 [tool.coverage.run]
 branch = true
-source_pkgs = ["rd_core", "rd_db", "rd_api", "rd_worker", "rd_scheduler"]
+source_pkgs = ["rd_core", "rd_data", "rd_db", "rd_api", "rd_worker", "rd_scheduler"]
 # Measure code that runs in subprocesses (worker, uvicorn, CLI entry points) and multiprocessing children.
 parallel = true
 patch = ["subprocess"]
@@ -122,13 +131,19 @@ exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "@overload"]
 
 # ---------------------------------------------------------------- import-linter (ARCHITECTURE.md §3.1)
 [tool.importlinter]
-root_packages = ["rd_core", "rd_db", "rd_api", "rd_worker", "rd_scheduler"]
+root_packages = ["rd_core", "rd_data", "rd_db", "rd_api", "rd_worker", "rd_scheduler"]
 include_external_packages = false
 
 [[tool.importlinter.contracts]]
 name = "rd_core is the foundation and imports no other rd_* package"
 type = "forbidden"
 source_modules = ["rd_core"]
+forbidden_modules = ["rd_data", "rd_db", "rd_api", "rd_worker", "rd_scheduler"]
+
+[[tool.importlinter.contracts]]
+name = "rd_data depends only on rd_core (no DB models, no apps)"
+type = "forbidden"
+source_modules = ["rd_data"]
 forbidden_modules = ["rd_db", "rd_api", "rd_worker", "rd_scheduler"]
 
 [[tool.importlinter.contracts]]

@@ -1,0 +1,51 @@
+name: record-cassettes
+
+# Records contract-test cassettes from live providers (D-011): the build sandbox cannot reach vendor hosts, CI can.
+# Trigger: edit .github/recording-request.json (providers to record) and push, or run manually.
+# Keyed providers record only when their secret exists (e.g. EIA_API_KEY); keyless ones always.
+
+on:
+  push:
+    paths: [".github/recording-request.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: record-cassettes-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.11.32"
+      - run: uv python install 3.12.13
+      - run: uv sync --frozen --all-packages
+      - name: record
+        env:
+          SEC_EDGAR_USER_AGENT: "ResearchDesk-CI (working name) support@example.com"
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+        run: |
+          providers=$(python3 -c "import json; print(','.join(json.load(open('.github/recording-request.json'))['providers']))")
+          if [ -z "${EIA_API_KEY}" ]; then providers=$(echo "$providers" | tr ',' '\n' | grep -v '^eia$' | paste -sd, -); fi
+          set +e
+          uv run python -m rd_data.recording --providers "$providers" \
+            --source "GitHub Actions run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "recorder exit code: $?"
+          set -e
+      - name: secret scan of recorded cassettes
+        run: make tools && ./scripts/scan_committable.sh
+      - name: commit cassettes to this branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/data/tests/cassettes
+          if git diff --cached --quiet; then echo "no cassette changes"; exit 0; fi
+          git commit -m "Record provider cassettes (CI run ${{ github.run_id }})"
+          git push origin "HEAD:${{ github.ref_name }}"
