@@ -2180,7 +2180,7 @@ def test_off_balance_sheet_amounts_may_exceed_total_assets() -> None:
         fact("Liabilities", 5e11),  # 500x: impossible
     ]
     logs: list[float | None] = [math.log10(f.value) for f in records]
-    assert sec_edgar._beyond_assets(records, logs) == {3}
+    assert sec_edgar._beyond_assets(records, logs, set(), set()) == {3}
 
 
 async def test_a_balance_that_jumps_by_orders_of_magnitude_is_flagged() -> None:
@@ -2223,3 +2223,129 @@ async def test_a_held_bar_leaves_a_hole_and_never_shifts_the_window(ctx_factory:
     await adapter.aclose()
     assert [b.ts for b in resp.records if isinstance(b, Bar)] == [days[-3], days[-1]]
     assert [b.ts for b in resp.quarantined if isinstance(b, Bar)] == [days[-2]]
+
+
+# ------------------------------------------------------------------------------------- review round 10 (P1)
+
+EARLIER_QUARTER = "0001018724-26-000014"
+
+
+async def test_a_mis_scaled_older_filing_never_withholds_the_newest_figures() -> None:
+    """The previous 10-Q's whole column /1000 is held, and must not shrink the total-assets yardstick: the newest
+    quarter's genuine revenue, net income and assets are still served (round-10 regression)."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _scale_filing(EARLIER_QUARTER, 0.001, end="2026-03-31")})
+    newest = {
+        f.concept
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.accession == NEWEST_10Q and f.period_end.isoformat() == "2026-06-30"
+    }
+    assert {"RevenueFromContractWithCustomerExcludingAssessedTax", "NetIncomeLoss", "Assets"} <= newest
+    assert not [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.accession == EARLIER_QUARTER and f.period_end == date(2026, 3, 31)
+    ]
+
+
+def _scale_concepts(accession: str, factor: float, concepts: set[str]) -> Mutator:
+    def edit(data: dict[str, Any]) -> None:
+        for concept in concepts:
+            for fact in data["facts"]["us-gaap"][concept]["units"]["USD"]:
+                if fact["accn"] == accession:
+                    fact["val"] *= factor
+
+    return _json_edit(edit)
+
+
+TAX_COMPONENTS = {
+    "CurrentIncomeTaxExpenseBenefit", "DeferredIncomeTaxExpenseBenefit", "CurrentFederalTaxExpenseBenefit",
+    "CurrentStateAndLocalTaxExpenseBenefit", "CurrentForeignTaxExpenseBenefit",
+    "DeferredFederalIncomeTaxExpenseBenefit", "DeferredStateAndLocalIncomeTaxExpenseBenefit",
+    "DeferredForeignIncomeTaxExpenseBenefit",
+}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("concepts", "factor"),
+    [
+        ({"FederalIncomeTaxExpenseBenefitContinuingOperations"}, 1000.0),  # 11x total assets: within the bound
+        ({"CurrentFederalTaxExpenseBenefit"}, 0.001),
+        (TAX_COMPONENTS, 0.001),  # the whole current/deferred table, every year in the 10-K
+        (TAX_COMPONENTS, 1000.0),
+    ],
+)
+async def test_tax_lines_that_break_their_identities_are_held(concepts: set[str], factor: float) -> None:
+    """total = current + deferred = federal + state + foreign: a mis-scaled group of lines is found by the identities
+    and blamed by its own history; the genuine total is never the one withheld."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _scale_concepts(NEWEST_10K, factor, concepts)})
+    served = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.accession == NEWEST_10K and f.concept in concepts
+    ]
+    assert served == []
+    total = [
+        f.value
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept == "IncomeTaxExpenseBenefit" and f.accession == NEWEST_10K
+        and f.period_end.isoformat() == "2025-12-31"
+    ]  # fmt: skip
+    assert total == [19_087_000_000.0]
+
+
+async def test_a_flagged_fact_ten_times_total_assets_is_held() -> None:
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    concept = "CashAndCashEquivalentsAtCarryingValue"
+    resp = await _replay(
+        SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10Q, 1000.0, concept=concept, end="2026-06-30")}
+    )
+    assert not [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact)
+        and f.concept == concept
+        and f.accession == NEWEST_10Q
+        and f.period_end.isoformat() == "2026-06-30"
+    ]
+
+
+def test_small_filers_and_cumulative_equity_are_not_bounded_by_assets() -> None:
+    def fact(concept: str, value: float) -> FundamentalFact:
+        return FundamentalFact(
+            cik="0000000001", concept=concept, taxonomy="us-gaap", unit="USD", value=value,
+            period_end=date(2025, 12, 31), form="10-K", filed=date(2026, 2, 1), accession="a",
+        )  # fmt: skip
+
+    shell = [fact("Assets", 2e4), fact("AdditionalPaidInCapital", 4e7), fact("Liabilities", 6e6)]
+    biotech = [fact("Assets", 2e7), fact("RetainedEarningsAccumulatedDeficit", -2.5e9)]
+    for records in (shell, biotech):
+        logs: list[float | None] = [math.log10(abs(f.value)) for f in records]
+        assert sec_edgar._beyond_assets(records, logs, set(), set()) == set()
+
+
+async def test_malformed_kraken_chart_bodies_are_outages(ctx_factory: Any) -> None:
+    end = datetime(2026, 10, 21, tzinfo=UTC)
+    server = _kraken_range_server(end, timedelta(hours=1), bad_last=False)
+    for body in ({}, {"candles": None}, [1, 2, 3]):
+
+        def broken(req: httpx.Request, body: Any = body) -> httpx.Response:
+            return httpx.Response(200, json=body) if "/charts/" in req.url.path else server(req)
+
+        ctx, _ = ctx_factory(broken, now=end + timedelta(minutes=5), cache=False)
+        adapter = KrakenFuturesAdapter(ctx)
+        with pytest.raises(ProviderDown, match="malformed"):
+            await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "BTC/USD:USD", "timeframe": "1h"}))
+        await adapter.aclose()
+
+
+async def test_a_few_malformed_ticker_rows_are_left_out_with_a_warning() -> None:
+    request = _plan(SecEdgarAdapter, RequestKind.INSTRUMENTS)
+
+    def one_bad(data: dict[str, Any]) -> None:
+        data["broken"] = {"ticker": "X"}
+
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(one_bad)})
+    assert len(resp.records) > 1000
+    assert any("malformed row" in w for w in resp.quality.warnings)

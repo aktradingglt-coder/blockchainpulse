@@ -14,6 +14,7 @@ from typing import Any, ClassVar
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import ccxt.async_support as ccxt_async
+import orjson
 
 from rd_core.clock import Clock
 from rd_data.adapters.base import (
@@ -222,6 +223,10 @@ class KrakenFuturesAdapter(BaseAdapter):
                 "kraken_futures: no decoded payload (this provider is never served from cache)", provider=self.name
             )
         if request.kind is RequestKind.BARS:
+            for url, body in zip(raw.urls, raw.bodies, strict=True):
+                if "/charts/" in url and not _is_chart_body(body):
+                    # CCXT reads a malformed chart body ({}, null candles) as "no candles": an outage, not "not found"
+                    raise ProviderDown("kraken_futures: malformed chart response", provider=self.name)
             return self._parse_bars(request, parsed["ohlcv"], raw)
         return self._parse_derivatives(request, parsed, raw)
 
@@ -419,3 +424,11 @@ def _warning(symbols: list[str], what: str, name: str) -> CheckResult | None:
     return CheckResult(
         name, passed=False, blocking=False, detail=f"{len(symbols)} symbol(s) {what}: {', '.join(symbols)}"
     )
+
+
+def _is_chart_body(body: bytes) -> bool:
+    try:
+        data = orjson.loads(body)
+    except orjson.JSONDecodeError:
+        return False
+    return isinstance(data, dict) and isinstance(data.get("candles"), list)

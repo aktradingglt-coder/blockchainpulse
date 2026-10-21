@@ -139,7 +139,14 @@ class SecEdgarAdapter(BaseAdapter):
                 rejected += 1
         if not records:
             raise ProviderDown(f"sec: ticker map with no usable rows ({rejected} malformed)", provider=self.name)
-        quality = with_schema_rejections(DataQualityReport("sec:company_tickers", (), (), len(records)), rejected)
+        if rejected and rejected <= len(records) * TICKER_REJECT_SHARE:
+            # A few bad rows in a map of 10,000+ registrants: drop them and warn, never block every lookup.
+            skipped = CheckResult(
+                "schema", passed=False, blocking=False, detail=f"{rejected} malformed row(s) left out"
+            )
+            quality = DataQualityReport("sec:company_tickers", (skipped,), (), len(records))
+        else:
+            quality = with_schema_rejections(DataQualityReport("sec:company_tickers", (), (), len(records)), rejected)
         return ParseResult(tuple(records), quality, None, None)
 
     # ------------------------------------------------------------------------------------------ filings
@@ -350,11 +357,79 @@ _CURRENCY = re.compile(r"^[A-Z]{3}$")
 #: Held facts needed (with FILING_SCALE_SHARE of the column) before a filing's whole column for one date is held.
 COLUMN_MIN_HELD = 3
 #: A currency fact larger than this multiple of the company's own total assets is impossible. On the recorded AMZN
-#: facts the largest ratio is 4.3 (public float); derivative notionals at the largest dealer banks stay below ~30x.
+#: facts the largest ratio is 5.2 (public float, dei) and 2.3 for us-gaap facts; derivative notionals at the largest
+#: dealer banks stay below ~30x and are exempt anyway.
 MAX_ASSETS_MULTIPLE = 100.0
 #: Amounts that are not the company's own and legitimately exceed its balance sheet (derivative notionals, client
-#: assets under management or custody) are exempt, as is the dei taxonomy (public float is a market value).
-_OFF_BALANCE_SHEET = re.compile(r"Notional|UnderManagement|UnderCustody|Custod|Fiduciary")
+#: assets under management or custody), cumulative equity accounts (a long-loss-making company's accumulated deficit
+#: and paid-in capital can dwarf what it has left) and the dei taxonomy (public float is a market value) are exempt.
+_NOT_BOUNDED_BY_ASSETS = re.compile(
+    r"Notional|UnderManagement|UnderCustody|Custod|Fiduciary|PaidInCapital|RetainedEarnings|AccumulatedDeficit"
+    r"|StockholdersEquity|TreasuryStock|AccumulatedOtherComprehensive"
+)
+#: Below this total (in the reporting currency) a company's assets say little about the size of its line items.
+MIN_ASSETS_FOR_BOUND = 1e7
+#: A fact already flagged as unusual against its own history is held from this multiple of total assets.
+FLAGGED_ASSETS_MULTIPLE = 10.0
+#: Share of malformed rows the ticker map tolerates (left out with a warning) before the whole map is refused.
+TICKER_REJECT_SHARE = 0.01
+#: Largest identity system (terms sharing identities, e.g. the 12-line income-tax table) solved by search.
+MAX_IDENTITY_TERMS = 14
+#: A group of facts this close to its own history (orders of magnitude) is taken as correctly scaled.
+CONSISTENT_DISTANCE = 1.0
+#: Exact US-GAAP identities, checked within one filing and period: total = sum of parts. Applied only where every term
+#: is reported; on the recorded AMZN facts all 261 instances hold to within 1%.
+IDENTITIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("IncomeTaxExpenseBenefit", ("CurrentIncomeTaxExpenseBenefit", "DeferredIncomeTaxExpenseBenefit")),
+    (
+        "CurrentIncomeTaxExpenseBenefit",
+        ("CurrentFederalTaxExpenseBenefit", "CurrentStateAndLocalTaxExpenseBenefit", "CurrentForeignTaxExpenseBenefit"),
+    ),
+    (
+        "DeferredIncomeTaxExpenseBenefit",
+        (
+            "DeferredFederalIncomeTaxExpenseBenefit",
+            "DeferredStateAndLocalIncomeTaxExpenseBenefit",
+            "DeferredForeignIncomeTaxExpenseBenefit",
+        ),
+    ),
+    (
+        "IncomeTaxExpenseBenefit",
+        (
+            "FederalIncomeTaxExpenseBenefitContinuingOperations",
+            "StateAndLocalIncomeTaxExpenseBenefitContinuingOperations",
+            "ForeignIncomeTaxExpenseBenefitContinuingOperations",
+        ),
+    ),
+    (
+        "FederalIncomeTaxExpenseBenefitContinuingOperations",
+        ("CurrentFederalTaxExpenseBenefit", "DeferredFederalIncomeTaxExpenseBenefit"),
+    ),
+    (
+        "StateAndLocalIncomeTaxExpenseBenefitContinuingOperations",
+        ("CurrentStateAndLocalTaxExpenseBenefit", "DeferredStateAndLocalIncomeTaxExpenseBenefit"),
+    ),
+    (
+        "ForeignIncomeTaxExpenseBenefitContinuingOperations",
+        ("CurrentForeignTaxExpenseBenefit", "DeferredForeignIncomeTaxExpenseBenefit"),
+    ),
+    (
+        "IncomeTaxesPaidNet",
+        (
+            "IncomeTaxPaidFederalAfterRefundReceived",
+            "IncomeTaxPaidStateAndLocalAfterRefundReceived",
+            "IncomeTaxPaidForeignAfterRefundReceived",
+        ),
+    ),
+    (
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+        (
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign",
+        ),
+    ),
+    ("LiabilitiesAndStockholdersEquity", ("Assets",)),
+)
 #: A balance (instant fact) in a recent filing that moved more than 10^INSTANT_FLAG_STEP from the previous period end
 #: is flagged: balances move smoothly (3 genuine moves that large in 17 years of AMZN balances).
 INSTANT_FLAG_STEP = 2.0
@@ -410,12 +485,13 @@ def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     held |= _filing_disagreements(records, logs, by_period, neighbours)
     held |= _additivity_errors(records, neighbours)
     held |= _prefix_errors(records, logs, neighbours)
-    held |= _beyond_assets(records, logs)
+    held |= _identity_errors(records, held, neighbours)
     recent = _recent_accessions(records)
     for i, f in enumerate(records):
         step = neighbours.previous_step(i) if f.period_start is None and f.accession in recent else None
         if step is not None and step > INSTANT_FLAG_STEP:
             flagged.add(i)
+    held |= _beyond_assets(records, logs, held, flagged)
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
     # A filing's column (its facts for one period end) that is mostly held is held whole: the scale was set for the
@@ -427,6 +503,7 @@ def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
         hits = sum(i in held for i in idx)
         if hits >= COLUMN_MIN_HELD and hits / len(idx) >= FILING_SCALE_SHARE:
             held.update(idx)
+    held |= _identity_errors(records, held, neighbours)  # tables that add up around a held term share its scale
     return held, flagged - held
 
 
@@ -495,33 +572,155 @@ def _recent_accessions(records: list[FundamentalFact]) -> set[str]:
     return set(sorted(filed_on, key=filed_on.__getitem__)[-FLAG_FILINGS:])
 
 
-def _beyond_assets(records: list[FundamentalFact], logs: list[float | None]) -> set[int]:
-    """Currency facts more than MAX_ASSETS_MULTIPLE times the company's total assets (same currency) at the nearest
-    period end, as reported by other filings where there are any: no line item can be that large."""
+def _beyond_assets(
+    records: list[FundamentalFact], logs: list[float | None], held: set[int], flagged: set[int]
+) -> set[int]:
+    """Currency facts too large for the company: more than MAX_ASSETS_MULTIPLE times its total assets (same currency),
+    or FLAGGED_ASSETS_MULTIPLE times when the fact is also unusual against its own history. Total assets is the median
+    of the NEIGHBOURS nearest period ends, each as reported by other filings where there are any, leaving out facts
+    already held: one mis-scaled filing cannot shrink the yardstick and hold the newest genuine figures."""
     assets: dict[tuple[str, date], list[tuple[str, float]]] = {}
     for i, f in enumerate(records):
-        if f.concept == "Assets" and f.period_start is None and (v := logs[i]) is not None:
+        if f.concept == "Assets" and f.period_start is None and i not in held and (v := logs[i]) is not None:
             assets.setdefault((f.unit, f.period_end), []).append((f.accession, v))
-    if not assets:
-        return set()
-    limit = math.log10(MAX_ASSETS_MULTIPLE)
     ends: dict[str, list[date]] = {}
     for unit, end in assets:
         ends.setdefault(unit, []).append(end)
-    held: set[int] = set()
+    floor = math.log10(MIN_ASSETS_FOR_BOUND)
+    out: set[int] = set()
     for i, f in enumerate(records):
         value = logs[i]
-        if value is None or f.unit not in ends or f.taxonomy == "dei" or _OFF_BALANCE_SHEET.search(f.concept):
+        if value is None or f.unit not in ends or f.taxonomy == "dei" or _NOT_BOUNDED_BY_ASSETS.search(f.concept):
             continue
-        nearest = sorted(ends[f.unit], key=lambda e: abs((e - f.period_end).days))
-        others = next(
-            ([v for acc, v in assets[(f.unit, e)] if acc != f.accession] for e in nearest
-             if any(acc != f.accession for acc, _ in assets[(f.unit, e)])),
-            [v for _, v in assets[(f.unit, nearest[0])]],
-        )  # fmt: skip
-        if value - statistics.median(others) > limit:
-            held.add(i)
-    return held
+        nearest = sorted(ends[f.unit], key=lambda e: abs((e - f.period_end).days))[:NEIGHBOURS]
+        levels = []
+        for e in nearest:
+            reported = assets[(f.unit, e)]
+            others = [v for acc, v in reported if acc != f.accession] or [v for _, v in reported]
+            levels.append(statistics.median(others))
+        reference = statistics.median(levels)
+        if reference < floor:
+            continue
+        limit = math.log10(FLAGGED_ASSETS_MULTIPLE if i in flagged else MAX_ASSETS_MULTIPLE)
+        if value - reference > limit:
+            out.add(i)
+    return out
+
+
+def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours: _Neighbours) -> set[int]:
+    """IDENTITIES within one filing and period, solved together: identities that share terms form one system. A broken
+    system is repaired by rescaling a group of its terms by a power of 1000 so that every identity holds again (each
+    repaired identity needing every term). Scaling a group up is the same as scaling the rest down, so the two sides
+    are weighed against their own earlier periods (_blame); when that does not decide, the whole system is held.
+    An identity that holds as reported but has a held term is held whole: its terms were tabled, and mis-scaled,
+    together."""
+    wanted = {c for total, parts in IDENTITIES for c in (total, *parts)}
+    index: dict[tuple[str, str, date | None, date], dict[str, int]] = {}
+    for i, f in enumerate(records):
+        if f.concept in wanted and _CURRENCY.match(f.unit):
+            index.setdefault((f.accession, f.unit, f.period_start, f.period_end), {})[f.concept] = i
+    out: set[int] = set()
+    consistent: list[list[int]] = []
+    for terms in index.values():
+        present = [
+            [terms[total], *(terms[p] for p in parts)]
+            for total, parts in IDENTITIES
+            if total in terms and all(p in terms for p in parts)
+        ]
+        broken = [idx for idx in present if not _balances([records[k].value for k in idx])]
+        consistent += [idx for idx in present if idx not in broken]
+        for system in _systems(present):
+            if any(idx in broken for idx in system):
+                out |= _repair(records, system, [idx for idx in system if idx in broken], neighbours)
+    known = held | out
+    for _ in range(len(IDENTITIES)):  # spread through nested identities (total -> current -> current federal)
+        spread = {k for idx in consistent if any(k2 in known for k2 in idx) for k in idx} - known
+        if not spread:
+            break
+        known |= spread
+        out |= spread
+    return out
+
+
+def _systems(identities: list[list[int]]) -> list[list[list[int]]]:
+    """Group identities that share terms."""
+    systems: list[list[list[int]]] = []
+    for idx in identities:
+        joined = [s for s in systems if any(set(idx) & set(other) for other in s)]
+        merged = [idx, *(other for s in joined for other in s)]
+        systems = [s for s in systems if s not in joined] + [merged]
+    return systems
+
+
+def _repair(
+    records: list[FundamentalFact], system: list[list[int]], broken: list[list[int]], neighbours: _Neighbours
+) -> set[int]:
+    terms = sorted({k for idx in system for k in idx})
+    if len(terms) > MAX_IDENTITY_TERMS:
+        return set(terms)  # too large to solve here: hold rather than guess
+    wrong: set[int] = set()
+    undecided = False
+    for size in range(1, len(terms) // 2 + 1):
+        for group in itertools.combinations(terms, size):
+            rest = [k for k in terms if k not in group]
+            if size * 2 == len(terms) and rest < list(group):
+                continue  # an even split is the same pair seen from the other side
+            if not any(_repaired(records, system, broken, set(group), 1000.0**k) for k in (-2, -1, 1, 2)):
+                continue
+            blamed = _blame(neighbours, list(group), rest, frozenset({records[terms[0]].accession}))
+            if blamed is None:
+                undecided = True
+            else:
+                wrong |= set(blamed)
+    if undecided:
+        return set(terms)
+    return wrong
+
+
+def _repaired(
+    records: list[FundamentalFact], system: list[list[int]], broken: list[list[int]], group: set[int], factor: float
+) -> bool:
+    def value(k: int) -> float:
+        return records[k].value * factor if k in group else records[k].value
+
+    return all((_balances_with_every_term if idx in broken else _balances)([value(k) for k in idx]) for idx in system)
+
+
+def _blame(neighbours: _Neighbours, one: list[int], other: list[int], own: frozenset[str]) -> list[int] | None:
+    """Which of two groups is mis-scaled, judged by how far each sits from its own earlier periods (as other filings
+    report them; members with no history are left out of the mean). A group with no history at all is blamed when the
+    other side sits well within its history (under 10^CONSISTENT_DISTANCE), and cleared when the other side is far."""
+    a, b = _known_mean(neighbours, one, own), _known_mean(neighbours, other, own)
+    if a is not None and b is not None:
+        if abs(a - b) >= DECISIVE_MARGIN:
+            return one if a > b else other
+        return None
+    if a is None and b is None:
+        return None
+    known, unknown, score = (one, other, a) if a is not None else (other, one, b)
+    assert score is not None  # noqa: S101 - one side is known here
+    if score < CONSISTENT_DISTANCE:
+        return unknown
+    if score > FLAG_DISTANCE:
+        return known
+    return None
+
+
+def _known_mean(neighbours: _Neighbours, group: list[int], own: frozenset[str]) -> float | None:
+    found = [d for i in group if (d := neighbours.distance(i, own)) is not None]
+    return statistics.mean(found) if found else None
+
+
+def _balances(values: Sequence[float]) -> bool:
+    total, *parts = values
+    return abs(total - sum(parts)) <= ADDITIVITY_TOLERANCE * max(abs(v) for v in values)
+
+
+def _balances_with_every_term(values: Sequence[float]) -> bool:
+    """The identity holds and needs every term: rescaling one term into insignificance proves nothing."""
+    return _balances(values) and not any(
+        _balances([0.0 if j == k else v for j, v in enumerate(values)]) for k in range(len(values))
+    )
 
 
 def _fact_holds(records: list[FundamentalFact], distance: dict[int, float]) -> tuple[set[int], set[int]]:
