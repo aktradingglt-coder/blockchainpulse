@@ -29,7 +29,7 @@ from rd_data.adapters.sec_edgar import SecEdgarAdapter
 from rd_data.adapters.treasury import COLUMNS, TreasuryAdapter
 from rd_data.adapters.twelvedata import TwelveDataAdapter
 from rd_data.cassette import Cassette, RecordingTransport, ReplayTransport
-from rd_data.errors import DataQualityError, InvalidArgs, ProviderDown, RateLimited, Stale
+from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown, RateLimited, Stale
 from rd_data.freshness import ExchangeCalendar, Freshness
 from rd_data.http import HttpFetcher, redact_params
 from rd_data.quality import check_interval_gaps
@@ -1449,3 +1449,172 @@ def test_weekly_equity_gaps_are_detected() -> None:
 )  # fmt: skip
 def test_round4_credential_names_are_redacted(name: str) -> None:
     assert redact_params({name: "v" * 12}) == {name: "REDACTED"}
+
+
+# ------------------------------------------------------------------------------------- review round 5 (P1)
+
+
+def _kraken_range_server(
+    end: datetime, width: timedelta, *, bad_last: bool
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A charts endpoint that honours from/to like the real API (500 bars of history up to ``end``)."""
+    request = _plan(KrakenFuturesAdapter, RequestKind.BARS)
+    markets = next(
+        it.body
+        for it in Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request)).interactions
+        if "instruments" in it.url
+    )
+    starts = [end - width * k for k in range(500, 0, -1)]
+
+    def candle(i: int, t: datetime) -> dict[str, Any]:
+        close = 100 + 0.3 * math.sin(i) + 0.1 * math.cos(3 * i)
+        if bad_last and t == starts[-1]:
+            close *= 50
+        return {"time": int(t.timestamp() * 1000), "open": str(close), "high": str(close * 1.002),
+                "low": str(close * 0.998), "close": str(close), "volume": "5"}  # fmt: skip
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "instruments" in req.url.path:
+            return httpx.Response(200, text=markets)
+        lo, hi = int(req.url.params["from"]), int(req.url.params["to"])
+        rows = [candle(i, t) for i, t in enumerate(starts) if lo <= t.timestamp() <= hi]
+        return httpx.Response(200, json={"candles": rows, "more_candles": False})
+
+    return handler
+
+
+@pytest.mark.parametrize(("timeframe", "width"), [("1d", timedelta(days=1)), ("1h", timedelta(hours=1))])
+@pytest.mark.parametrize("limit", [None, 25])
+async def test_incremental_kraken_polls_since_the_last_bar_are_checked(
+    ctx_factory: Any, timeframe: str, width: timedelta, limit: int | None
+) -> None:
+    """``since_ms`` = the last stored bar: only a few bars are new, but QA still sees 30 of history."""
+    end = datetime(2026, 10, 21, tzinfo=UTC)
+    now = end + timedelta(minutes=5)
+    sent: list[httpx.Request] = []
+    server = _kraken_range_server(end, width, bad_last=True)
+
+    def recording(req: httpx.Request) -> httpx.Response:
+        sent.append(req)
+        return server(req)
+
+    ctx, _ = ctx_factory(recording, now=now, cache=False)
+    adapter = KrakenFuturesAdapter(ctx)
+    since = int((end - 5 * width).timestamp() * 1000)
+    params: dict[str, Any] = {"symbol": "BTC/USD:USD", "timeframe": timeframe, "since_ms": since}
+    if limit is not None:
+        params["limit"] = limit
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params=params))
+    await adapter.aclose()
+    bars = [b for b in resp.records if isinstance(b, Bar)]
+    assert bars
+    assert all(b.ts.timestamp() * 1000 >= since for b in bars)  # context is never returned
+    assert max(b.close for b in bars) < 200
+    assert len(resp.quarantined) == 1
+    charts = next(r for r in sent if "/charts/" in r.url.path)
+    assert int(charts.url.params["from"]) <= since // 1000 - 25 * int(width.total_seconds())
+    assert int(charts.url.params["to"]) <= int(now.timestamp())  # the injected clock, not the wall clock
+
+
+def _fred_daily(values: list[float]) -> tuple[str, str]:
+    info, _ = _fred_bodies()
+    days = [datetime(2026, 10, 20, tzinfo=UTC) - timedelta(days=k) for k in range(len(values) * 2)]
+    days = sorted(d for d in days if d.weekday() < 5)[-len(values) :]
+    vintage = {"realtime_start": "2026-10-21", "realtime_end": "2026-10-21"}
+    obs = {
+        "observations": [
+            {**vintage, "date": d.strftime("%Y-%m-%d"), "value": f"{v:.2f}"} for d, v in zip(days, values, strict=True)
+        ]
+    }
+    return info, json.dumps(obs)
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1, 2.0])
+async def test_impossible_latest_fred_daily_yield_is_held(ctx_factory: Any, factor: float) -> None:
+    values = [4.08 + 0.03 * math.sin(k) for k in range(60)]
+    values[-1] *= factor
+    info, obs = _fred_daily(values)
+    ctx, _ = ctx_factory(
+        lambda r: httpx.Response(200, text=info if r.url.path.endswith("/series") else obs),
+        flags={"provider_fred": True},
+        **SETTINGS,
+    )
+    adapter = FredAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"}))
+    await adapter.aclose()
+    assert len(resp.quarantined) == 1
+    assert all(isinstance(o, MacroObservation) and (o.value or 0) < 5 for o in resp.records)
+
+
+async def test_rate_limited_probe_is_released_and_auth_failures_count(ctx_factory: Any) -> None:
+    clock = [1_000.0]
+    calls: list[int] = []
+    answers = iter([httpx.Response(429), httpx.Response(200, json=[])])
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return next(answers)
+
+    ctx, _ = ctx_factory(handler, cache=False)
+    ctx.breaker = CircuitBreaker(MemoryStateStore(clock=lambda: clock[0]), failure_threshold=1, cooldown_s=60)
+    await ctx.breaker.record_failure("cftc", "HTTP 503")
+    clock[0] += 61
+    adapter = CftcAdapter(ctx)
+    adapter.http._sleep = _record_sleep([])
+    adapter.http._max_attempts = 1
+    request = DataRequest(kind=RequestKind.COT, params={"report_type": "tff", "market_code": "099741"})
+    with pytest.raises(RateLimited):
+        await adapter.fetch(request)  # the probe is answered 429: no verdict, probe given back
+    with pytest.raises(NotFound):  # one second later the next fetch may probe at once
+        await adapter.fetch(request)
+    await adapter.aclose()
+    assert len(calls) == 2
+
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(403), **SETTINGS)
+    eia = EiaAdapter(ctx)
+    for _ in range(5):
+        with pytest.raises(ProviderDown, match="authorization"):
+            await eia.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1"}))
+    await eia.aclose()
+    assert (await ctx.breaker.status("eia")).state is CircuitState.OPEN  # a revoked key shows as down
+
+
+async def test_cot_moderate_latest_moves_are_flagged_and_old_gaps_do_not_block(ctx_factory: Any) -> None:
+    request = _plan(CftcAdapter, RequestKind.COT, report_type="disaggregated", futures_only=None)
+    cassette = Cassette.load(CASSETTES / "cftc" / cassette_name(request))
+    rows = json.loads(cassette.interactions[0].body)
+    scaled = [dict(r) for r in rows]
+    scaled[0] = {
+        k: (str(float(v) * 2.5) if ("positions" in k or k == "open_interest_all") else v) for k, v in rows[0].items()
+    }
+    resp = await _replay(CftcAdapter, request, {0: lambda _b: json.dumps(scaled)})
+    assert any("large_moves" in w for w in resp.quality.warnings)  # shown, but flagged for review
+
+    gappy = [r for i, r in enumerate(rows) if i not in (20, 21)]  # two weeks missing ~5 months back
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=gappy), now=cassette.replay_time)
+    adapter = CftcAdapter(ctx)
+    params = {"report_type": "disaggregated", "market_code": "067651", "weeks": 4}
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.COT, params=params))
+    await adapter.aclose()
+    assert len(resp.records) == 4  # the gap is outside the weeks asked for: no block
+
+
+async def test_unlisted_eia_series_hold_impossible_latest_and_kraken_overflow_is_typed(ctx_factory: Any) -> None:
+    values = _crude()
+    values[-1] = (values[-1] or 0.0) * 10
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=_eia_body(values, series="WTTSTUS1")), **SETTINGS)
+    adapter = EiaAdapter(ctx)
+    resp = await adapter.fetch(
+        DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WTTSTUS1", "route": "petroleum/stoc/wstk"})
+    )
+    await adapter.aclose()
+    assert len(resp.quarantined) == 1
+
+    hour = datetime(2026, 10, 21, 10, tzinfo=UTC)
+    candles = _hourly_candles(40, hour)
+    candles[5]["time"] = 10**20  # beyond any representable date
+    ctx, _ = ctx_factory(_kraken_handler(candles), now=hour + timedelta(minutes=5), cache=False)
+    kraken = KrakenFuturesAdapter(ctx)
+    with pytest.raises(DataQualityError, match="schema"):
+        await kraken.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "BTC/USD:USD", "timeframe": "1h"}))
+    await kraken.aclose()

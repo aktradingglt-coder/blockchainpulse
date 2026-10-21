@@ -167,7 +167,9 @@ class EiaAdapter(BaseAdapter):
             subject=f"eia:{series}",
             lo=info.lo if info else None,
             hi=info.hi if info else None,
-            stock=info.stock if info else False,
+            # Unlisted weekly series are physical quantities too (stocks, production, flows): a x10 week is never
+            # real, so they are held like the catalogue's stocks.
+            level_like=info.stock if info else True,
         )
         units = sorted({o.unit for o in obs})
         extra = [
@@ -180,7 +182,9 @@ class EiaAdapter(BaseAdapter):
             ),
         ]
         if frequency in _PERIODS:
-            extra.append(check_cadence([o.ts for o in obs], period=_PERIODS[frequency]))
+            # judged on the weeks asked for, not on the extra QA history behind them
+            wanted_ts = [o.ts for o in obs][-int(request.params.get("length", 260)) :]
+            extra.append(check_cadence(wanted_ts, period=_PERIODS[frequency]))
         quality = with_schema_rejections(
             DataQualityReport(report.subject, (*report.checks, *extra), report.quarantined, report.record_count),
             rejected,

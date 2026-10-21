@@ -32,6 +32,8 @@ from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, DataType, MacroObservation
 
 _SERIES = re.compile(r"^[A-Z0-9_]{1,30}$")
+#: Plausible range for a series measured in percent (rates, yields, unemployment); outside it is a unit error.
+PERCENT_RANGE = (-50.0, 100.0)
 _FREQ = {"D": "daily", "W": "weekly", "BW": "weekly", "M": "monthly", "Q": "quarterly", "SA": "annual", "A": "annual"}
 
 
@@ -104,7 +106,15 @@ class FredAdapter(BaseAdapter):
                 rejected += 1
         order = check_provider_order([o.ts for o in obs], descending=False)  # FRED returns ascending dates
         obs.sort(key=lambda o: o.ts)
-        report, usable = check_series(obs, subject=f"fred:{series}")
+        percent = unit in ("%", "Percent")
+        report, usable = check_series(
+            obs,
+            subject=f"fred:{series}",
+            lo=PERCENT_RANGE[0] if percent else None,
+            hi=PERCENT_RANGE[1] if percent else None,
+            # Daily FRED series are market levels (yields, FX, commodity prices): the price rule applies (D-031).
+            level_like=frequency == "daily",
+        )
         quality = with_schema_rejections(
             DataQualityReport(report.subject, (*report.checks, order), report.quarantined, report.record_count),
             rejected,

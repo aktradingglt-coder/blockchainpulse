@@ -186,7 +186,13 @@ class HttpFetcher:
         """Count a 2xx whose body the caller could not use as a provider failure (circuit breaker)."""
         await self._breaker.record_failure(self.provider, detail)
 
-    def _client_error(self, status: int, shown: str) -> Exception:
+    async def _client_error(self, status: int, shown: str) -> Exception:
+        if status in (401, 403):
+            # A rejected key or plan makes the provider unusable until someone acts: count it, so the status page
+            # shows the source as down rather than healthy.
+            await self._breaker.record_failure(self.provider, f"HTTP {status} (authorization)")
+        else:
+            await self._breaker.record_success(self.provider)  # the service answered; the request was wrong
         if status == 404:
             return NotFound(f"{self.provider}: not found ({shown})", provider=self.provider)
         if status in (401, 403):
@@ -297,8 +303,7 @@ class HttpFetcher:
                 waited += wait
                 await self._sleep(wait)
                 continue
-            await self._breaker.record_success(self.provider)  # the service answered; the request was wrong
-            raise self._client_error(status, shown)
+            raise await self._client_error(status, shown)
         raise ProviderDown(
             f"{self.provider}: unavailable after {self._max_attempts} attempt(s): {last_error}", provider=self.provider
         )

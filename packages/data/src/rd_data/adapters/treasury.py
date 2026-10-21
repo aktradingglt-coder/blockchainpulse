@@ -135,7 +135,8 @@ class TreasuryAdapter(BaseAdapter):
         quality = with_schema_rejections(
             DataQualityReport(f"treasury:{year}", tuple(checks), tuple(sorted(held)), len(all_points)), rejected
         )
-        as_of = _latest_full_curve(usable)
+        # The newest day with a full core curve; if none is complete, the newest usable day (never "no date").
+        as_of = _latest_full_curve(usable) or (usable[-1].ts if usable else None)
         notes = [f"Quality checks used {len(days)} days of context."]
         spec: FreshnessSpec | None = FreshnessSpec(DataType.DAILY_BAR, NYSE)
         if year < raw.retrieved_at.year:

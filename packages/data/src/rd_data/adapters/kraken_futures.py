@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import ccxt.async_support as ccxt_async
 
+from rd_core.clock import Clock
 from rd_data.adapters.base import (
     AdapterContext,
     BaseAdapter,
@@ -73,11 +74,19 @@ SYMBOL_MAX_AGE = timedelta(hours=6)
 class _RoutedKrakenFutures(ccxt_async.krakenfutures):  # type: ignore[misc]  # ccxt classes are untyped
     """CCXT exchange whose HTTP goes through our fetcher and whose raw bodies are captured for evidence."""
 
-    def __init__(self, fetcher: HttpFetcher) -> None:
+    def __init__(self, fetcher: HttpFetcher, clock: Clock) -> None:
         super().__init__({"enableRateLimit": False})
         self._rd_http = fetcher
+        self._rd_clock = clock
         self.rd_bodies: list[bytes] = []
         self.rd_urls: list[str] = []
+
+    def seconds(self) -> int:
+        """CCXT builds OHLCV time ranges from "now": use the injected clock, never the wall clock (determinism)."""
+        return int(self._rd_clock.now().timestamp())
+
+    def milliseconds(self) -> int:
+        return int(self._rd_clock.now().timestamp() * 1000)
 
     async def fetch(self, url: str, method: str = "GET", headers: Any = None, body: Any = None) -> Any:  # noqa: ANN401, ARG002 - CCXT signature; public endpoints need no headers
         if method.upper() != "GET" or body:
@@ -156,22 +165,25 @@ class KrakenFuturesAdapter(BaseAdapter):
                 raise InvalidArgs("kraken_futures: symbols must be comma-separated unified symbols", provider=self.name)
 
     async def _download(self, request: DataRequest) -> RawPayload:
-        exchange = _RoutedKrakenFutures(self.http)
+        exchange = _RoutedKrakenFutures(self.http, self.ctx.clock)
         try:
             await self._load_markets(exchange)
             if request.kind is RequestKind.BARS:
                 tf, width = TIMEFRAMES[str(request.params.get("timeframe", "1d"))]
                 since = request.params.get("since_ms")
                 limit = int(request.params.get("limit", 200))
-                # Never fewer than QA_CONTEXT bars, so the latest bar is always checked for bad prints; extra bars
-                # come from before the requested window and are trimmed off after QA.
-                fetch_limit = max(limit, QA_CONTEXT)
-                extra_ms = (fetch_limit - limit) * int(width.total_seconds() * 1000)
+                # Never fewer than QA_CONTEXT bars, so the latest bar is always checked for bad prints. The extra
+                # bars come from before the requested window (trimmed off after QA) and are sized by how many bars
+                # the window can actually hold by now: "since the last stored bar" may hold only a handful.
+                width_ms = int(width.total_seconds() * 1000)
+                now_ms = int(self.ctx.clock.now().timestamp() * 1000)
+                in_window = limit if since is None else max(0, min(limit, (now_ms - int(since)) // width_ms))
+                extra = max(0, QA_CONTEXT - in_window)
                 rows = await exchange.fetch_ohlcv(
                     str(request.params["symbol"]),
                     tf,
-                    since=int(since) - extra_ms if since is not None else None,
-                    limit=fetch_limit,
+                    since=int(since) - extra * width_ms if since is not None else None,
+                    limit=min(limit + extra, 2000),
                 )
                 decoded: dict[str, Any] = {"ohlcv": rows}
             else:
@@ -235,7 +247,7 @@ class KrakenFuturesAdapter(BaseAdapter):
                         volume=as_float(row[5]),
                     )
                 )
-            except (IndexError, TypeError, ValueError):
+            except (IndexError, TypeError, ValueError, OverflowError, OSError):  # OSError: out-of-range timestamp
                 rejected += 1
         if not bars and not rejected:
             raise NotFound(f"kraken_futures: no closed {tf} candles for {symbol}", provider=self.name)
@@ -245,6 +257,7 @@ class KrakenFuturesAdapter(BaseAdapter):
             calendar=ContinuousCalendar(),
             rejected_rows=rejected,
             bar_width=width,
+            gap_window=int(request.params.get("limit", 200)),
         )
         since = request.params.get("since_ms")
         limit = int(request.params.get("limit", 200))

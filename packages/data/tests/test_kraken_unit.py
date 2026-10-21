@@ -67,7 +67,12 @@ async def test_forming_candle_is_dropped() -> None:
     cassette = _cassette(BARS)
     candles = json.loads(next(i.body for i in cassette.interactions if "charts" in i.url))["candles"]
     last = datetime.fromtimestamp(int(candles[-1]["time"]) / 1000, tz=UTC)
-    adapter = KrakenFuturesAdapter(_ctx(ReplayTransport([cassette]), last.replace(hour=12)))  # last candle still open
+    bodies = {("instruments" if "instruments" in i.url else "charts"): i.body for i in cassette.interactions}
+
+    def by_path(request: httpx.Request) -> httpx.Response:  # the request range now follows the injected clock
+        return httpx.Response(200, text=bodies["instruments" if "instruments" in request.url.path else "charts"])
+
+    adapter = KrakenFuturesAdapter(_ctx(httpx.MockTransport(by_path), last.replace(hour=12)))  # last candle open
     response = await adapter.fetch(BARS)
     assert len(response.records) == len(candles) - 1
     assert max(r.ts for r in response.records) < last  # type: ignore[union-attr]  # bars carry ts
@@ -100,7 +105,7 @@ async def test_routed_exchange_refuses_private_calls() -> None:
         breaker=CircuitBreaker(MemoryStateStore()),
         transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})),
     )
-    ex = _RoutedKrakenFutures(fetcher)
+    ex = _RoutedKrakenFutures(fetcher, FixedClock(datetime(2026, 10, 21, tzinfo=UTC)))
     with pytest.raises(InvalidArgs, match="public GET"):
         await ex.fetch("https://futures.kraken.com/derivatives/api/v3/sendorder", method="POST", body="x")
     await ex.close()

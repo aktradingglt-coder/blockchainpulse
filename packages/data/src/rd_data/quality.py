@@ -521,6 +521,7 @@ def check_bars(
     split_dates: Sequence[date] | None = None,
     corporate_actions_known: bool = False,
     bar_width: timedelta | None = None,
+    gap_window: int | None = None,
     allow_non_positive: bool = False,
     rejected_rows: int = 0,
 ) -> tuple[DataQualityReport, list[Bar]]:
@@ -538,10 +539,12 @@ def check_bars(
     fields = check_field_spikes(bars)
     checks.extend([spikes, jumps, fields])
     checks.append(check_stale_run(closes, market_open_at_end=market_open_at_end))
+    # Gaps are judged on the bars the caller asked for (gap_window), not on the extra QA history behind them.
+    gap_bars = bars[-gap_window:] if gap_window else bars
     if calendar is not None and bars and bars[0].interval == "1d":
-        checks.append(check_gaps(bars, calendar))
+        checks.append(check_gaps(gap_bars, calendar))
     elif calendar is not None and bar_width is not None:
-        checks.append(check_interval_gaps(bars, bar_width, calendar))
+        checks.append(check_interval_gaps(gap_bars, bar_width, calendar))
     if reference is not None:
         checks.append(check_reconciliation(bars, reference))
     if split_dates is not None:
@@ -558,15 +561,16 @@ def check_series(
     subject: str,
     lo: float | None = None,
     hi: float | None = None,
-    stock: bool = False,
+    level_like: bool = False,
 ) -> tuple[DataQualityReport, list[MacroObservation]]:
     """Macro/inventory series: order, duplicates, finite values, physical range and bad prints.
 
     Out-of-range values and extreme moves that revert are quarantined. For *flow* statistics (rates, indices,
     releases) an extreme latest value is kept with a warning: official releases are revised rather than mis-printed,
-    and hiding a genuine record release would misstate the data. For *stock* levels (``stock=True``, e.g. inventories)
-    changes are judged relative to the level, and an extreme latest move is held like a price until later releases
-    confirm it: a stock cannot halve or jump 50% in one week, so such a value is a decimal or unit error (D-031).
+    and hiding a genuine record release would misstate the data. For *levels* (``level_like=True``: inventories and
+    other physical stocks, and daily market rates and prices such as par yields) changes are judged relative to the
+    level when it is positive, and an extreme latest move is held like a price until later observations confirm it:
+    such a value is a decimal, unit or print error far more often than a real move (D-031).
     Missing values are allowed and counted.
     """
     values = [o.value for o in observations]
@@ -574,12 +578,12 @@ def check_series(
     nonfinite = tuple(i for i, v in enumerate(values) if v is not None and not math.isfinite(v))
     range_check = check_range(values, lo=lo, hi=hi, what="series")
     present = [(i, v) for i, v in enumerate(values) if v is not None and i not in range_check.indices]
-    relative = stock and all(v > 0 for _, v in present)
+    relative = level_like and all(v > 0 for _, v in present)
     scan = scan_spikes([math.log(v) if relative else v for _, v in present])
     reverted = tuple(present[j][0] for j in scan.bad_prints)
     unconfirmed = tuple(present[j][0] for j in scan.unconfirmed)
-    held = unconfirmed if stock else ()
-    edge = tuple(sorted({*(() if stock else unconfirmed), *(present[j][0] for j in scan.jumps)}))
+    held = unconfirmed if level_like else ()
+    edge = tuple(sorted({*(() if level_like else unconfirmed), *(present[j][0] for j in scan.jumps)}))
     checks = [
         check_monotonic([o.ts for o in observations]),  # callers pass rows sorted; raw order: check_provider_order
         check_duplicates([o.ts for o in observations]),
@@ -589,7 +593,7 @@ def check_series(
         range_check,
         _fail(
             "outliers",
-            f"{len(reverted)} reverting outlier(s) and {len(held)} unconfirmed stock move(s) quarantined",
+            f"{len(reverted)} reverting outlier(s) and {len(held)} unconfirmed level move(s) quarantined",
             blocking=False,
             indices=tuple(sorted({*reverted, *held})),
         )
@@ -624,14 +628,20 @@ def check_open_interest_moves(reports: Sequence[PositioningReport]) -> tuple[Che
         return max(neighbours, default=0.0) > OI_IMPLAUSIBLE_LOG_MOVE
 
     held = tuple(sorted(i for i in {*scan.bad_prints, *scan.unconfirmed} if implausible(i)))
+    flagged = tuple(sorted({*scan.jumps, *(i for i in {*scan.bad_prints, *scan.unconfirmed} if i not in held)}))
     quarantine = (
         _fail("open_interest_outliers", f"{len(held)} week(s) quarantined", blocking=False, indices=held)
         if held
         else _ok("open_interest_outliers", blocking=False)
     )
     moves = (
-        _fail("large_moves", f"{len(scan.jumps)} confirmed extreme move(s) kept", blocking=False, indices=scan.jumps)
-        if scan.jumps
+        _fail(
+            "large_moves",
+            f"{len(flagged)} extreme open-interest move(s) shown for review",
+            blocking=False,
+            indices=flagged,
+        )
+        if flagged
         else _ok("large_moves", blocking=False)
     )
     return quarantine, moves

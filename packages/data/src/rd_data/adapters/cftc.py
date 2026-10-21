@@ -193,7 +193,10 @@ class CftcAdapter(BaseAdapter):
         order = check_provider_order([r.as_of for r in records], descending=True)  # requested newest first
         records.sort(key=lambda r: r.as_of)
         base = check_positioning(records, subject=f"cftc:{report_type}:{request.params['market_code']}")
-        cadence = check_cadence([r.as_of for r in records], period=timedelta(days=7))
+        # Missing weeks are judged on the weeks asked for, not on the extra QA history behind them.
+        cadence = check_cadence(
+            [r.as_of for r in records][-int(request.params.get("weeks", 156)) :], period=timedelta(days=7)
+        )
         oi_outliers, oi_moves = check_open_interest_moves(records)
         quality = with_schema_rejections(
             DataQualityReport(

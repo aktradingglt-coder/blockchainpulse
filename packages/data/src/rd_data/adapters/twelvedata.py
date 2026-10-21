@@ -157,6 +157,7 @@ class TwelveDataAdapter(BaseAdapter):
             calendar=cal,
             market_open_at_end=cal.is_open(fetched),
             bar_width=width,
+            gap_window=int(request.params.get("outputsize", 200)),
             rejected_rows=rejected,
             split_dates=[] if asset_class == "equity" else None,
         )

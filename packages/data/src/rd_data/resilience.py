@@ -306,6 +306,13 @@ class CircuitBreaker:
                 return
         raise ProviderDown(f"circuit open for {provider} (last error: {status.last_error})", provider=provider)
 
+    async def release_probe(self, provider: str, token: str) -> None:
+        """Give back a half-open probe that ended without a verdict (rate-limited, bad request): the next fetch may
+        probe at once instead of waiting for the probe to expire. A success or failure has already settled it."""
+        key = self._k(provider, "probe")
+        if await self._store.get(key) == token:
+            await self._store.delete(key)
+
     async def record_success(self, provider: str) -> None:
         await self._store.delete(
             self._k(provider, "fails"),

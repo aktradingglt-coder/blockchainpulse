@@ -299,11 +299,13 @@ class BaseAdapter(ABC):
 
     async def fetch(self, request: DataRequest) -> DataResponse:
         """Validated, quality-checked, freshness-labelled, licence-tagged data for ``request``."""
-        token = PROBE_TOKEN.set(uuid.uuid4().hex)  # one half-open probe covers every HTTP call of this fetch
+        probe = uuid.uuid4().hex
+        token = PROBE_TOKEN.set(probe)  # one half-open probe covers every HTTP call of this fetch
         try:
             return await self._fetch(request)
         finally:
             PROBE_TOKEN.reset(token)
+            await self.ctx.breaker.release_probe(self.name, probe)
 
     async def _fetch(self, request: DataRequest) -> DataResponse:
         if request.kind not in self.supported:
@@ -413,7 +415,7 @@ def _freshness_origin(parsed: ParseResult, retrieved_at: datetime, *, provider: 
 
 
 #: Exceptions a parser raises on a payload it cannot understand (wrong type, missing key, not JSON, bad number).
-MALFORMED = (ValueError, KeyError, TypeError, AttributeError, IndexError, UnicodeDecodeError)
+MALFORMED = (ValueError, KeyError, TypeError, AttributeError, IndexError, UnicodeDecodeError, OverflowError)
 
 
 def require_param(request: DataRequest, name: str, provider: str) -> ParamValue:

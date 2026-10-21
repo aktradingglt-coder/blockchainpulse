@@ -204,9 +204,11 @@ apart from a bad print and is quarantined as *unconfirmed* until later bars conf
 kept with a warning. A move beyond ×10 in one bar is implausible, so its run and its confirmation extend to five
 points (three bad ticks in a row are not a market move). Volume is quarantined only when 100× away from the series'
 median. Macro series: values outside the series' physical range and reverting outliers are quarantined. For *flow*
-statistics (rates, indices, releases) an extreme *latest* release is kept with a warning. *Stock* levels — EIA
-inventories and COT open interest — are judged on relative changes and treated like prices: an extreme latest move is
-held until later releases confirm it, because a stock cannot halve or grow 50% in one week (P1 review round 3).
+statistics (monthly/quarterly releases such as unemployment or GDP) an extreme *latest* release is kept with a
+warning. *Levels* — EIA weekly quantities, COT open interest, and daily market series such as FRED yields, FX and
+commodity prices — are judged on relative changes and treated like prices: an extreme latest move is held until
+later observations confirm it (P1 review rounds 3 and 5). Open interest is held only beyond ×3/÷3 (expiry rolls of
+20–40% are shown and flagged).
 Non-finite numbers are refused by every canonical schema.
 **Alternatives.** Quarantine only interior two-sided spikes (the original rule); quarantine every extreme latest
 value, macro included.
@@ -240,7 +242,9 @@ enough that no genuine value approaches them.
 ### D-034 · 2026-10-21 · Circuit-breaker probes cover a whole fetch; bounded responses
 **Decision.** In half-open state the single admitted probe belongs to one *fetch* (a context token), so providers
 that need several HTTP calls per fetch (FRED: series + observations; Kraken: instruments + data) can complete it and
-close the circuit. Success is recorded only after a body parses and clears the last error shown on the status page.
+close the circuit. Success is recorded only after a body parses and clears the last error shown on the status page. A probe that ends
+without a verdict (rate-limited, bad request) is given back at once. HTTP 401/403 count as failures, so a revoked
+key shows the source as down.
 Responses above 64 MB are refused without buffering, and one call waits at most 60 s in total between retries
 (a longer `Retry-After` is reported as `RateLimited` with the hint, for the caller or scheduler to honour).
 **Reason.** P1 review round 3 showed a multi-call provider could never recover once its circuit opened (the second
@@ -248,7 +252,9 @@ call met the taken probe), and that `Retry-After` × retries could stall a fetch
 
 ### D-035 · 2026-10-21 · QA always sees at least 30 points of history
 **Decision.** Every series adapter fetches at least `QA_CONTEXT` = 30 points (bars, weeks, days) whatever window was
-asked for, runs every quality check on that history, and trims the response to the request afterwards. Early in a
+asked for, runs every quality check on that history, and trims the response to the request afterwards. For a
+`since` window the extra history is sized by how many bars the window can hold by now (an incremental poll "since
+the last stored bar" may hold only a few). Gap checks block only on gaps inside the returned window. Early in a
 year the Treasury adapter also fetches the previous year's file as context (never returned). A series still too
 short to check reports "bad prints could not be checked" as a warning rather than passing silently. Week-on-week
 open-interest moves are held only beyond ×3/÷3 (expiry rolls of 20–40% are shown, flagged). EIA supports weekly
