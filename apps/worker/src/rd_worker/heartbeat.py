@@ -30,8 +30,20 @@ def worker_threads_alive(worker: Worker | None) -> bool:
     return bool(consumers) and bool(threads) and all(t.is_alive() for t in [*consumers, *threads])
 
 
+def broker_reachable(broker: Broker | None) -> bool:
+    """A PING round trip on the broker's own Redis client; brokers without a client (tests) count as reachable."""
+    client = getattr(broker, "client", None)
+    if client is None:
+        return True
+    try:
+        return bool(client.ping())
+    except Exception:  # noqa: BLE001 - any connection error means the broker is unreachable
+        return False
+
+
 class HeartbeatMiddleware(Middleware):
-    """Beats only while the worker's consumer and worker threads are alive, so a wedged worker turns unhealthy."""
+    """Beats only while consumer/worker threads are alive and the broker answers PING, so a wedged or disconnected
+    worker turns unhealthy (container healthcheck and /v1/status)."""
 
     def __init__(self, settings: Settings, *, service: str, interval: float = HEARTBEAT_INTERVAL_SECONDS) -> None:
         self._settings = settings
@@ -40,10 +52,12 @@ class HeartbeatMiddleware(Middleware):
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._worker: Worker | None = None
+        self._broker: Broker | None = None
         self._log = get_logger(__name__)
 
-    def after_worker_boot(self, broker: Broker, worker: Worker) -> None:  # noqa: ARG002 - dramatiq hook signature
+    def after_worker_boot(self, broker: Broker, worker: Worker) -> None:
         self._worker = worker
+        self._broker = broker
         self._thread = threading.Thread(target=self._run, name="rd-heartbeat", daemon=True)
         self._thread.start()
 
@@ -62,6 +76,10 @@ class HeartbeatMiddleware(Middleware):
             while not self._stop.is_set():
                 if not worker_threads_alive(self._worker):
                     self._log.error("worker.threads_dead", service=self._service)
+                    await asyncio.to_thread(self._stop.wait, self._interval)
+                    continue
+                if not await asyncio.to_thread(broker_reachable, self._broker):
+                    self._log.error("worker.broker_unreachable", service=self._service)
                     await asyncio.to_thread(self._stop.wait, self._interval)
                     continue
                 try:

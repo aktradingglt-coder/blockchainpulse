@@ -75,3 +75,25 @@ def test_database_url_must_be_asyncpg(monkeypatch: pytest.MonkeyPatch, url: str)
     monkeypatch.setenv("DATABASE_URL", url)
     with pytest.raises(ValidationError):
         Settings()
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "null",
+        "https://",
+        "https://app.example.com/",
+        "javascript:alert(1)",
+        "ftp://files.example.com",
+        "https://app.example.com/path",
+    ],
+)
+def test_malformed_cors_origins_rejected(monkeypatch: pytest.MonkeyPatch, origin: str) -> None:
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", origin)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_cors_origin_with_port_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "http://localhost:3001")
+    assert Settings().cors_allowed_origins == ["http://localhost:3001"]

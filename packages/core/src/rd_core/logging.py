@@ -47,6 +47,18 @@ def _orjson_dumps(obj: Any, default: Any = None) -> str:  # noqa: ANN401 - struc
     return orjson.dumps(obj, default=default).decode()
 
 
+class _StdoutHandler(logging.StreamHandler):  # type: ignore[type-arg]  # generic only in typeshed
+    """Writes to whatever ``sys.stdout`` is at emit time (survives stream replacement by test runners)."""
+
+    @property
+    def stream(self) -> Any:  # noqa: ANN401 - TextIO-like
+        return sys.stdout
+
+    @stream.setter
+    def stream(self, _value: Any) -> None:  # noqa: ANN401
+        return None
+
+
 def configure_logging(*, service: str, level: str = "INFO", fmt: str = "json") -> None:
     """Configure structlog + stdlib logging once per process. Idempotent."""
     global _configured  # noqa: PLW0603 - process-wide logging setup is inherently global
@@ -68,10 +80,10 @@ def configure_logging(*, service: str, level: str = "INFO", fmt: str = "json") -
     structlog.configure(
         processors=[*shared, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(logging.getLevelNamesMapping()[level]),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=structlog.PrintLoggerFactory(),  # resolves sys.stdout per logger, not once at configure time
         cache_logger_on_first_use=False,
     )
-    handler = logging.StreamHandler(sys.stdout)
+    handler = _StdoutHandler()
     handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
             foreign_pre_chain=shared,

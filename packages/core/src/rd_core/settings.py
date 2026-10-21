@@ -7,6 +7,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import AnyHttpUrl, Field, PostgresDsn, RedisDsn, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -97,8 +98,15 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _strict_cors(self) -> Settings:
         for origin in self.cors_allowed_origins:
-            if origin == "*" or "*" in origin:
+            if "*" in origin:
                 raise ValueError("CORS_ALLOWED_ORIGINS must list explicit origins; wildcards are not allowed")
+            parts = urlsplit(origin)
+            if (
+                parts.scheme not in ("http", "https")
+                or not parts.hostname
+                or origin != f"{parts.scheme}://{parts.netloc}"
+            ):
+                raise ValueError(f"invalid CORS origin {origin!r}: use scheme://host[:port] with no path or slash")
             if self.app_env in (AppEnv.STAGING, AppEnv.PRODUCTION) and not origin.startswith("https://"):
                 raise ValueError("CORS origins must use https:// in staging and production")
         return self

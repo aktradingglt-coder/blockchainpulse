@@ -20,6 +20,11 @@ describe("loadProduct", () => {
     expect(() => loadProduct(dir)).toThrow();
   });
 
+  it("defaults to the repository config directory", () => {
+    delete process.env.CONFIG_DIR;
+    expect(configDir().endsWith("/config")).toBe(true);
+  });
+
   it("honours CONFIG_DIR", () => {
     process.env.CONFIG_DIR = "/tmp/somewhere";
     expect(configDir()).toBe("/tmp/somewhere");

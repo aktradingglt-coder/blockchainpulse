@@ -182,3 +182,27 @@ def test_compose_placeholders_are_not_flagged(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        lambda: 'headers = {"Authorization": "Basic ' + _random(24) + '"}',
+        lambda: "url = 'https://api.example.com/v1?api_key=" + secrets.token_hex(16) + "'",
+        lambda: 'headers = {"x-api-key": "' + secrets.token_hex(16) + '"}',
+    ],
+    ids=["basic-auth", "hex-api-key-query", "hex-api-key-header"],
+)
+def test_round4_secret_shapes_detected(tmp_path: Path, content: object) -> None:
+    assert callable(content)
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "client.py").write_text(content() + "\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "plant")
+    result = subprocess.run(  # noqa: S603
+        [_gitleaks(), "git", "--config", str(REPO / ".gitleaks.toml"), "--no-banner", "--redact", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr

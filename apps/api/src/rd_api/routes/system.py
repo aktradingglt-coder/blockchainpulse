@@ -49,7 +49,7 @@ async def readyz(request: Request) -> JSONResponse:
 
 @router.get("/v1/status")
 async def status(request: Request) -> dict[str, Any]:
-    """Public pipeline status (feeds the status page): component heartbeats and scheduler leadership."""
+    """Public pipeline status (feeds the status page): worker/scheduler heartbeats, queue reachability, leadership."""
     state = request.app.state.rd
     components: dict[str, Any] = {}
     for service in ("rd-worker", "rd-scheduler"):
@@ -61,6 +61,10 @@ async def status(request: Request) -> dict[str, Any]:
             }
         except Exception as exc:  # noqa: BLE001 - status reports, never raises
             components[service] = {"ok": False, "error": type(exc).__name__}
+    try:
+        components["queue"] = {"ok": bool(await state.redis.ping())}
+    except Exception as exc:  # noqa: BLE001 - status reports, never raises
+        components["queue"] = {"ok": False, "error": type(exc).__name__}
     try:
         leader = await leader_of(state.engine, "rd-scheduler", HEARTBEAT_MAX_AGE)
         components["rd-scheduler"]["leader_elected"] = leader is not None

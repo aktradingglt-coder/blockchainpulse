@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.28.2",
+  "packageManager": "pnpm@10.28.2+sha512.41872f037ad22f7348e3b1debbaf7e867cfd448f2726d9cf74c08f19507c31d2c8e7a11525b983febc2df640b5438dee6023ebb1f84ed43cc2d654d2bc326264",
   "engines": {
     "node": ">=22.12 <23"
   },
@@ -16,7 +16,7 @@
     "start": "next start --port 3000",
     "lint": "eslint --max-warnings=0 .",
     "typecheck": "node scripts/gen-tokens.mjs && tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --coverage"
   },
   "dependencies": {
     "next": "16.4.2",
@@ -31,6 +31,7 @@
     "@types/node": "22.20.5",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "@vitest/coverage-v8": "4.1.12",
     "eslint": "9.39.5",
     "eslint-config-next": "16.4.2",
     "postcss": "8.5.31",

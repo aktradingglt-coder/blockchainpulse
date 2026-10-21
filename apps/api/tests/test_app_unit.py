@@ -59,6 +59,7 @@ def test_status_reports_unavailable_components(client: TestClient) -> None:
     assert body["ok"] is False
     assert body["components"]["rd-worker"]["ok"] is False
     assert body["components"]["rd-scheduler"]["leader_elected"] is False
+    assert body["components"]["queue"]["ok"] is False
 
 
 def test_metrics_count_requests_by_route_template(client: TestClient) -> None:

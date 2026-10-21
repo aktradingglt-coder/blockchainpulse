@@ -47,3 +47,27 @@ def test_sanitize_attributes_rules() -> None:
     assert "q" * 20 not in out["note"]
     assert out["tags"][0] == "ok"
     assert "z" * 20 not in out["tags"][1]
+
+
+def test_server_spans_use_route_templates_not_raw_paths() -> None:
+    settings = Settings(database_url="postgresql+asyncpg://nobody@127.0.0.1:1/none", redis_url="redis://127.0.0.1:1/0")
+    exporter = InMemorySpanExporter()
+    provider = tracing.configure_tracing(settings, service="rd-api", exporter=exporter)
+    path_secret = "Otlp" + "Secret" + "Qq7Zx9Lm2"
+    with TestClient(create_app(Runtime(settings=settings, config=load_config(settings.config_dir)))) as client:
+        assert client.get(f"/v1/meta/{path_secret}").status_code == 404
+    provider.force_flush()
+    dumped = repr([(s.name, dict(s.attributes or {})) for s in exporter.get_finished_spans()])
+    assert path_secret not in dumped
+    assert "unmatched" in dumped
+
+
+def test_client_span_paths_are_kept() -> None:
+    out = tracing.sanitize_attributes({"http.url": "https://data.example.gov/api/v2/series?api_key=x"}, server=False)
+    assert out["http.url"] == "https://data.example.gov/api/v2/series"
+    srv = tracing.sanitize_attributes(
+        {"http.url": "http://h/v1/items/42?x=1", "http.target": "/v1/items/42", "http.route": "/v1/items/{id}"},
+        server=True,
+    )
+    assert srv["http.url"] == "http://h/v1/items/{id}"
+    assert srv["http.target"] == "/v1/items/{id}"

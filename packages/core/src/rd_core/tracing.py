@@ -10,6 +10,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.trace import SpanKind
 
 from rd_core.redaction import REDACTED, is_sensitive_key, redact_text
 from rd_core.settings import Settings
@@ -27,10 +28,31 @@ def _strip_query(value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
-def sanitize_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Span/event attributes safe to export: no query strings, no sensitive keys, secret-shaped text masked."""
+#: Server-span attributes carrying the raw request path; replaced by the route template (or "unmatched").
+_SERVER_PATH_ATTRIBUTES = frozenset({"http.target", "url.path"})
+
+
+def _template_url(value: str, route: str) -> str:
+    parts = urlsplit(value)
+    return urlunsplit((parts.scheme, parts.netloc, route, "", ""))
+
+
+def sanitize_attributes(attributes: Mapping[str, Any] | None, *, server: bool = False) -> dict[str, Any]:
+    """Span/event attributes safe to export: no query strings, no sensitive keys, secret-shaped text masked.
+
+    For server spans the raw request path is replaced by the matched route template (``/v1/x/{id}``) or
+    ``unmatched``, so identifiers or tokens in paths never leave the process; client spans keep their path.
+    """
+    attrs = dict(attributes or {})
+    if server:
+        route = str(attrs.get("http.route") or "unmatched")
+        for key in _SERVER_PATH_ATTRIBUTES & attrs.keys():
+            attrs[key] = route
+        for key in ("http.url", "url.full"):
+            if isinstance(attrs.get(key), str):
+                attrs[key] = _template_url(attrs[key], route)
     clean: dict[str, Any] = {}
-    for key, value in (attributes or {}).items():
+    for key, value in attrs.items():
         if key in _QUERY_ATTRIBUTES:
             continue
         if isinstance(value, str):
@@ -54,12 +76,16 @@ class RedactingSpanExporter(SpanExporter):
         events = [
             Event(name=e.name, attributes=sanitize_attributes(e.attributes), timestamp=e.timestamp) for e in span.events
         ]
+        server = span.kind is SpanKind.SERVER
+        name = span.name
+        if server and not (span.attributes or {}).get("http.route"):
+            name = name.split(" ", 1)[0] + " unmatched"  # e.g. "GET /raw/path" for a 404
         return ReadableSpan(
-            name=redact_text(span.name),
+            name=redact_text(name),
             context=span.context,
             parent=span.parent,
             resource=span.resource,
-            attributes=sanitize_attributes(span.attributes),
+            attributes=sanitize_attributes(span.attributes, server=server),
             events=events,
             links=span.links,
             kind=span.kind,

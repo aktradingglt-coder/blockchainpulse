@@ -4,7 +4,7 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — review rounds 1–3 returned ONE MORE PASS; all findings addressed; round 4 review pending.** P1 does not start until the P0 reviewer returns PASS
+**P0 Foundations — PASSED (review round 4). Round-4 minor findings fixed as a follow-up; P1 in progress.** P1 does not start until the P0 reviewer returns PASS
 (`CRITIC_LEDGER.md`).
 
 ## Done (P0), with evidence
@@ -32,8 +32,7 @@ _Last updated: 2026-10-21_
 
 ## Next
 
-1. P0 independent review → fix → PASS.
-2. P1 data layer: adapter protocol, canonical schemas, rate limiting, cache, circuit breakers, QA checks, freshness,
+1. P1 data layer: adapter protocol, canonical schemas, rate limiting, cache, circuit breakers, QA checks, freshness,
    licence gate; adapters CFTC, EDGAR, FRED (flag off), EIA, one CCXT exchange, Twelve Data (flag off);
    CI workflow to record cassettes from live sources (D-011).
 
@@ -48,6 +47,14 @@ _Last updated: 2026-10-21_
 | H5 | Commercial data contracts (Twelve Data, Databento, others) and each crypto exchange's display terms | Licences | docs/vendor-notes/commercial-data.md, crypto-exchanges.md |
 | H6 | Pricing confirmation (proposed: Starter $49, Pro $179, Desk $719 per month; licence $1,999; pending P11 cost-model measurement) | Commercial | config/product.yaml `pricing_status: proposed`, DECISIONS D-023 |
 | H7 | Sanctions/jurisdiction list review by counsel | Legal | config/jurisdiction_rules.yaml |
+
+Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
+
+## Forward notes (recorded by reviewers, owned by later phases)
+
+- P7: application connects as a dedicated non-owner, non-superuser role so Postgres RLS applies; nonce-based CSP;
+  structured web logs (D-026).
+- P10: self-hosted LAN installs with `APP_ENV=production` refuse plain-http CORS origins — decide policy.
 
 ## Environment notes for reviewers
 

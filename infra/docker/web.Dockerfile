@@ -10,7 +10,7 @@ COPY apps/web/package.json apps/web/pnpm-lock.yaml ./apps/web/
 WORKDIR /repo/apps/web
 RUN --mount=type=secret,id=build_ca,required=false \
     if [ -s /run/secrets/build_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/build_ca; fi; \
-    corepack enable && corepack prepare pnpm@10.28.2 --activate && pnpm install --frozen-lockfile
+    corepack enable && pnpm install --frozen-lockfile  # corepack verifies the packageManager sha512
 COPY apps/web ./
 RUN pnpm build
 

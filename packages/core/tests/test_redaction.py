@@ -131,8 +131,8 @@ def test_key_names_are_matched_word_wise() -> None:
 def test_free_text_credentials_masked() -> None:
     tg = "123456789:" + "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawQ"
     assert tg not in redact_text(f"POST https://api.telegram.org/bot{tg}/sendMessage")
-    assert "dXNlcjpwYXNz" not in redact_text("Authorization: Basic dXNlcjpwYXNz")
-    assert redact_text("Authorization: Basic dXNlcjpwYXNz").startswith("Authorization: Basic ")
+    assert "dXNlcjp" + "wYXNz" not in redact_text("Authorization: Basic " + "dXNlcjp" + "wYXNz")
+    assert redact_text("Authorization: Basic " + "dXNlcjp" + "wYXNz").startswith("Authorization: Basic ")
     hdr_value = "abcdef" + "123456"
     assert hdr_value not in redact_text("x-api-key: " + hdr_value)
     aws = "wJalrXUtnFEMIK7MDENG" + "bPxRfiCYEXAMPLEKEY"
@@ -153,7 +153,7 @@ def test_round3_redaction_cases() -> None:
         ("PGPASSWORD=abc123xyz psql", "abc123xyz"),
         ("REDISCLI_AUTH=zz99yy valkey-cli", "zz99yy"),
         ("pass=hunter2", "hunter2"),
-        ("token: abcdef", "abcdef"),
+        ("token: " + "abcdef" + "123456", "abcdef" + "123456"),
         ("Cookie: sessionid=abc123; csrftoken=x", "abc123"),
         ("Set-Cookie: sessionid=q1w2e3", "q1w2e3"),
     ):
@@ -180,3 +180,45 @@ def test_numbers_and_booleans_under_sensitive_keys_are_kept() -> None:
     assert out["secret_count"] == 3
     assert out["auth"] == REDACTED
     assert out["password"] == REDACTED
+
+
+def test_redaction_is_linear_time_on_adversarial_input() -> None:
+    import time  # noqa: PLC0415
+
+    adversarial = [
+        "http://u:" + "p" * 100_000,
+        "cookie: " + "a" * 100_000,
+        "a" * 100_000,
+        "x_" * 50_000,
+        "a:" * 50_000,
+        "@" * 100_000,
+        "http://" * 20_000,
+        "password=" * 20_000,
+        "token: " * 20_000,
+        "=" * 100_000,
+    ]
+    for text in adversarial:
+        start = time.perf_counter()
+        out = redact_text(text)
+        assert time.perf_counter() - start < 0.25, text[:20]
+        assert len(out) < len(text)  # capped at MAX_SCAN_CHARS
+
+
+def test_market_data_values_survive_and_quoted_secrets_do_not() -> None:
+    text = "token=ETH key=AAPL sig=0.05 max token: 4096 pass: true"
+    assert redact_text(text) == text
+    for raw in ('password="correct horse battery staple"', "secret='a b c'", 'DB_PASSWORD="x y z"', 'api_key="k1 k2"'):
+        out = redact_text(raw)
+        assert REDACTED in out
+        assert "horse" not in out
+        assert "y z" not in out
+        assert "k2" not in out
+    assert REDACTED in redact_text("token=" + "abcdef" + "123456XYZ")
+    assert redact_text("see https://example.com:8443/path@v2 ok") == "see https://example.com:8443/path@v2 ok"
+
+
+def test_metadata_keys_with_sensitive_words_are_not_masked() -> None:
+    for key in ("token_symbol", "token_unlocks", "auth_provider", "dsn_host", "password_length"):
+        assert not is_sensitive_key(key), key
+    for key in ("token", "password_hash", "refreshToken", "api_key"):
+        assert is_sensitive_key(key), key

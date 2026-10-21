@@ -88,3 +88,35 @@ def test_smoke_main(
         smoke.main()
     assert info.value.code == code
     assert text in capsys.readouterr().out
+
+
+def test_broker_reachability() -> None:
+    from rd_worker.heartbeat import broker_reachable  # noqa: PLC0415
+
+    class _Client:
+        def __init__(self, ok: bool) -> None:
+            self.ok = ok
+
+        def ping(self) -> bool:
+            if not self.ok:
+                raise ConnectionError("down")
+            return True
+
+    assert broker_reachable(None)
+    assert broker_reachable(SimpleNamespace(client=_Client(ok=True)))  # type: ignore[arg-type]  # duck-typed broker
+    assert not broker_reachable(SimpleNamespace(client=_Client(ok=False)))  # type: ignore[arg-type]  # duck-typed
+
+
+def test_heartbeat_skips_beats_while_broker_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    beats: list[str] = []
+
+    async def fake_beat(_engine: Any, **kw: Any) -> None:
+        beats.append(kw["instance_id"])
+
+    monkeypatch.setattr("rd_worker.heartbeat.beat", fake_beat)
+    monkeypatch.setattr("rd_worker.heartbeat.broker_reachable", lambda _b: False)
+    mw = HeartbeatMiddleware(Settings(), service="rd-unit", interval=0.05)
+    mw.after_worker_boot(None, None)  # type: ignore[arg-type]  # hook arguments unused
+    threading.Event().wait(0.3)
+    mw.before_worker_shutdown(None, None)  # type: ignore[arg-type]  # hook arguments unused
+    assert beats == []

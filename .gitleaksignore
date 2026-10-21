@@ -1,0 +1,4 @@
+# Reviewed false positives (fingerprint per finding). Each entry needs a reason; never add a real secret here.
+# test fixture: base64 of the literal "user:pass" used to test Basic-auth redaction (commit ba02678, later split)
+ba026789817753f6bf68d2f2097feeb307b97b3a:packages/core/tests/test_redaction.py:http-basic-auth:134
+ba026789817753f6bf68d2f2097feeb307b97b3a:packages/core/tests/test_redaction.py:http-basic-auth:135

@@ -48,6 +48,20 @@ regex = '''\b(pdl_[a-z0-9]+_[A-Za-z0-9_]{16,})'''
 secretGroup = 1
 keywords = ["pdl_"]
 
+[[rules]]
+id = "http-basic-auth"
+description = "HTTP Basic credentials in an Authorization header"
+regex = '''(?i)authorization["']?\s*[:=]\s*["']?basic\s+([A-Za-z0-9+/]{8,}={0,2})'''
+secretGroup = 1
+keywords = ["basic"]
+
+[[rules]]
+id = "api-key-hex-or-token-param"
+description = "API key value (hex or base62) in a header or key=value / query parameter"
+regex = '''(?i)(?:x-api-key|api[_-]?key|apikey)["']?\s*[:=]\s*["']?([A-Za-z0-9_\-]{24,})'''
+secretGroup = 1
+keywords = ["api_key", "api-key", "apikey", "x-api-key"]
+
 [allowlist]
 description = "Lockfiles hold integrity hashes, not secrets"
 paths = ['''(^|/)uv\.lock$''', '''(^|/)pnpm-lock\.yaml$''']

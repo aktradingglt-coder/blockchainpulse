@@ -84,7 +84,7 @@ def test_web_dependencies_pinned_exactly() -> None:
         if not re.fullmatch(r"\d+\.\d+\.\d+", v)
     ]
     assert not loose, loose
-    assert re.fullmatch(r"pnpm@\d+\.\d+\.\d+", pkg["packageManager"])
+    assert re.fullmatch(r"pnpm@\d+\.\d+\.\d+\+sha512\.[0-9a-f]{128}", pkg["packageManager"]), "pin pnpm with integrity"
     assert (REPO / "apps/web/pnpm-lock.yaml").is_file()
     assert (REPO / "uv.lock").is_file()
 
@@ -147,3 +147,13 @@ def test_dockerfile_frontends_and_python_patch_version_pinned() -> None:
     assert "--require-hashes" in py
     ci = (REPO / ".github/workflows/ci.yml").read_text()
     assert f'PYTHON_VERSION: "{python_version}"' in ci
+
+
+def test_gitleaks_ignores_are_commit_scoped_and_explained() -> None:
+    lines = (REPO / ".gitleaksignore").read_text().splitlines()
+    entries = [ln for ln in lines if ln.strip() and not ln.startswith("#")]
+    assert any(ln.startswith("#") for ln in lines), "every ignore block needs a reason comment"
+    for entry in entries:
+        assert re.fullmatch(r"[0-9a-f]{40}:[^:]+:[a-z0-9\-]+:\d+", entry), (
+            f"ignore must name commit:file:rule:line: {entry}"
+        )
