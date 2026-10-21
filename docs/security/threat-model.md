@@ -22,13 +22,13 @@ Browser ↔ web/API (internet) · API ↔ billing provider webhooks (internet) �
 | Component | Threat (STRIDE) | Control | Status |
 | --- | --- | --- | --- |
 | Web app | **S** session hijack, credential stuffing | Maintained auth library, MFA for admins, rate limits per IP/user, secure cookies | P7 |
-| Web app | **T** XSS injecting into reports | React escaping, strict CSP (`script-src 'self'`), report HTML rendered from schema, never raw LLM HTML | CSP header now (next.config.ts); renderer P6 |
+| Web app | **T** XSS injecting into reports | React escaping; report HTML rendered from schema, never raw LLM HTML; CSP. **Current CSP allows `script-src 'self' 'unsafe-inline'`** because Next.js emits inline bootstrap scripts; P7 moves to a per-request nonce CSP and removes `'unsafe-inline'` | Partial: CSP header (next.config.ts); nonce CSP P7; renderer P6 |
 | Web app | **I** clickjacking | `frame-ancestors 'none'`, `X-Frame-Options: DENY` | Done (P0) |
 | API | **S** forged tokens | JWT via JWKS verification, short expiry | P7 |
 | API | **T** CSRF on cookie-auth routes | SameSite cookies + CSRF token for state-changing routes | P7 |
 | API | **R** disputed credit spend / admin action | Append-only audit log for admin, billing, entitlement, licence events | P7 |
 | API | **I** data leak across tenants | Org-scoped repository layer + Postgres RLS + isolation tests | P7 |
-| API | **I** stack traces / secrets in responses or logs | Generic error bodies; structlog redaction processor | Redaction done: `packages/core/tests/test_redaction.py`, `test_logging_tracing.py` |
+| API | **I** stack traces / secrets in responses or logs | Generic error bodies; every logger (incl. uvicorn, dramatiq, alembic, sqlalchemy) routed through structlog JSON with a redaction processor; uvicorn access log disabled and replaced by an access event that records the route template only (no raw path or query string) | Done: `packages/core/tests/test_redaction.py`, `test_logging_tracing.py`, `apps/api/tests/test_uvicorn_logging.py` (real uvicorn, planted query secret absent) |
 | API | **D** request floods, credit-burning abuse | Rate limits per user/IP/token, abuse detection, budgets per run | P7/P11 |
 | API | **E** privilege escalation via admin routes | Role checks + MFA-required admin scope, authz matrix tests | P7 |
 | API | **I** browser cross-origin reads | Strict CORS allow-list from settings | Done: `test_cors_allows_only_configured_origins` |
@@ -38,11 +38,11 @@ Browser ↔ web/API (internet) · API ↔ billing provider webhooks (internet) �
 | Worker / agents | **D** runaway cost/loops | Hard per-run budgets (tokens, tool calls, wall clock, USD), global kill switch | P4 |
 | Worker → vendors | **S** SSRF via user-supplied URLs (webhooks, feeds) | Host allow-list, private ranges blocked, DNS-rebinding-safe resolver | P8 (first user-supplied URL) |
 | Sandbox | **E/I** code execution escapes, exfiltration | Separate container, no network, read-only inputs, CPU/mem/time limits; test proves no network | P3 |
-| Queue (Valkey) | **T/I** unauthenticated access | `requirepass`, private network, ports bound to 127.0.0.1 in dev | Done (compose) |
+| Queue (Valkey) | **T/I** unauthenticated access | Password auth via a private config file written at start (not on the command line), private network, ports bound to 127.0.0.1 in dev | Done (compose) |
 | Postgres | **I** credential leakage | Random per-install credentials (`scripts/dev_env.sh`), env only, never committed | Done; gitleaks test `test_committable_tree_is_clean` |
 | Postgres | **T** evidence tampering | Insert-only ledger (trigger), SHA-256 hashes | P3 |
 | Scheduler | **T** double-fired jobs | Advisory-lock leader + unique job keys | Leader lock done: `tests/integration/test_leader_lock.py`, `test_processes.py`; keys P8 |
-| Secrets in repo | **I** committed keys | gitleaks in pre-commit and CI (full history); planted-key test | Done: `tests/test_secret_scanning.py`, CI `secrets` job |
+| Secrets in repo | **I** committed keys | gitleaks in pre-commit (staged), CI (full history) and `make secrets-scan` (history + every committable file); planted-key tests incl. `redis://:password@` | Done: `tests/test_secret_scanning.py`, CI `secrets` job |
 | Supply chain | **T** malicious dependency/image/action | Exact pins + lockfiles, images by digest, actions by commit SHA, pip-audit/pnpm audit, SBOM + image scan (P11) | Pins + audit done (`tests/test_repo_hygiene.py`, CI `audit`); SBOM/scan P11 |
 | Self-hosted licence | **S/T** forged or tampered licence | Ed25519 signatures, public key compiled in, fails closed | P10 |
 | Self-hosted updates | **T** malicious update | Signed release manifests verified before apply | P10 |

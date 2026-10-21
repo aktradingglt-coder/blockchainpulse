@@ -1,5 +1,6 @@
 """Proves the secret scanner is active: a planted key is caught, and the committed tree is clean."""
 
+import json
 import os
 import secrets
 import shutil
@@ -86,3 +87,33 @@ def test_committable_tree_is_clean(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_empty_username_url_password_is_detected(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    scheme = "redis" + "://:"  # split so this file itself never contains a URL-with-password literal
+    (tmp_path / "cfg.env").write_text("REDIS_URL=" + scheme + _random(24) + "@valkey:6379/0\n")
+    (tmp_path / "client.py").write_text('r = from_url("' + scheme + _random(24) + '@cache.internal:6379/0")\n')
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "plant")
+    result = subprocess.run(  # noqa: S603
+        [
+            _gitleaks(),
+            "git",
+            "--config",
+            str(REPO / ".gitleaks.toml"),
+            "--no-banner",
+            "--redact",
+            "--report-format",
+            "json",
+            "--report-path",
+            str(tmp_path / "report.json"),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    findings = json.loads((tmp_path / "report.json").read_text())
+    assert {f["File"] for f in findings} == {"cfg.env", "client.py"}

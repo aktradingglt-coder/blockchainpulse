@@ -95,3 +95,10 @@ def test_same_fallback_provider_rejected(tmp_path: Path) -> None:
     _edit(d / "product.yaml", lambda p: p["commercial"].__setitem__("billing_fallback_provider", "paddle"))
     with pytest.raises(ConfigError, match=r"fallback billing provider"):
         load_config(d)
+
+
+def test_unknown_flag_override_rejected() -> None:
+    cfg = load_config(CONFIG_DIR)
+    cfg.validate_flag_overrides({"publishing_enabled": False})
+    with pytest.raises(ConfigError, match=r"publishing_enabeld"):
+        cfg.validate_flag_overrides({"publishing_enabeld": False})

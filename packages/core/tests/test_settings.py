@@ -46,3 +46,9 @@ def test_secrets_are_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.anthropic_api_key is not None
     assert value not in repr(s)
     assert value not in str(s.model_dump())
+
+
+def test_log_format_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_FORMAT", "jsn")
+    with pytest.raises(ValidationError):
+        Settings()

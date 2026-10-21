@@ -15,7 +15,7 @@ concurrency:
 
 env:
   UV_VERSION: "0.11.32"
-  PYTHON_VERSION: "3.12"
+  PYTHON_VERSION: "3.12.13"
   NODE_VERSION: "22.22.0"
 
 jobs:
@@ -34,13 +34,9 @@ jobs:
       - name: ruff
         run: uv run ruff check . && uv run ruff format --check .
       - name: mypy --strict
-        run: uv run mypy packages apps/api apps/worker apps/scheduler tests
-      - name: unit tests (with coverage)
-        run: uv run pytest -m "not integration" --cov --cov-report=term-missing --cov-report=xml
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-        with:
-          name: coverage-python
-          path: coverage.xml
+        run: uv run mypy packages apps/api apps/worker apps/scheduler tests scripts
+      - name: unit tests
+        run: uv run pytest -m "not integration"
 
   web:
     name: web · lint, types, tests, build
@@ -75,10 +71,17 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync --frozen --all-packages
+      - name: install pinned tools (gitleaks is needed by the secret-scanning tests)
+        run: make tools
       - name: make dev (build images, boot, wait for health, smoke)
         run: make dev
-      - name: integration tests against the running stack
-        run: make test-integration
+      - name: unit + integration tests against the running stack, coverage gate (fail_under in pyproject.toml)
+        run: make coverage
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        if: always()
+        with:
+          name: coverage-python
+          path: coverage.xml
       - name: service status on failure
         if: failure()
         run: |
@@ -116,4 +119,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: uv sync --frozen --all-packages
+      - run: pnpm --dir apps/web install --frozen-lockfile
       - run: mkdir -p .tools && make audit
+      - name: dependency licence gate
+        run: make licences

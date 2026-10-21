@@ -65,7 +65,10 @@ Per PROMPT §2 rule 10. Pakistan seller onboarding/payout not confirmed from off
 **Reason.** Strict, content-addressed lockfile; available in the toolchain.
 
 ### D-015 · 2026-10-21 · Secret scanning: gitleaks in pre-commit and CI
-gitleaks pinned by version in CI (official action/binary), plus a repo-local regex test that fails if any file under `tests/fixtures` or `evals` contains key-shaped strings.
+gitleaks binary pinned by version and SHA-256 (`make tools`) runs in pre-commit (staged changes), in CI over the full
+git history, and over every committable file (`scripts/scan_committable.sh`, ignored files such as `.env` excluded).
+`tests/test_secret_scanning.py` plants keys of several shapes (including `redis://:password@`) and proves they are
+caught. Fixture and eval directories are covered by the same scan, so no separate regex test is needed.
 
 ### D-016 · 2026-10-21 · Dramatiq licence noted (LGPL-3.0)
 **Decision.** Keep Dramatiq (D-005). It is used unmodified as an imported library, which LGPL-3.0 permits in proprietary
@@ -80,3 +83,45 @@ redaction) instead of Dramatiq's plain-text formatter.
 **Decision.** `infra/compose/compose.yaml` paths are relative to the repo root and require the generated `.env`;
 `make dev` passes `--project-directory .` and `--env-file .env`. A CA bundle for TLS-intercepting proxies is staged
 (git-ignored) as a BuildKit secret and is empty by default, so builds elsewhere are unaffected.
+
+### D-019 · 2026-10-21 · Brand theme and fonts (§2 rule 3)
+**Decision.** Neutral theme in `config/design_tokens.yaml`: near-white/near-black surfaces, one blue accent
+(#1D4ED8 light, #7CB2FB dark), semantic green/red/amber, light and dark variants; every listed text/background pair
+≥ 4.5:1 (`packages/core/tests/test_design.py`). Fonts: Inter (sans) and JetBrains Mono (mono), both SIL OFL 1.1.
+**Alternatives.** Brand-like saturated palettes; system fonts only.
+**Reason.** Finance readers expect restraint; one accent keeps charts legible; OFL fonts are free to embed in PDFs and
+self-hosted bundles. Brand review is an owner task (STATUS H1).
+
+### D-020 · 2026-10-21 · Defaults: USD, UTC, 7-day trial, 70% margin, launch exclusions (§2 rules 4–8, 11)
+**Decision.** Display currency USD; server time UTC with each reader's IANA timezone in the UI (captured from the
+browser at sign-up, editable); trial 7 days; minimum gross margin 0.70; target users = the default list in §2;
+excluded coverage at launch = Pakistan-listed securities until a legal opinion is filed in `docs/legal/`.
+**Reason.** These are the values PROMPT §2 prescribes; recorded here so every value in `config/product.yaml` has a
+decision behind it.
+
+### D-021 · 2026-10-21 · Sales countries and blocked jurisdictions (§2 rule 5, §13.1)
+**Decision.** Sales worldwide by default, filtered by `config/jurisdiction_rules.yaml` on the buyer's billing
+country. Automatically blocked: CU, IR, KP, SY, RU, BY and the Crimea/Donetsk/Luhansk regions (UA-43, UA-14, UA-09).
+Pakistan (`PK`) is `not_yet_cleared` (no sales) until counsel advises on SECP Research Analyst Regulations.
+**Alternatives.** OFAC comprehensive list only (CU, IR, KP, SY, regions) — narrower.
+**Reason.** Safer superset of comprehensive US/EU/UK programs; easier to unblock a country later than to unwind
+sales made into a sanctioned one. Syria's US sanctions were largely lifted in 2025, but it stays blocked until counsel
+confirms (EU/UK and residual measures). Counsel review is owner task H7.
+
+### D-022 · 2026-10-21 · Credit costs (§12.1)
+**Decision.** Deep dive: quick 3 / standard 5 / extended 10 credits; Ask the Desk 1 credit per answer; screener run 1.
+Trial 3 credits (= one quick deep dive), Starter 20, Pro 100, Desk 400 pooled.
+**Reason.** PROMPT §12.2 expects a deep dive to cost about $1–2 in LLM spend before caching; pricing 1 credit at
+roughly $0.40–0.50 of LLM cost keeps a standard deep dive (5 credits) inside the per-credit value of every paid
+tier. To be re-derived from measured token usage at P11.
+
+### D-023 · 2026-10-21 · Proposed tier and licence prices (§2 rule 7)
+**Decision.** Starter $39/mo ($390/yr), Pro $149/mo ($1,490/yr), Desk $599/mo for 5 seats ($5,990/yr), self-hosted
+$1,999 once with 12 months of updates and $599/yr renewal. Status `proposed`.
+**Basis.** (1) Comparables checked 2026-10-21 (`docs/vendor-notes/pricing-comparables.md`): consumer AI research
+$39–$99/mo, professional research software $150–$500 per user per month. (2) Unit-economics pre-estimate, to be
+replaced by measurement: at p90 a Pro user spends all 100 credits ≈ 20 standard deep dives ≈ $20–40 of LLM cost plus
+an amortised share of house reports; at $149 that is 73–87% gross before merchant fees (≈5% + $0.50). Starter at p90:
+4 deep dives ≈ $4–8 → 79–90%. Desk at p90: 80 deep dives ≈ $80–160 → 73–87%.
+**Gate.** P11's measured cost model must show ≥70% for every tier at p90; if not, credits or prices change.
+**Owner task.** Pricing confirmation (STATUS H6).

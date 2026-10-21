@@ -71,12 +71,12 @@ lint: ## ruff (lint + format check), eslint
 
 .PHONY: typecheck
 typecheck: ## mypy --strict, tsc --noEmit
-	$(UV) run mypy packages apps/api apps/worker apps/scheduler tests
+	$(UV) run mypy packages apps/api apps/worker apps/scheduler tests scripts
 	$(WEB) typecheck
 
 .PHONY: test
 test: ## Unit tests (no services needed)
-	$(UV) run pytest -m "not integration" --cov --cov-report=term-missing
+	$(UV) run pytest -m "not integration"
 	$(WEB) test
 
 .PHONY: test-integration
@@ -84,15 +84,23 @@ test-integration: .env ## Integration tests against the dev stack's Postgres/Val
 	set -a; source .env; set +a; $(UV) run pytest -m integration
 
 .PHONY: secrets-scan
-secrets-scan: tools ## gitleaks over the full git history and the working tree
+secrets-scan: tools ## gitleaks over the full git history and over every committable file (ignored files excluded)
 	.tools/bin/gitleaks git --config .gitleaks.toml --redact --no-banner .
-	.tools/bin/gitleaks dir --config .gitleaks.toml --redact --no-banner .
+	./scripts/scan_committable.sh
 
 .PHONY: audit
 audit: ## Dependency vulnerability audit (pip-audit, pnpm audit)
 	$(UV) export --frozen --all-packages --no-dev --no-hashes --no-emit-workspace -o .tools/requirements-audit.txt
 	$(UV) run pip-audit --strict -r .tools/requirements-audit.txt
 	$(WEB) audit --prod --audit-level high
+
+.PHONY: licences
+licences: ## Dependency licence gate (allow-list + reviewed exceptions)
+	$(UV) run python scripts/check_licences.py
+
+.PHONY: coverage
+coverage: .env ## Unit + integration tests with the coverage gate (needs the running stack)
+	set -a; source .env; set +a; $(UV) run pytest --cov --cov-report=term-missing --cov-report=xml
 
 .PHONY: check
 check: lint typecheck test ## Everything a contributor runs before pushing

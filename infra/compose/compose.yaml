@@ -38,7 +38,10 @@ services:
 
   valkey:
     image: mirror.gcr.io/valkey/valkey:8.1.4-alpine@sha256:e706d1213aaba6896c162bb6a3a9e1894e1a435f28f8f856d14fab2e10aa098b
-    command: ["valkey-server", "--requirepass", "${VALKEY_PASSWORD:?run make dev to generate .env}", "--appendonly", "yes"]
+    # The password is written to a private config file at start so it never appears in the process list.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - umask 077 && printf 'requirepass %s\nappendonly yes\n' "$$VALKEY_PASSWORD" > /tmp/valkey.conf && exec valkey-server /tmp/valkey.conf
     ports: ["127.0.0.1:${VALKEY_PORT:-6379}:6379"]
     volumes: [valkey-data:/data]
     healthcheck:
@@ -47,7 +50,7 @@ services:
       timeout: 3s
       retries: 30
     environment:
-      VALKEY_PASSWORD: ${VALKEY_PASSWORD}
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:?run make dev to generate .env}
     restart: unless-stopped
 
   migrate:
@@ -62,7 +65,7 @@ services:
     environment:
       <<: *python-env
       SERVICE_NAME: rd-api
-    command: ["uvicorn", "rd_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-server-header"]
+    command: ["uvicorn", "rd_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-server-header", "--no-access-log"]
     ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
     depends_on:
       migrate: {condition: service_completed_successfully}

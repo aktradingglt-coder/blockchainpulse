@@ -32,5 +32,5 @@ repos:
         pass_filenames: false
       - id: no-env-files
         name: block committing .env files
-        entry: bash -c 'for f in "$@"; do case "$f" in .env|.env.*) [ "$f" = .env.example ] || { echo "refusing to commit $f"; exit 1; };; esac; done' --
+        entry: bash -c 'for f in "$@"; do b=$(basename "$f"); case "$b" in .env|.env.*) [ "$b" = .env.example ] || { echo "refusing to commit $f"; exit 1; };; esac; done' --
         language: system

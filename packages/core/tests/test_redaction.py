@@ -70,3 +70,40 @@ def test_depth_limit() -> None:
         cur["k"] = nxt
         cur = nxt
     assert REDACTED in str(redact(deep))
+
+
+def test_empty_username_url_credentials_masked() -> None:
+    pw = "Xq3vT9pLmZ2kR8wY" + "4nB6cD1eF5gH7jK0"
+    for url in (f"redis://:{pw}@valkey:6379/0", f"connecting to rediss://:{pw}@cache.internal:6380"):
+        out = redact_text(url)
+        assert pw not in out
+        assert REDACTED in out
+
+
+def test_common_key_formats_masked() -> None:
+    samples = [
+        "AKIA" + "IOSFODNN7EXAMPLE",
+        "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc",
+        "re_" + "123456789_" + "abcdefghijklmnopqrst",
+        "eyJ"
+        + "hbGciOiJIUzI1NiJ9"
+        + ".eyJ"
+        + "zdWIiOiIxMjM0NTY3ODkwIn0"
+        + ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    ]
+    for secret in samples:
+        assert secret not in redact_text(f"value={secret} end"), secret
+    dsn = "https://" + "0123456789abcdef" * 2 + "@o4500000.ingest.example.io/42"
+    assert "0123456789abcdef" * 2 not in redact_text(dsn)
+
+
+def test_token_counts_and_lookalike_params_are_not_redacted() -> None:
+    usage = {"input_tokens": 1234, "output_tokens": 56, "max_tokens": 4096, "cache_read_input_tokens": 7}
+    assert redact(usage) == usage
+    assert redact({"access_token": "abc", "bot-token": "x", "token": "y"}) == {
+        "access_token": REDACTED,
+        "bot-token": REDACTED,
+        "token": REDACTED,
+    }
+    assert redact_text("https://example.com/?monkey=banana&donkey=1") == "https://example.com/?monkey=banana&donkey=1"
+    assert "s3cr3tvalue" not in redact_text("https://example.com/?x_api_key=s3cr3tvalue")

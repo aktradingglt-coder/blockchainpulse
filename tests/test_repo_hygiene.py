@@ -134,3 +134,16 @@ def test_no_third_party_identity_in_config() -> None:
     assert identity["primary_domain"] == "example.com"
     assert identity["support_email"].endswith("@example.com")
     assert "working name" in identity["product_name"]
+
+
+def test_dockerfile_frontends_and_python_patch_version_pinned() -> None:
+    python_version = (REPO / ".python-version").read_text().strip()
+    assert re.fullmatch(r"3\.12\.\d+", python_version), "pin the interpreter to a patch version"
+    for dockerfile in (REPO / "infra/docker").glob("*.Dockerfile"):
+        first = dockerfile.read_text().splitlines()[0]
+        assert re.match(r"# syntax=\S+@sha256:[0-9a-f]{64}$", first), f"{dockerfile.name}: {first}"
+    py = (REPO / "infra/docker/python.Dockerfile").read_text()
+    assert f"python:{python_version}-" in py, "image Python must match .python-version"
+    assert "--require-hashes" in py
+    ci = (REPO / ".github/workflows/ci.yml").read_text()
+    assert f'PYTHON_VERSION: "{python_version}"' in ci

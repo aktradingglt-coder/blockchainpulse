@@ -193,6 +193,12 @@ class AppConfig(_Strict):
     jurisdictions: JurisdictionRules
     feature_flags: FeatureFlagsConfig
 
+    def validate_flag_overrides(self, overrides: dict[str, bool]) -> None:
+        """Reject override keys that name no known flag (a mistyped kill switch must fail loudly)."""
+        unknown = sorted(set(overrides) - set(self.feature_flags.flags))
+        if unknown:
+            raise ConfigError(f"FEATURE_FLAGS names unknown flags: {unknown}")
+
     def flag(self, name: str, overrides: dict[str, bool] | None = None) -> bool:
         if overrides and name in overrides:
             return overrides[name]

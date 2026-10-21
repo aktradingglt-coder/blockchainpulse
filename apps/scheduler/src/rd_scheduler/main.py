@@ -13,6 +13,7 @@ import socket
 
 from rd_core.bootstrap import bootstrap
 from rd_core.logging import get_logger
+from rd_core.settings import Settings
 from rd_db.engine import make_engine
 from rd_db.heartbeat import beat
 from rd_scheduler.leader import SCHEDULER_LOCK_KEY, LeaderLock
@@ -28,8 +29,9 @@ async def run(
     service: str = SERVICE,
     lock_key: int = SCHEDULER_LOCK_KEY,
     instance_suffix: str = "",
+    settings: Settings | None = None,
 ) -> None:
-    runtime = bootstrap(service)
+    runtime = bootstrap(service, settings)
     log = get_logger(__name__)
     engine = make_engine(runtime.settings, pool_size=2)
     lock = LeaderLock(engine, lock_key)
@@ -37,7 +39,11 @@ async def run(
     was_leader = False
     try:
         while not stop.is_set():
-            leader = await lock.try_acquire()
+            try:
+                leader = await lock.try_acquire()
+            except Exception as exc:  # noqa: BLE001 - database outage: stay standby and retry next tick
+                log.warning("scheduler.lock_unavailable", error=type(exc).__name__)
+                leader = False
             if leader != was_leader:
                 log.info("scheduler.leadership", leader=leader, instance=ident)
                 was_leader = leader

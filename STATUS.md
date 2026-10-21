@@ -4,7 +4,7 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — built, awaiting independent review.** P1 does not start until the P0 reviewer returns PASS
+**P0 Foundations — review round 1 returned ONE MORE PASS; all 11 findings addressed; round 2 review pending.** P1 does not start until the P0 reviewer returns PASS
 (`CRITIC_LEDGER.md`).
 
 ## Done (P0), with evidence
@@ -25,7 +25,9 @@ _Last updated: 2026-10-21_
 | Next.js app (TS strict, Tailwind, ESLint), tokens generated from YAML | `apps/web` lint/typecheck/test/build |
 | `make dev` boots db, valkey, migrate, api, worker, scheduler, web — all healthy — then smoke | `docs/evidence/p0/make-dev.txt` |
 | Secret scanning active (pre-commit + CI full history); planted keys detected | `tests/test_secret_scanning.py`, CI `secrets` job |
-| CI: python, web, stack (compose + integration), secrets, audit | `.github/workflows/ci.yml` |
+| CI: python, web, stack (compose + unit/integration with 80% coverage gate), secrets, audit + licence gate | `.github/workflows/ci.yml` |
+| Dependency licence gate (allow-list + reviewed LGPL/data exceptions) | `scripts/check_licences.py`, `tests/test_licence_gate.py` |
+| Placeholder decisions incl. proposed prices with comparables | `DECISIONS.md` D-019…D-023, `docs/vendor-notes/pricing-comparables.md` |
 | Threat model draft (STRIDE) | `docs/security/threat-model.md` |
 
 ## Next

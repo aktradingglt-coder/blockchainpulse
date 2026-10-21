@@ -21,16 +21,29 @@ def instance_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+def worker_threads_alive(worker: Worker | None) -> bool:
+    """True when every consumer and worker thread of a booted Dramatiq worker is running."""
+    if worker is None:
+        return True  # no worker object (unit use): liveness of the process is all we can claim
+    consumers = list(worker.consumers.values())
+    threads = list(worker.workers)
+    return bool(consumers) and bool(threads) and all(t.is_alive() for t in [*consumers, *threads])
+
+
 class HeartbeatMiddleware(Middleware):
+    """Beats only while the worker's consumer and worker threads are alive, so a wedged worker turns unhealthy."""
+
     def __init__(self, settings: Settings, *, service: str, interval: float = HEARTBEAT_INTERVAL_SECONDS) -> None:
         self._settings = settings
         self._service = service
         self._interval = interval
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._worker: Worker | None = None
         self._log = get_logger(__name__)
 
     def after_worker_boot(self, broker: Broker, worker: Worker) -> None:  # noqa: ARG002 - dramatiq hook signature
+        self._worker = worker
         self._thread = threading.Thread(target=self._run, name="rd-heartbeat", daemon=True)
         self._thread.start()
 
@@ -47,6 +60,10 @@ class HeartbeatMiddleware(Middleware):
         ident = instance_id()
         try:
             while not self._stop.is_set():
+                if not worker_threads_alive(self._worker):
+                    self._log.error("worker.threads_dead", service=self._service)
+                    await asyncio.to_thread(self._stop.wait, self._interval)
+                    continue
                 try:
                     await beat(engine, service=self._service, instance_id=ident)
                 except Exception as exc:  # noqa: BLE001 - a failed beat must never kill the worker

@@ -16,6 +16,8 @@ def configure_tracing(settings: Settings, *, service: str, exporter: SpanExporte
     """Install a tracer provider for this process. ``exporter`` overrides the OTLP exporter (tests)."""
     global _provider  # noqa: PLW0603 - one tracer provider per process
     if _provider is not None:
+        if exporter is not None:  # an extra exporter (tests, diagnostics) attaches to the existing provider
+            _provider.add_span_processor(BatchSpanProcessor(exporter))
         return _provider
     resource = Resource.create(
         {

@@ -20,6 +20,8 @@ LATENCY = Histogram(
     ["method", "route"],
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.5, 5.0),
 )
+_QUIET_ROUTES = frozenset({"/healthz", "/readyz", "/metrics"})
+_access_log = structlog.get_logger("rd_api.access")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -46,6 +48,16 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         REQUESTS.labels(request.method, route, str(response.status_code)).inc()
         LATENCY.labels(request.method, route).observe(elapsed)
         response.headers["x-request-id"] = request_id
+        if route not in _QUIET_ROUTES:
+            # Route template only: raw paths and query strings can carry identifiers or secrets.
+            _access_log.info(
+                "http.request",
+                method=request.method,
+                route=route,
+                status=response.status_code,
+                duration_ms=round(elapsed * 1000, 2),
+                request_id=request_id,
+            )
         return response
 
 

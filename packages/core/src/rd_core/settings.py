@@ -6,7 +6,7 @@ import json
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import AnyHttpUrl, Field, PostgresDsn, RedisDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     redis_url: RedisDsn = RedisDsn("redis://localhost:6379/0")
 
     log_level: str = "INFO"
-    log_format: str = "json"  # json | console
+    log_format: Literal["json", "console"] = "json"
     service_name: str = "rd-unknown"
 
     anthropic_api_key: SecretStr | None = None

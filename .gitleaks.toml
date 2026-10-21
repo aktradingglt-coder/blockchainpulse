@@ -12,8 +12,8 @@ keywords = ["sk-ant-"]
 
 [[rules]]
 id = "url-embedded-password"
-description = "Credentials embedded in a connection URL"
-regex = '''[a-z][a-z0-9+.\-]*://[^:/@\s]+:([^@/\s$]{8,})@[^\s]+'''
+description = "Credentials embedded in a connection URL (user part may be empty, e.g. redis://:pw@host)"
+regex = '''[a-z][a-z0-9+.\-]*://[^:/@\s]*:([^@/\s$]{8,})@[^\s]+'''
 secretGroup = 1
 entropy = 3.0
 keywords = ["://"]

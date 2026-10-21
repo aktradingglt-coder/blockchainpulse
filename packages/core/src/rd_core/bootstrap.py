@@ -21,6 +21,7 @@ def bootstrap(service: str, settings: Settings | None = None) -> Runtime:
     s = settings or get_settings()
     configure_logging(service=service, level=s.log_level, fmt=s.log_format)
     config = load_config(s.config_dir)
+    config.validate_flag_overrides(s.feature_flags)
     configure_tracing(s, service=service)
     sentry_on = configure_sentry(s, service=service)
     get_logger(__name__).info(

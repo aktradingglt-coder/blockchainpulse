@@ -14,6 +14,7 @@ from opentelemetry import trace
 from rd_core.redaction import redact
 
 _configured = False
+_ROUTED_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi", "dramatiq", "alembic", "sqlalchemy")
 
 
 def _redact_processor(_logger: Any, _method: str, event_dict: MutableMapping[str, Any]) -> MutableMapping[str, Any]:  # noqa: ANN401
@@ -81,6 +82,14 @@ def configure_logging(*, service: str, level: str = "INFO", fmt: str = "json") -
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
+    # Servers and libraries that install their own handlers (uvicorn configures its loggers before importing the app)
+    # are routed through the root handler so every line is JSON and redacted.
+    for name in _ROUTED_LOGGERS:
+        lib_logger = logging.getLogger(name)
+        lib_logger.handlers.clear()
+        lib_logger.propagate = True
+    # uvicorn's access log would print raw request lines (full query strings); the API logs requests itself.
+    logging.getLogger("uvicorn.access").disabled = True
     _configured = True
 
 
