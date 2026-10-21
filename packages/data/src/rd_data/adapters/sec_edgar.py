@@ -365,17 +365,30 @@ def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
       fact of a filing whose comparatives are mostly a power of 1000 from the other filings (a mis-scaled filing);
     * held — facts that break "a period = its two halves" (e.g. January-June = January-March + April-June) when
       scaling one filing's facts in that sum by a power of 1000 makes it add up;
+    * held — a held fact's siblings: the same filing's other facts of that concept and period end (a scale is set per
+      table, so e.g. the trailing-twelve-month figure beside a mis-scaled quarter shares its error);
     * flagged — any other fact more than 10^FLAG_DISTANCE from its neighbours (kept, for review).
+
+    Whenever two filings are weighed against each other, neighbours reported by either of them are left out, so a
+    mis-scaled filing never vouches for itself or against the other.
     """
     logs = [math.log10(abs(f.value)) if f.value else None for f in records]
     by_period: dict[_PeriodKey, list[int]] = {}
     for i, f in enumerate(records):
         if logs[i] is not None:
             by_period.setdefault((f.concept, f.unit, _duration(f), f.period_end), []).append(i)
-    distance = _neighbour_distances(records, logs, by_period)
+    neighbours = _Neighbours(records, logs, by_period)
+    distance = {
+        i: d
+        for idx in by_period.values()
+        for i in idx
+        if (d := neighbours.distance(i, frozenset({records[i].accession}))) is not None
+    }
     held, flagged = _fact_holds(records, distance)
-    held |= _filing_disagreements(records, logs, by_period, distance)
-    held |= _additivity_errors(records, distance)
+    held |= _filing_disagreements(records, logs, by_period, neighbours)
+    held |= _additivity_errors(records, neighbours)
+    tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
+    held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
     return held, flagged - held
 
 
@@ -383,31 +396,45 @@ _SeriesKey = tuple[str, str, int | None]
 _PeriodKey = tuple[str, str, int | None, date]
 
 
-def _neighbour_distances(
-    records: list[FundamentalFact], logs: list[float | None], by_period: dict[_PeriodKey, list[int]]
-) -> dict[int, float]:
-    """Orders of magnitude between each fact and the nearest NEIGHBOURS periods of its series, as reported by *other*
-    filings (a mis-scaled filing cannot vouch for itself)."""
-    series: dict[_SeriesKey, dict[date, list[tuple[str, float]]]] = {}
-    for (concept, unit, dur, end), idx in by_period.items():
-        series.setdefault((concept, unit, dur), {})[end] = [
-            (records[i].accession, v) for i in idx if (v := logs[i]) is not None
-        ]
-    distance: dict[int, float] = {}
-    for (concept, unit, dur, end), idx in by_period.items():
-        periods = sorted((e for e in series[(concept, unit, dur)] if e != end), key=lambda e: abs((e - end).days))
-        for i in idx:
-            levels: list[float] = []
-            for e in periods:
-                values = [v for acc, v in series[(concept, unit, dur)][e] if acc != records[i].accession]
-                if values:
-                    levels.append(statistics.median(values))
-                if len(levels) == NEIGHBOURS:
-                    break
-            value = logs[i]
-            if len(levels) >= 2 and value is not None:
-                distance[i] = abs(value - statistics.median(levels))
-    return distance
+class _Neighbours:
+    """Orders of magnitude between a fact and the nearest NEIGHBOURS periods of its series (same concept, unit and
+    duration), leaving out the values reported by the given filings."""
+
+    def __init__(
+        self, records: list[FundamentalFact], logs: list[float | None], by_period: dict[_PeriodKey, list[int]]
+    ) -> None:
+        self.records = records
+        self.logs = logs
+        self.series: dict[_SeriesKey, dict[date, list[tuple[str, float]]]] = {}
+        for (concept, unit, dur, end), idx in by_period.items():
+            self.series.setdefault((concept, unit, dur), {})[end] = [
+                (records[i].accession, v) for i in idx if (v := logs[i]) is not None
+            ]
+        self._nearest: dict[tuple[_SeriesKey, date], list[date]] = {}
+
+    def distance(self, i: int, exclude: frozenset[str]) -> float | None:
+        f = self.records[i]
+        value = self.logs[i]
+        key = (f.concept, f.unit, _duration(f))
+        periods = self.series.get(key, {})
+        nearest = self._nearest.get((key, f.period_end))
+        if nearest is None:
+            nearest = sorted((e for e in periods if e != f.period_end), key=lambda e: abs((e - f.period_end).days))
+            self._nearest[(key, f.period_end)] = nearest
+        levels: list[float] = []
+        for e in nearest:
+            values = [v for acc, v in periods[e] if acc not in exclude]
+            if values:
+                levels.append(statistics.median(values))
+            if len(levels) == NEIGHBOURS:
+                break
+        if len(levels) < 2 or value is None:
+            return None
+        return abs(value - statistics.median(levels))
+
+    def mean_distance(self, part: Sequence[int], exclude: frozenset[str]) -> float | None:
+        found = [d for i in part if (d := self.distance(i, exclude)) is not None]
+        return statistics.mean(found) if len(found) == len(part) else None
 
 
 def _fact_holds(records: list[FundamentalFact], distance: dict[int, float]) -> tuple[set[int], set[int]]:
@@ -433,11 +460,26 @@ def _fact_holds(records: list[FundamentalFact], distance: dict[int, float]) -> t
     return held, flagged
 
 
+def _clear_pick(
+    neighbours: _Neighbours, groups: Sequence[Sequence[int]], exclude: frozenset[str], *, nearest: bool
+) -> int | None:
+    """Index of the group of facts clearly nearest (or furthest from) its neighbouring periods, by DECISIVE_MARGIN,
+    judged without the disputing filings' own values; None when the neighbours do not decide."""
+    scores = [neighbours.mean_distance(group, exclude) for group in groups]
+    known = [d for d in scores if d is not None]
+    if len(known) < len(scores):
+        return None
+    order = sorted(range(len(groups)), key=lambda g: known[g] if nearest else -known[g])
+    if len(order) == 1 or abs(known[order[1]] - known[order[0]]) >= DECISIVE_MARGIN:
+        return order[0]
+    return None
+
+
 def _filing_disagreements(
     records: list[FundamentalFact],
     logs: list[float | None],
     by_period: dict[_PeriodKey, list[int]],
-    distance: dict[int, float],
+    neighbours: _Neighbours,
 ) -> set[int]:
     """Periods filed more than once: filings a power of 1000 from the reference filing (the one closest to its
     independent neighbours) are held. When the neighbours do not clearly side with one filing, the disagreeing
@@ -447,21 +489,31 @@ def _filing_disagreements(
     off_by_accession: dict[str, list[bool]] = {}
     ambiguous: set[tuple[str, str, str]] = set()
     for idx in by_period.values():
-        if len({records[i].accession for i in idx}) < 2:
+        accessions = frozenset(records[i].accession for i in idx)
+        if len(accessions) < 2:
             continue
-        ref = min(idx, key=lambda i: distance.get(i, math.inf))
-        ref_log = logs[ref]
-        offs = [i for i in idx if (v := logs[i]) is not None and ref_log is not None and _scale_like(v - ref_log)]
-        if not offs:
-            continue
-        margin = min(distance.get(i, math.inf) for i in offs) - distance.get(ref, math.inf)
-        if not margin >= DECISIVE_MARGIN:
+        values = [v for i in idx if (v := logs[i]) is not None]
+        if not any(_scale_like(a - b) for a in values for b in values):
+            continue  # filings agree up to restatements: nothing to decide
+        # Group the facts by scale; the group clearly nearest the neighbouring periods is kept.
+        groups: list[list[int]] = []
+        for i in idx:
+            log_i = logs[i]
+            group = next((g for g in groups if (v := logs[g[0]]) is not None and log_i is not None
+                          and abs(log_i - v) < 1.5), None)  # fmt: skip
+            if group is None:
+                groups.append([i])
+            else:
+                group.append(i)
+        keep = _clear_pick(neighbours, groups, accessions, nearest=True)
+        if keep is None:
             ambiguous.update((records[i].concept, records[i].unit, records[i].accession) for i in idx)
             continue
-        held.update(offs)
+        keep_log = statistics.median(v for i in groups[keep] if (v := logs[i]) is not None)
+        wrong = [i for i in idx if (v := logs[i]) is not None and _scale_like(v - keep_log)]
+        held.update(wrong)
         for i in idx:
-            if i != ref:
-                off_by_accession.setdefault(records[i].accession, []).append(i in offs)
+            off_by_accession.setdefault(records[i].accession, []).append(i in wrong)
     held.update(i for i, f in enumerate(records) if (f.concept, f.unit, f.accession) in ambiguous)
     bad_filings = {
         acc for acc, offs in off_by_accession.items() if sum(offs) >= 3 and sum(offs) / len(offs) >= FILING_SCALE_SHARE
@@ -470,7 +522,7 @@ def _filing_disagreements(
     return held
 
 
-def _additivity_errors(records: list[FundamentalFact], distance: dict[int, float]) -> set[int]:
+def _additivity_errors(records: list[FundamentalFact], neighbours: _Neighbours) -> set[int]:
     """Currency flows add up across periods: a fact for a period equals the facts for its two consecutive parts
     (year-to-date = earlier year-to-date + latest quarter). The parts usually come from different filings, so a
     mis-scaled filing breaks the sum even when the newest values have no other filing to be compared with."""
@@ -487,7 +539,7 @@ def _additivity_errors(records: list[FundamentalFact], distance: dict[int, float
             first = spans.get((concept, unit, start, split - timedelta(days=1)))
             if split > start and first:
                 for combo in itertools.product(whole, first, spans[(concept, unit, split, end)]):
-                    held |= _misscaled_in(records, combo, distance)
+                    held |= _misscaled_in(records, combo, neighbours)
     return held
 
 
@@ -503,10 +555,10 @@ def _adds_up_with_every_term(values: Sequence[float]) -> bool:
     )
 
 
-def _misscaled_in(records: list[FundamentalFact], combo: tuple[int, ...], distance: dict[int, float]) -> set[int]:
+def _misscaled_in(records: list[FundamentalFact], combo: tuple[int, ...], neighbours: _Neighbours) -> set[int]:
     """The facts of one ``whole = first + second`` sum that a power-of-1000 scale error in one filing explains."""
     values = [records[i].value for i in combo]
-    accessions = {records[i].accession for i in combo}
+    accessions = frozenset(records[i].accession for i in combo)
     if len(accessions) < 2 or _adds_up(values):
         return set()  # one filing alone cannot show its own scale error; a sum that adds up shows none
     fixes: list[list[int]] = []
@@ -518,16 +570,10 @@ def _misscaled_in(records: list[FundamentalFact], combo: tuple[int, ...], distan
                 fixes.append(part)
     if not fixes:
         return set()  # not a scale error (e.g. a restatement): left to the other checks
-
-    def far(part: list[int]) -> float:
-        return statistics.mean(distance.get(i, math.nan) for i in part)
-
     # Scaling one filing up is the same as scaling the other down: the side far from its neighbouring periods is the
     # mis-scaled one. Without a clear answer every candidate is held (a guess could serve the wrong scale).
-    ranked = sorted(fixes, key=lambda part: -far(part) if not math.isnan(far(part)) else math.inf)
-    if len(ranked) == 1 or far(ranked[0]) - far(ranked[1]) >= DECISIVE_MARGIN:
-        return set(ranked[0])
-    return {i for part in fixes for i in part}
+    wrong = _clear_pick(neighbours, fixes, accessions, nearest=False)
+    return set(fixes[wrong]) if wrong is not None else {i for part in fixes for i in part}
 
 
 def _date_or_none(values: Any, i: int) -> date | None:  # noqa: ANN401 - provider arrays are untyped

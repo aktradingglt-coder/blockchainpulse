@@ -1652,7 +1652,16 @@ async def test_sec_scale_error_against_another_filing_is_quarantined() -> None:
     ]
     assert shown
     assert max(f.value for f in shown) < 1e12  # the 323-trillion figure never reaches the user
-    assert len(resp.quarantined) == 1
+    # held: the x1000 fact and its sibling in the same table (that filing's Q2-2025 comparative)...
+    held = [f for f in resp.quarantined if isinstance(f, FundamentalFact)]
+    assert {(f.accession, f.period_end.isoformat()) for f in held} == {("0001018724-26-000026", "2025-06-30")}
+    assert len(held) == 2
+    # ...while Q2 2025 is still shown, as reported by the other filings
+    assert any(
+        f.concept == "RevenueFromContractWithCustomerExcludingAssessedTax" and f.period_end.isoformat() == "2025-06-30"
+        and f.period_start is not None and f.period_start.isoformat() == "2025-04-01"
+        for f in resp.records if isinstance(f, FundamentalFact)
+    )  # fmt: skip
     assert any("scale_consistency" in w for w in resp.quality.warnings)
 
 
@@ -1891,23 +1900,29 @@ def test_rounded_or_restated_sums_are_not_scale_errors() -> None:
         _fact("2020-04-01", "2020-06-30", 9_918e6, "b"),
         _fact("2020-01-01", "2020-06-30", 9_994e6, "b"),
     ]
-    assert sec_edgar._additivity_errors(rounded, {}) == set()
-    assert sec_edgar._additivity_errors(restated, {}) == set()
+    assert sec_edgar._scale_errors(rounded)[0] == set()
+    assert sec_edgar._scale_errors(restated)[0] == set()
 
 
 def test_scale_error_found_by_a_sum_is_pinned_on_the_side_far_from_its_neighbours() -> None:
-    q1, q2, h1 = (
-        _fact("2026-01-01", "2026-03-31", 30.25e9, "old"),
-        _fact("2026-04-01", "2026-06-30", 62.65e6, "new"),
-        _fact("2026-01-01", "2026-06-30", 92.9e6, "new"),
-    )
-    records = [q1, q2, h1]
-    # x1000 on "new" or /1000 on "old" both make it add up: the neighbouring periods decide which is wrong
-    assert sec_edgar._additivity_errors(records, {0: 0.2, 1: 2.4, 2: 2.3}) == {1, 2}
-    # no neighbours to decide: nothing in the disagreeing sum is served
-    assert sec_edgar._additivity_errors(records, {}) == {0, 1, 2}
+    """H1 = Q1 + Q2 fails with the newest filing at /1000. Scaling that filing up or the earlier one down both repair
+    the sum; the neighbouring periods, as reported by neither filing, decide which one is wrong."""
+    history = [
+        _fact("2024-01-01", "2024-06-30", 60e9, "h1"),
+        _fact("2025-01-01", "2025-06-30", 62e9, "h2"),
+        *(_fact(f"2025-{m:02d}-01", end, 31e9, "h2") for m, end in ((1, "2025-03-31"), (4, "2025-06-30"))),
+        *(_fact(f"2025-{m:02d}-01", end, 30e9, "h3") for m, end in ((7, "2025-09-30"), (10, "2025-12-31"))),
+    ]
+    q1 = _fact("2026-01-01", "2026-03-31", 30.25e9, "old")
+    q2 = _fact("2026-04-01", "2026-06-30", 62.65e6, "new")
+    h1 = _fact("2026-01-01", "2026-06-30", 92.9e6, "new")
+    records = [*history, q1, q2, h1]
+    held, _ = sec_edgar._scale_errors(records)
+    assert {records[i] for i in held} == {q2, h1}
+    # no history to decide by: nothing in the disagreeing sum is served
+    assert sec_edgar._scale_errors([q1, q2, h1])[0] == {0, 1, 2}
     # one filing alone cannot show its own scale error
-    assert sec_edgar._additivity_errors([q2, h1, _fact("2026-01-01", "2026-03-31", 30.25e9, "new")], {}) == set()
+    assert sec_edgar._scale_errors([q2, h1, _fact("2026-01-01", "2026-03-31", 30.25e6, "new")])[0] == set()
 
 
 async def test_a_mis_scaled_filing_is_held_whole() -> None:
