@@ -368,7 +368,8 @@ No wrong value is served at any of those dates. The cost is that real values are
 rules are built to err on (P2 backtests must treat held facts as missing).
 
 **Limit (stated, not hidden).** What is still missed:
-- No ×1e6 seed is missed except the zero value: a fact that large exceeds 100× total assets.
+- No ×1e6 seed is missed except the zero value. One 10-Q ×1e6 seed (a small AFS line) lands at only 6.4× total
+  assets; it is flagged and kept, not held.
 - The ÷1000 and ×1000 misses land within the company's own size range, in three kinds of concept:
   - concepts first reported in the newest filing, small enough after scaling to stay under the assets bound;
   - footnote lines outside any identity, with volatile history (impairments, equity-method income, FX gains);
