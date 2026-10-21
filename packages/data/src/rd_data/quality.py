@@ -398,9 +398,14 @@ def check_ohlc(bars: Sequence[Bar], *, allow_non_positive: bool = False) -> Chec
 
 
 def check_gaps(
-    bars: Sequence[Bar], calendar: TradingCalendar, *, max_gap_fraction: float = MAX_GAP_FRACTION
+    bars: Sequence[Bar],
+    calendar: TradingCalendar,
+    *,
+    max_gap_fraction: float = MAX_GAP_FRACTION,
+    gap_from: datetime | None = None,
 ) -> CheckResult:
-    """Daily bars against the instrument's trading calendar: expected sessions vs bars present."""
+    """Daily bars against the instrument's trading calendar: expected sessions vs bars present. With ``gap_from``,
+    only sessions from that time on count (earlier bars only anchor the window)."""
     if len(bars) < 2:
         return _ok("calendar_gaps", "fewer than two bars")
     first, last = bars[0].ts.date(), bars[-1].ts.date()
@@ -413,6 +418,10 @@ def check_gaps(
             break
         expected.append(session)
         probe = session
+    if gap_from is not None:
+        expected = [d for d in expected if d >= gap_from.date()]
+        if not expected:
+            return _ok("calendar_gaps", "no sessions in the window")
     have = {b.ts.date() for b in bars}
     missing = [d for d in expected if d not in have]
     fraction = len(missing) / len(expected)
@@ -425,19 +434,27 @@ def check_gaps(
 
 
 def check_interval_gaps(
-    bars: Sequence[Bar], width: timedelta, calendar: TradingCalendar, *, max_gap_fraction: float = MAX_GAP_FRACTION
+    bars: Sequence[Bar],
+    width: timedelta,
+    calendar: TradingCalendar,
+    *,
+    max_gap_fraction: float = MAX_GAP_FRACTION,
+    gap_from: datetime | None = None,
 ) -> CheckResult:
-    """Intraday/weekly bars: bar starts missing between consecutive bars while the market is open."""
+    """Intraday/weekly bars: bar starts missing between consecutive bars while the market is open. With
+    ``gap_from``, only bar starts from that time on count (earlier bars only anchor the window)."""
     if len(bars) < 2:
         return _ok("calendar_gaps", "fewer than two bars")
     missing: list[datetime] = []
     for prev, cur in itertools.pairwise(bars):
         t, steps = prev.ts + width, 0
         while t < cur.ts and steps < 10_000:
-            if _trades_during(calendar, t, width):
+            if _trades_during(calendar, t, width) and (gap_from is None or t >= gap_from):
                 missing.append(t)
             t, steps = t + width, steps + 1
-    expected = len(bars) + len(missing)
+    expected = sum(1 for b in bars if gap_from is None or b.ts >= gap_from) + len(missing)
+    if expected == 0:
+        return _ok("calendar_gaps", "no bars in the window")
     detail = f"{len(missing)} of {expected} expected {width} bars missing ({calendar.name})"
     if missing:
         detail += f" (e.g. {', '.join(m.isoformat() for m in missing[:3])})"
@@ -522,6 +539,7 @@ def check_bars(
     corporate_actions_known: bool = False,
     bar_width: timedelta | None = None,
     gap_window: int | None = None,
+    gap_from: datetime | None = None,
     allow_non_positive: bool = False,
     rejected_rows: int = 0,
 ) -> tuple[DataQualityReport, list[Bar]]:
@@ -539,12 +557,17 @@ def check_bars(
     fields = check_field_spikes(bars)
     checks.extend([spikes, jumps, fields])
     checks.append(check_stale_run(closes, market_open_at_end=market_open_at_end))
-    # Gaps are judged on the bars the caller asked for (gap_window), not on the extra QA history behind them.
-    gap_bars = bars[-gap_window:] if gap_window else bars
+    # Gaps are judged on the bars the caller asked for (the last gap_window bars, or those from gap_from on, with the
+    # bar before as an anchor), not on the extra QA history behind them.
+    if gap_from is not None:
+        before = [i for i, b in enumerate(bars) if b.ts < gap_from]
+        gap_bars = bars[before[-1] :] if before else bars
+    else:
+        gap_bars = bars[-gap_window:] if gap_window else bars
     if calendar is not None and bars and bars[0].interval == "1d":
-        checks.append(check_gaps(gap_bars, calendar))
+        checks.append(check_gaps(gap_bars, calendar, gap_from=gap_from))
     elif calendar is not None and bar_width is not None:
-        checks.append(check_interval_gaps(gap_bars, bar_width, calendar))
+        checks.append(check_interval_gaps(gap_bars, bar_width, calendar, gap_from=gap_from))
     if reference is not None:
         checks.append(check_reconciliation(bars, reference))
     if split_dates is not None:

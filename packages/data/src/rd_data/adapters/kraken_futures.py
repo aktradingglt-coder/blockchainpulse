@@ -255,22 +255,26 @@ class KrakenFuturesAdapter(BaseAdapter):
                 rejected += 1
         if not bars and not rejected:
             raise NotFound(f"kraken_futures: no closed {tf} candles for {symbol}", provider=self.name)
+        since = request.params.get("since_ms")
+        limit = int(request.params.get("limit", 200))
+        start = datetime.fromtimestamp(int(since) / 1000, tz=UTC) if since is not None else None
         report, usable = check_bars(
             bars,
             subject=f"kraken_futures:{symbol}:{tf}",
             calendar=ContinuousCalendar(),
             rejected_rows=rejected,
             bar_width=width,
-            gap_window=_window_size(bars, request),
+            gap_window=limit,
+            gap_from=start,
         )
-        since = request.params.get("since_ms")
-        limit = int(request.params.get("limit", 200))
-        if since is not None:
-            start = datetime.fromtimestamp(int(since) / 1000, tz=UTC)
+        if start is not None:
             window = [b for b in usable if b.ts >= start][:limit]
+            requested = [b for b in bars if b.ts >= start][:limit]
         else:
             window = usable[-limit:]
-        first = window[0].ts if window else (bars[-1].ts if bars else now)
+            requested = bars[-limit:]
+        # Everything held inside the requested window is reported, including bars at its very start.
+        first = requested[0].ts if requested else (bars[-1].ts if bars else now)
         quarantined = tuple(b for b in bars if b not in usable and b.ts >= first)
         usable = window
         as_of = usable[-1].ts if usable else None
@@ -418,15 +422,3 @@ def _warning(symbols: list[str], what: str, name: str) -> CheckResult | None:
     return CheckResult(
         name, passed=False, blocking=False, detail=f"{len(symbols)} symbol(s) {what}: {', '.join(symbols)}"
     )
-
-
-def _window_size(bars: list[Bar], request: DataRequest) -> int:
-    """How many of the fetched bars fall in the window the caller asked for (gaps are judged there only)."""
-    limit = int(request.params.get("limit", 200))
-    since = request.params.get("since_ms")
-    if since is None:
-        return limit
-    start = datetime.fromtimestamp(int(since) / 1000, tz=UTC)
-    in_window = min(limit, sum(1 for b in bars if b.ts >= start))
-    # One more: the bar before the window, so a hole right at the start of the window is still seen as a gap.
-    return max(1, in_window + 1)

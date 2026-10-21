@@ -2040,3 +2040,97 @@ async def test_eia_weekly_change_hold_is_in_the_report(ctx_factory: Any) -> None
     resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "NW2_EPG0_SWO_R48_BCF"}))
     await adapter.aclose()
     assert len(resp.quality.quarantined) == len(resp.quarantined) == 1
+
+
+# ------------------------------------------------------------------------------------- review round 8 (P1)
+
+NEWEST_10K = "0001018724-26-000004"
+
+
+@pytest.mark.parametrize("factor", [0.001, 1000.0])
+@pytest.mark.parametrize(
+    "concept", ["IncomeTaxExpenseBenefit", "ComprehensiveIncomeNetOfTax", "NonoperatingIncomeExpense"]
+)
+async def test_newest_10k_scale_error_is_held_against_the_same_years_nine_months(factor: float, concept: str) -> None:
+    """The full year exists in the 10-K only, and annual neighbours are years apart: the year is judged against the
+    same year's nine months (an earlier 10-Q), whose ratio to the year is steady across years."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(
+        SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10K, factor, concept=concept, end="2025-12-31")}
+    )
+    shown = [
+        f.value
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept == concept and f.accession == NEWEST_10K
+        and f.period_end.isoformat() == "2025-12-31"
+    ]  # fmt: skip
+    assert shown == []
+    assert any("scale_consistency" in w for w in resp.quality.warnings)
+
+
+@pytest.mark.parametrize("factor", [1000.0, 0.001])
+async def test_a_mis_scaled_column_is_held_whole(factor: float) -> None:
+    """Only the current-period column of the newest 10-Q is mis-scaled (comparatives intact): once most of it is
+    held, the rest of it (cash, new concepts) is held too rather than served at the wrong scale."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10Q, factor, end="2026-06-30")})
+    shown = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.accession == NEWEST_10Q and f.period_end.isoformat() == "2026-06-30"
+    ]
+    assert shown == []
+    assert any(f.period_end.isoformat() == "2025-06-30" for f in resp.records if isinstance(f, FundamentalFact))
+
+
+async def test_empty_sec_ticker_map_is_an_outage() -> None:
+    request = _plan(SecEdgarAdapter, RequestKind.INSTRUMENTS)
+    with pytest.raises(ProviderDown, match="empty ticker map"):
+        await _replay(SecEdgarAdapter, request, {0: lambda _b: "{}"})
+
+
+async def test_kraken_gaps_before_since_do_not_block_and_a_bad_first_bar_is_reported(ctx_factory: Any) -> None:
+    end = datetime(2026, 10, 21, 0, tzinfo=UTC)
+    width = timedelta(hours=1)
+    since_dt = end - timedelta(hours=6)
+    server = _kraken_range_server(end, width, bad_last=False)
+
+    def edited(req: httpx.Request) -> httpx.Response:
+        resp = server(req)
+        if "/charts/" not in req.url.path:
+            return resp
+        data = json.loads(resp.content)
+        before = {int((since_dt - timedelta(hours=h)).timestamp() * 1000) for h in (1, 2)}  # 16:00-17:00 missing
+        data["candles"] = [c for c in data["candles"] if c["time"] not in before]
+        for c in data["candles"]:
+            if c["time"] == int(since_dt.timestamp() * 1000):  # the first bar asked for: a x50 print
+                c.update({k: str(float(c[k]) * 50) for k in ("open", "high", "low", "close")})
+        return httpx.Response(200, json=data)
+
+    ctx, _ = ctx_factory(edited, now=end + timedelta(minutes=5), cache=False)
+    adapter = KrakenFuturesAdapter(ctx)
+    params = {"symbol": "BTC/USD:USD", "timeframe": "1h", "since_ms": int(since_dt.timestamp() * 1000)}
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params=params))
+    await adapter.aclose()
+    assert [b.ts for b in resp.quarantined if isinstance(b, Bar)] == [since_dt]
+    assert all(isinstance(b, Bar) and b.close < 200 for b in resp.records)
+    assert not any("calendar_gaps" in w for w in resp.quality.warnings)
+
+
+async def test_twelvedata_bad_print_at_the_start_of_the_window_is_reported(ctx_factory: Any) -> None:
+    days = sorted(
+        d for d in (datetime(2026, 10, 20, tzinfo=UTC) - timedelta(days=k) for k in range(60)) if d.weekday() < 5
+    )
+    values = [
+        {"datetime": d.strftime("%Y-%m-%d"), "open": "1.1", "high": "1.2", "low": "1.0",
+         "close": f"{1.1 + 0.002 * math.sin(i)}"}
+        for i, d in enumerate(days)
+    ]  # fmt: skip
+    for k in ("open", "high", "low", "close"):
+        values[-5][k] = f"{float(values[-5][k]) * 100:.4f}"
+    body = {"meta": {"symbol": "EUR/USD", "type": "Physical Currency"}, "values": values, "status": "ok"}
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=body), flags={"provider_twelvedata": True}, **SETTINGS)
+    adapter = TwelveDataAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "EUR/USD", "outputsize": 5}))
+    await adapter.aclose()
+    assert [b.ts for b in resp.quarantined if isinstance(b, Bar)] == [days[-5]]

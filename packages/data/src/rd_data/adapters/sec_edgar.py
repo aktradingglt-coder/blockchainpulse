@@ -118,6 +118,9 @@ class SecEdgarAdapter(BaseAdapter):
     # ------------------------------------------------------------------------------------------ tickers
 
     def _parse_tickers(self, data: Mapping[str, Any]) -> ParseResult:
+        if not data:
+            # The SEC map lists every registrant (over 10,000); an empty one is a broken response, never cached.
+            raise ProviderDown("sec: empty ticker map", provider=self.name)
         records: list[Instrument] = []
         rejected = 0
         for row in data.values():
@@ -342,6 +345,11 @@ FILING_SCALE_SHARE = 0.5
 #: Relative tolerance for "January-June = January-March + April-June" (each value is rounded where it was reported).
 ADDITIVITY_TOLERANCE = 0.01
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
+#: Held facts needed (with FILING_SCALE_SHARE of the column) before a filing's whole column for one date is held.
+COLUMN_MIN_HELD = 3
+#: Year-to-date ratio checks need this many other years, whose ratios sit within 10^PREFIX_SPREAD of their median.
+PREFIX_HISTORY = 3
+PREFIX_SPREAD = 0.3
 
 
 def _scale_like(log_ratio: float, tolerance: float = SCALE_TOLERANCE) -> bool:
@@ -365,8 +373,11 @@ def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
       fact of a filing whose comparatives are mostly a power of 1000 from the other filings (a mis-scaled filing);
     * held — facts that break "a period = its two halves" (e.g. January-June = January-March + April-June) when
       scaling one filing's facts in that sum by a power of 1000 makes it add up;
+    * held — a year-to-date fact whose ratio to the same year's shorter year-to-date (from other filings: the year
+      against its nine months, nine months against the half) is about a power of 1000 off the ratio other years show;
     * held — a held fact's siblings: the same filing's other facts of that concept and period end (a scale is set per
-      table, so e.g. the trailing-twelve-month figure beside a mis-scaled quarter shares its error);
+      table, so e.g. the trailing-twelve-month figure beside a mis-scaled quarter shares its error); and the whole
+      column (one filing, one period end) once most of it is held;
     * flagged — any other fact more than 10^FLAG_DISTANCE from its neighbours (kept, for review).
 
     Whenever two filings are weighed against each other, neighbours reported by either of them are left out, so a
@@ -387,8 +398,18 @@ def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     held, flagged = _fact_holds(records, distance)
     held |= _filing_disagreements(records, logs, by_period, neighbours)
     held |= _additivity_errors(records, neighbours)
+    held |= _prefix_errors(records, logs, neighbours)
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
+    # A filing's column (its facts for one period end) that is mostly held is held whole: the scale was set for the
+    # column, and the facts that slipped through the other checks share it.
+    column: dict[tuple[str, date], list[int]] = {}
+    for i, f in enumerate(records):
+        column.setdefault((f.accession, f.period_end), []).append(i)
+    for idx in column.values():
+        hits = sum(i in held for i in idx)
+        if hits >= COLUMN_MIN_HELD and hits / len(idx) >= FILING_SCALE_SHARE:
+            held.update(idx)
     return held, flagged - held
 
 
@@ -541,6 +562,62 @@ def _additivity_errors(records: list[FundamentalFact], neighbours: _Neighbours) 
                 for combo in itertools.product(whole, first, spans[(concept, unit, split, end)]):
                     held |= _misscaled_in(records, combo, neighbours)
     return held
+
+
+def _prefix_errors(records: list[FundamentalFact], logs: list[float | None], neighbours: _Neighbours) -> set[int]:
+    """Year-to-date facts against the same year's previous year-to-date (same start, earlier end; the full year
+    against its nine months). Their ratio follows the business (a full year is usually about 4/3 of nine months) and
+    is checked against the ratio the concept shows in other years, so the newest annual figure is checked against
+    numbers from the same year rather than against years-old annual values only."""
+    spans: dict[tuple[str, str, date, date], list[int]] = {}
+    for i, f in enumerate(records):
+        if f.period_start is not None and logs[i] is not None:
+            spans.setdefault((f.concept, f.unit, f.period_start, f.period_end), []).append(i)
+    ends: dict[tuple[str, str, date], list[date]] = {}
+    for concept, unit, start, end in spans:
+        ends.setdefault((concept, unit, start), []).append(end)
+    chain: list[tuple[tuple[str, str, date, date], tuple[str, str, date, date]]] = []
+    history: dict[tuple[str, str, int, int], list[tuple[date, float]]] = {}
+    for (concept, unit, start), dates in ends.items():
+        dates.sort()
+        for shorter, longer in itertools.pairwise(dates):
+            whole, part = (concept, unit, start, longer), (concept, unit, start, shorter)
+            chain.append((whole, part))
+            key = (concept, unit, _quarters(start, longer), _quarters(start, shorter))
+            ratio = statistics.median(_known(logs, spans[whole])) - statistics.median(_known(logs, spans[part]))
+            history.setdefault(key, []).append((start, ratio))
+    held: set[int] = set()
+    for whole, part in chain:
+        concept, unit, start, longer = whole
+        others = [
+            r for s, r in history[(concept, unit, _quarters(start, longer), _quarters(start, part[3]))] if s != start
+        ]
+        if len(others) < PREFIX_HISTORY:
+            continue
+        expected = statistics.median(others)
+        if statistics.median(abs(r - expected) for r in others) > PREFIX_SPREAD:
+            continue  # the ratio swings from year to year (e.g. financing flows): no usual ratio to judge by
+        for i in spans[whole]:
+            prefix = [k for k in spans[part] if records[k].accession != records[i].accession]
+            log_i = logs[i]
+            if not prefix or log_i is None:
+                continue  # one filing alone cannot show its own scale error
+            off = log_i - statistics.median(_known(logs, prefix)) - expected
+            if abs(off) > FLAG_DISTANCE and _scale_like(off, NEAR_POWER):
+                exclude = frozenset({records[i].accession, *(records[k].accession for k in prefix)})
+                # the prefix is judged as a "whole" in its own pair; here only this fact can be held, unless the
+                # neighbours clearly blame the prefix
+                if _clear_pick(neighbours, [[i], prefix], exclude, nearest=False) != 1:
+                    held.add(i)
+    return held
+
+
+def _quarters(start: date, end: date) -> int:
+    return round((end - start).days / 91)
+
+
+def _known(logs: list[float | None], idx: Sequence[int]) -> list[float]:
+    return [v for i in idx if (v := logs[i]) is not None]
 
 
 def _adds_up(values: Sequence[float]) -> bool:
