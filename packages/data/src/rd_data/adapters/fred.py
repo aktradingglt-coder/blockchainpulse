@@ -104,3 +104,7 @@ class FredAdapter(BaseAdapter):
             notes=tuple(notes),
             licence_override=override,
         )
+
+    @staticmethod
+    def recording_plan() -> list[DataRequest]:
+        return [DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"})]

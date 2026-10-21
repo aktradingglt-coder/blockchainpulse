@@ -1,0 +1,46 @@
+{
+ "provider": "twelvedata",
+ "provenance": "schema-derived",
+ "recorded_at": "2026-10-21T12:00:00Z",
+ "source": "schema-derived by the builder from the vendor's documented response format; all values are SYNTHETIC test values, not market data. Replace with a CI recording when a vendor key is configured (D-011).",
+ "interactions": [
+  {
+   "request": {
+    "method": "GET",
+    "url": "https://api.twelvedata.com/time_series",
+    "params": {
+     "apikey": "REDACTED",
+     "interval": "1day",
+     "order": "ASC",
+     "outputsize": "30",
+     "symbol": "EUR/USD",
+     "timezone": "UTC"
+    }
+   },
+   "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "{\"meta\": {\"symbol\": \"EUR/USD\", \"interval\": \"1day\", \"currency_base\": \"Euro\", \"currency_quote\": \"US Dollar\", \"type\": \"Physical Currency\"}, \"values\": [{\"datetime\": \"2026-09-09\", \"open\": \"1.08000\", \"high\": \"1.08500\", \"low\": \"1.07500\", \"close\": \"1.08100\"}, {\"datetime\": \"2026-09-10\", \"open\": \"1.08100\", \"high\": \"1.08600\", \"low\": \"1.07600\", \"close\": \"1.08200\"}, {\"datetime\": \"2026-09-11\", \"open\": \"1.08200\", \"high\": \"1.08700\", \"low\": \"1.07700\", \"close\": \"1.08300\"}, {\"datetime\": \"2026-09-14\", \"open\": \"1.08300\", \"high\": \"1.08800\", \"low\": \"1.07800\", \"close\": \"1.08400\"}, {\"datetime\": \"2026-09-15\", \"open\": \"1.08400\", \"high\": \"1.08900\", \"low\": \"1.07900\", \"close\": \"1.08500\"}, {\"datetime\": \"2026-09-16\", \"open\": \"1.08500\", \"high\": \"1.09000\", \"low\": \"1.08000\", \"close\": \"1.08600\"}, {\"datetime\": \"2026-09-17\", \"open\": \"1.08600\", \"high\": \"1.09100\", \"low\": \"1.08100\", \"close\": \"1.08700\"}, {\"datetime\": \"2026-09-18\", \"open\": \"1.08700\", \"high\": \"1.09200\", \"low\": \"1.08200\", \"close\": \"1.08800\"}, {\"datetime\": \"2026-09-21\", \"open\": \"1.08800\", \"high\": \"1.09300\", \"low\": \"1.08300\", \"close\": \"1.08900\"}, {\"datetime\": \"2026-09-22\", \"open\": \"1.08900\", \"high\": \"1.09400\", \"low\": \"1.08400\", \"close\": \"1.09000\"}, {\"datetime\": \"2026-09-23\", \"open\": \"1.09000\", \"high\": \"1.09500\", \"low\": \"1.08500\", \"close\": \"1.09100\"}, {\"datetime\": \"2026-09-24\", \"open\": \"1.09100\", \"high\": \"1.09600\", \"low\": \"1.08600\", \"close\": \"1.09200\"}, {\"datetime\": \"2026-09-25\", \"open\": \"1.09200\", \"high\": \"1.09700\", \"low\": \"1.08700\", \"close\": \"1.09300\"}, {\"datetime\": \"2026-09-28\", \"open\": \"1.09300\", \"high\": \"1.09800\", \"low\": \"1.08800\", \"close\": \"1.09400\"}, {\"datetime\": \"2026-09-29\", \"open\": \"1.09400\", \"high\": \"1.09900\", \"low\": \"1.08900\", \"close\": \"1.09500\"}, {\"datetime\": \"2026-09-30\", \"open\": \"1.09500\", \"high\": \"1.10000\", \"low\": \"1.09000\", \"close\": \"1.09600\"}, {\"datetime\": \"2026-10-01\", \"open\": \"1.09600\", \"high\": \"1.10100\", \"low\": \"1.09100\", \"close\": \"1.09700\"}, {\"datetime\": \"2026-10-02\", \"open\": \"1.09700\", \"high\": \"1.10200\", \"low\": \"1.09200\", \"close\": \"1.09800\"}, {\"datetime\": \"2026-10-05\", \"open\": \"1.09800\", \"high\": \"1.10300\", \"low\": \"1.09300\", \"close\": \"1.09900\"}, {\"datetime\": \"2026-10-06\", \"open\": \"1.09900\", \"high\": \"1.10400\", \"low\": \"1.09400\", \"close\": \"1.10000\"}, {\"datetime\": \"2026-10-07\", \"open\": \"1.10000\", \"high\": \"1.10500\", \"low\": \"1.09500\", \"close\": \"1.10100\"}, {\"datetime\": \"2026-10-08\", \"open\": \"1.10100\", \"high\": \"1.10600\", \"low\": \"1.09600\", \"close\": \"1.10200\"}, {\"datetime\": \"2026-10-09\", \"open\": \"1.10200\", \"high\": \"1.10700\", \"low\": \"1.09700\", \"close\": \"1.10300\"}, {\"datetime\": \"2026-10-12\", \"open\": \"1.10300\", \"high\": \"1.10800\", \"low\": \"1.09800\", \"close\": \"1.10400\"}, {\"datetime\": \"2026-10-13\", \"open\": \"1.10400\", \"high\": \"1.10900\", \"low\": \"1.09900\", \"close\": \"1.10500\"}, {\"datetime\": \"2026-10-14\", \"open\": \"1.10500\", \"high\": \"1.11000\", \"low\": \"1.10000\", \"close\": \"1.10600\"}, {\"datetime\": \"2026-10-15\", \"open\": \"1.10600\", \"high\": \"1.11100\", \"low\": \"1.10100\", \"close\": \"1.10700\"}, {\"datetime\": \"2026-10-16\", \"open\": \"1.10700\", \"high\": \"1.11200\", \"low\": \"1.10200\", \"close\": \"1.10800\"}, {\"datetime\": \"2026-10-19\", \"open\": \"1.10800\", \"high\": \"1.11300\", \"low\": \"1.10300\", \"close\": \"1.10900\"}, {\"datetime\": \"2026-10-20\", \"open\": \"1.10900\", \"high\": \"1.11400\", \"low\": \"1.10400\", \"close\": \"1.11000\"}], \"status\": \"ok\"}",
+    "shape": {
+     "meta": {
+      "currency_base": "string",
+      "currency_quote": "string",
+      "interval": "string",
+      "symbol": "string",
+      "type": "string"
+     },
+     "status": "string",
+     "values": {
+      "[]": {
+       "close": "string",
+       "datetime": "string",
+       "high": "string",
+       "low": "string",
+       "open": "string"
+      }
+     }
+    }
+   }
+  }
+ ]
+}

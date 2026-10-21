@@ -9,7 +9,7 @@ publishes them the following Friday — freshness is judged on the report date.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, ClassVar, Literal, cast
 
 import orjson
@@ -99,6 +99,13 @@ FIELDS: Mapping[ReportType, Mapping[str, tuple[tuple[str, ...], tuple[str, ...],
 _MARKET_CODE_CHARS = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+")
 
 
+def release_time(as_of: date) -> datetime:
+    """Scheduled public release: the Friday after the Tuesday position date, 15:30 ET (20:30 UTC in winter, 19:30
+    in summer; we use 20:30 UTC, the later of the two, so data is never judged older than it is). Holiday weeks
+    release later, which only delays the stale label — never the reverse (D-027)."""
+    return datetime.combine(as_of + timedelta(days=3), time(20, 30, tzinfo=UTC))
+
+
 def _first(row: Mapping[str, Any], names: tuple[str, ...]) -> float | None:
     for name in names:
         if name in row:
@@ -167,6 +174,7 @@ class CftcAdapter(BaseAdapter):
             check_positioning(records, subject=f"cftc:{report_type}:{request.params['market_code']}"), rejected
         )
         as_of = records[-1].as_of if records else None
+        released = release_time(as_of) if as_of else None
         return ParseResult(
             tuple(records),
             quality,
@@ -174,6 +182,7 @@ class CftcAdapter(BaseAdapter):
             FreshnessSpec(DataType.COT),
             source_tz="America/New_York",
             notes=("Positions as of Tuesday; released by the CFTC on the following Friday.",),
+            freshness_as_of=released,
         )
 
     def _row(self, row: Mapping[str, Any], report_type: ReportType, *, futures_only: bool) -> PositioningReport:

@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict
 from rd_core.clock import Clock, SystemClock, isoformat_z
 from rd_core.settings import DeploymentMode, Settings
 from rd_data.errors import FeatureDisabled, InvalidArgs
-from rd_data.freshness import Freshness, FreshnessResult, TradingCalendar, classify
+from rd_data.freshness import FreshnessResult, TradingCalendar, classify
 from rd_data.http import FetchResult, HttpFetcher
 from rd_data.licence import LicenceTag, LicenceTerms
 from rd_data.quality import DataQualityReport
@@ -116,6 +116,8 @@ class ParseResult:
     source_tz: str = "UTC"
     quarantined: tuple[CanonicalRecord, ...] = ()
     notes: tuple[str, ...] = ()
+    #: Time freshness is measured from when it differs from ``as_of`` (e.g. COT: release date, not position date).
+    freshness_as_of: datetime | date | None = None
     #: Stricter terms for this particular response (e.g. a copyrighted FRED series); never looser than the adapter's.
     licence_override: LicenceTerms | None = None
 
@@ -140,7 +142,8 @@ class DataResponse:
 
     @property
     def freshness_label(self) -> str:
-        return self.freshness.status.value if self.freshness else Freshness.FRESH.value
+        """``fresh`` / ``stale`` / ``blocked``, or ``not_applicable`` (historical windows, reference data)."""
+        return self.freshness.status.value if self.freshness else "not_applicable"
 
 
 @dataclass(frozen=True)
@@ -254,7 +257,7 @@ class BaseAdapter(ABC):
             spec = parsed.freshness
             freshness = classify(
                 spec.data_type,
-                parsed.as_of,
+                parsed.freshness_as_of or parsed.as_of,
                 now,
                 delay_minutes=spec.delay_minutes,
                 calendar=spec.calendar,

@@ -177,16 +177,22 @@ class KrakenFuturesAdapter(BaseAdapter):
         )
         quarantined = tuple(b for b in bars if b not in usable)
         as_of = usable[-1].ts if usable else None
-        return ParseResult(
-            tuple(usable),
-            report,
-            as_of,
+        notes = ["Perpetual trade-price candles; daily bars close at 00:00 UTC."]
+        spec: FreshnessSpec | None = (
             FreshnessSpec(DataType.DAILY_BAR, ContinuousCalendar())
             if tf == "1d"
-            else FreshnessSpec(DataType.CRYPTO_DERIVATIVES),
-            quarantined=quarantined,
-            notes=("Perpetual trade-price candles; daily bars close at 00:00 UTC.",),
+            else FreshnessSpec(DataType.CRYPTO_DERIVATIVES)
         )
+        since = request.params.get("since_ms")
+        if since is not None:
+            window_end = datetime.fromtimestamp(int(since) / 1000, tz=UTC) + width * int(
+                request.params.get("limit", 200)
+            )
+            if window_end < now - width:
+                # An explicit historical window is not "latest data": freshness does not apply to it.
+                spec = None
+                notes.append(f"Historical window ending {window_end.date().isoformat()}; freshness not applicable.")
+        return ParseResult(tuple(usable), report, as_of, spec, quarantined=quarantined, notes=tuple(notes))
 
     def _parse_derivatives(self, parsed: Mapping[str, Any]) -> ParseResult:
         metrics: list[CryptoDerivativeMetric] = []

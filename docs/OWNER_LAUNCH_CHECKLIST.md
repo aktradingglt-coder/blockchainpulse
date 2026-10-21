@@ -25,6 +25,8 @@ cannot complete these and never pretends to. Each line links to where the produc
 ## Data vendors
 - [ ] Contracts for any commercial data vendor and display/redistribution rights per crypto exchange
       (`docs/vendor-notes/commercial-data.md`, `crypto-exchanges.md`, D-024).
+- [ ] Add an `EIA_API_KEY` GitHub Actions secret (free key from eia.gov) and run the `record-cassettes` workflow so
+      EIA contract tests replay real responses (D-011); same for Twelve Data / FRED keys once cleared.
 
 ## Infrastructure and operations
 - [ ] Domains and DNS; email authentication (SPF, DKIM, DMARC); transactional email provider account.

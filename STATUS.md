@@ -4,8 +4,8 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4). Round-4 minor findings fixed as a follow-up; P1 in progress.** P1 does not start until the P0 reviewer returns PASS
-(`CRITIC_LEDGER.md`).
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — built; awaiting the independent P1 review**
+(`CRITIC_LEDGER.md`). P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -30,11 +30,28 @@ _Last updated: 2026-10-21_
 | Placeholder decisions incl. proposed prices with comparables | `DECISIONS.md` D-019…D-023, `docs/vendor-notes/pricing-comparables.md` |
 | Threat model draft (STRIDE) | `docs/security/threat-model.md` |
 
+## Done (P1), with evidence
+
+| Item | Evidence |
+| --- | --- |
+| Canonical schemas, typed errors, licence tags per deployment mode | `packages/data/tests/test_schemas_licence.py` |
+| Adapter pipeline: flag → validate → cache → fetch → parse → QA → freshness → licence | `rd_data/adapters/base.py`, `test_adapters_unit.py` |
+| HTTP: host allow-list (SSRF guard), retries with full jitter + Retry-After, typed errors, redacted URLs | `test_http.py` |
+| Shared rate limits (atomic Lua token buckets), circuit breaker, response cache — on real Valkey | `test_resilience.py`, `tests/integration/test_data_redis.py` |
+| Freshness per §5.4 with exchange calendars; COT measured from release (D-027) | `test_freshness.py` |
+| QA checks catch seeded bad data (gaps, spikes, duplicates, non-monotonic, OHLC violations, rejected rows) | `test_quality.py` |
+| Adapters: CFTC (6 datasets), SEC EDGAR, US Treasury, EIA, Kraken Futures (CCXT), FRED (flag off), Twelve Data (flag off) | `test_adapters_unit.py`, `test_kraken_unit.py` |
+| Contract tests replay **real** responses recorded by CI (CFTC ×3, SEC ×3, Treasury, Kraken ×2) | `test_contracts.py`, `cassettes/`, workflow `record-cassettes.yml` |
+| Nightly live drift check against providers | `.github/workflows/live-smoke.yml`, `rd_data.recording --check-drift` |
+| Per-package coverage gate: rd_data 97.3% lines / 92.9% branches (floor 90%) | `make coverage`, `scripts/check_coverage.py` |
+
+Schema-derived (synthetic, labelled) cassettes remain for keyed vendors EIA, FRED and Twelve Data until keys exist
+(D-011); the P11 release gate fails while any remain. Cassette size: ~10.5 MB in total, mostly SEC company facts (7.4 MB).
+
 ## Next
 
-1. P1 data layer: adapter protocol, canonical schemas, rate limiting, cache, circuit breakers, QA checks, freshness,
-   licence gate; adapters CFTC, EDGAR, FRED (flag off), EIA, one CCXT exchange, Twelve Data (flag off);
-   CI workflow to record cassettes from live sources (D-011).
+1. Independent P1 review; fix findings until PASS.
+2. P2 per BUILD_PLAN.md.
 
 ## Blocked on humans
 
@@ -47,6 +64,8 @@ _Last updated: 2026-10-21_
 | H5 | Commercial data contracts (Twelve Data, Databento, others) and each crypto exchange's display terms | Licences | docs/vendor-notes/commercial-data.md, crypto-exchanges.md |
 | H6 | Pricing confirmation (proposed: Starter $49, Pro $179, Desk $719 per month; licence $1,999; pending P11 cost-model measurement) | Commercial | config/product.yaml `pricing_status: proposed`, DECISIONS D-023 |
 | H7 | Sanctions/jurisdiction list review by counsel | Legal | config/jurisdiction_rules.yaml |
+
+| H8 | `EIA_API_KEY` repository secret so CI can record real EIA cassettes (and Twelve Data / FRED keys once contracted/cleared) | Vendor keys | `.github/workflows/record-cassettes.yml` |
 
 Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
 

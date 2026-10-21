@@ -36,6 +36,8 @@ ALLOWED = {
     "cc0-1.0",
     "blueoak-1.0.0",
     "unlicense",
+    "zlib",
+    "zlib/libpng license",
     "the unlicense (unlicense)",
 }
 # Data-only licences permitted for named packages (attribution shipped in the licence bundle).

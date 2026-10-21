@@ -152,3 +152,19 @@ ARCHITECTURE.md §3.1; each new package adds its contract when it is created.
 **Decision.** The Next.js standalone server only prints start-up lines in P0 (no request handling beyond the landing
 page and health route). Structured JSON request logging for the web app (via instrumentation hook and the same
 redaction rules) is delivered with authentication in P7, when the web app starts handling user data.
+
+### D-027 · 2026-10-21 · COT freshness measured from the scheduled release, not the position date
+**Decision.** PROMPT §5.4's COT windows (stale after 8 days, blocked after 15) are measured from the scheduled
+public release (the Friday after the Tuesday position date, 20:30 UTC), not from the position date.
+**Alternatives.** Measure from the Tuesday position date (literal reading).
+**Reason.** Measured from Tuesday, the newest available report would be labelled "stale" every Wednesday–Friday
+before a newer one exists — telling readers data is out of date when it is the latest there is. From the release
+date, "stale" means a weekly release was missed, which is what the label should convey. Holiday-delayed releases
+only delay the label. Implemented in `rd_data.adapters.cftc.release_time`, tested in `test_adapters_unit.py`.
+
+### D-028 · 2026-10-21 · Zlib licence added to the dependency allow-list
+**Decision.** Add `Zlib` to the licence gate's allow-list (`scripts/check_licences.py`).
+**Reason.** NumPy (pulled in by `exchange_calendars`/`pandas` for P1 trading calendars) declares
+`BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0` for bundled components. Zlib is an OSI-approved permissive licence
+(attribution in source distributions, altered versions marked); it imposes nothing on a proprietary hosted or
+self-hosted product beyond the notice bundle produced in P10.

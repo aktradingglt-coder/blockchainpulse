@@ -137,3 +137,7 @@ class TwelveDataAdapter(BaseAdapter):
             else FreshnessSpec(DataType.INTRADAY_DELAYED, delay_minutes=int(request.params.get("delay_minutes", 0)))
         )
         return ParseResult(tuple(usable), report, as_of, spec, quarantined=quarantined)
+
+    @staticmethod
+    def recording_plan() -> list[DataRequest]:
+        return [DataRequest(kind=RequestKind.BARS, params={"symbol": "EUR/USD", "interval": "1d", "outputsize": 30})]
