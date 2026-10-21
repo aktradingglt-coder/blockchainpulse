@@ -33,7 +33,9 @@ def _repo_root() -> Path:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=None, extra="ignore", case_sensitive=False, frozen=True)
+    model_config = SettingsConfigDict(
+        env_file=None, extra="ignore", case_sensitive=False, frozen=True, hide_input_in_errors=True
+    )
 
     app_env: AppEnv = AppEnv.DEV
     app_base_url: AnyHttpUrl = AnyHttpUrl("http://localhost:3000")

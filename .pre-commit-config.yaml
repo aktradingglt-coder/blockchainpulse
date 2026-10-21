@@ -20,7 +20,13 @@ repos:
         types: [python]
       - id: mypy
         name: mypy --strict
-        entry: uv run mypy packages apps/api apps/worker apps/scheduler tests
+        entry: uv run mypy packages apps/api apps/worker apps/scheduler tests scripts
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: import-contracts
+        name: import-linter contracts
+        entry: uv run lint-imports
         language: system
         types: [python]
         pass_filenames: false

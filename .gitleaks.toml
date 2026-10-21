@@ -13,10 +13,32 @@ keywords = ["sk-ant-"]
 [[rules]]
 id = "url-embedded-password"
 description = "Credentials embedded in a connection URL (user part may be empty, e.g. redis://:pw@host)"
-regex = '''[a-z][a-z0-9+.\-]*://[^:/@\s]*:([^@/\s$]{8,})@[^\s]+'''
+regex = '''[a-z][a-z0-9+.\-]*://[^:/@\s]*:([^@\s$]{8,})@[^\s]+'''
 secretGroup = 1
 entropy = 3.0
 keywords = ["://"]
+
+[[rules]]
+id = "discord-webhook-url"
+description = "Discord webhook URL (the path token is the credential)"
+regex = '''https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/([\w-]{20,})'''
+secretGroup = 1
+keywords = ["discord"]
+
+[[rules]]
+id = "sentry-dsn"
+description = "Sentry DSN (public key in the URL user part)"
+regex = '''https://([0-9a-f]{32})@[a-z0-9.\-]+/\d+'''
+secretGroup = 1
+keywords = ["@"]
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot token"
+regex = '''(?:^|[^\d])(\d{6,12}:[A-Za-z0-9_\-]{30,})'''
+secretGroup = 1
+entropy = 3.0
+keywords = [":"]
 
 [allowlist]
 description = "Lockfiles hold integrity hashes, not secrets"

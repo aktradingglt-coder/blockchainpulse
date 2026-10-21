@@ -23,7 +23,8 @@ dev = [
     "pip-audit==2.10.1",
     "types-pyyaml==6.0.12.20260906",
     "respx==0.23.1",
-    "httpx2==2.15.1",
+    "httpx2==2.15.1",  # required by starlette.testclient (FastAPI TestClient); httpx alone is deprecated there
+    "import-linter==2.15",
     "pip-licenses==5.5.5",
 ]
 
@@ -84,9 +85,10 @@ mypy_path = [
     "apps/api/src", "apps/worker/src", "apps/scheduler/src",
 ]
 
-# dramatiq ships py.typed but leaves RedisBroker.__init__ unannotated; the call site is one line in this module.
+# dramatiq ships py.typed but leaves RedisBroker.__init__ and its CLI entry points unannotated; these two thin modules
+# are the only call sites.
 [[tool.mypy.overrides]]
-module = ["rd_worker.broker"]
+module = ["rd_worker.broker", "rd_worker.main"]
 disallow_untyped_calls = false
 
 # ---------------------------------------------------------------- pytest
@@ -104,11 +106,51 @@ consider_namespace_packages = true
 [tool.coverage.run]
 branch = true
 source_pkgs = ["rd_core", "rd_db", "rd_api", "rd_worker", "rd_scheduler"]
+# Measure code that runs in subprocesses (worker, uvicorn, CLI entry points) and multiprocessing children.
+parallel = true
+patch = ["subprocess"]
+concurrency = ["thread", "multiprocessing"]
+sigterm = true
 
 [tool.coverage.report]
-# PROMPT §15.2: ≥80% everywhere; packages named there (quant, data, compliance, reports, billing, licensing) get a
-# 90% per-package gate when they are created.
+# PROMPT §15.2: ≥80% overall here, and per package via scripts/check_coverage.py (80% everywhere, 90% for quant,
+# data, compliance, reports, billing, licensing).
 fail_under = 80
 show_missing = true
 skip_covered = false
 exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "@overload"]
+
+# ---------------------------------------------------------------- import-linter (ARCHITECTURE.md §3.1)
+[tool.importlinter]
+root_packages = ["rd_core", "rd_db", "rd_api", "rd_worker", "rd_scheduler"]
+include_external_packages = false
+
+[[tool.importlinter.contracts]]
+name = "rd_core is the foundation and imports no other rd_* package"
+type = "forbidden"
+source_modules = ["rd_core"]
+forbidden_modules = ["rd_db", "rd_api", "rd_worker", "rd_scheduler"]
+
+[[tool.importlinter.contracts]]
+name = "rd_db depends only on rd_core"
+type = "forbidden"
+source_modules = ["rd_db"]
+forbidden_modules = ["rd_api", "rd_worker", "rd_scheduler"]
+
+[[tool.importlinter.contracts]]
+name = "rd_api may use rd_worker's broker but not its actors, launcher or the scheduler"
+type = "forbidden"
+source_modules = ["rd_api"]
+forbidden_modules = ["rd_worker.actors", "rd_worker.main", "rd_scheduler"]
+
+[[tool.importlinter.contracts]]
+name = "rd_scheduler may use rd_worker's broker but not its actors, launcher or the API"
+type = "forbidden"
+source_modules = ["rd_scheduler"]
+forbidden_modules = ["rd_worker.actors", "rd_worker.main", "rd_api"]
+
+[[tool.importlinter.contracts]]
+name = "rd_worker never imports the API or the scheduler"
+type = "forbidden"
+source_modules = ["rd_worker"]
+forbidden_modules = ["rd_api", "rd_scheduler"]

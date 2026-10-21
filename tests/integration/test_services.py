@@ -31,7 +31,7 @@ def test_api_ready_against_real_services(settings: Settings) -> None:
 def worker_process() -> Iterator[subprocess.Popen[bytes]]:
     env = {**os.environ, "SERVICE_NAME": "rd-worker-test"}
     proc = subprocess.Popen(
-        [sys.executable, "-m", "dramatiq", "rd_worker.actors", "--processes", "1", "--threads", "2", "--skip-logging"],
+        [sys.executable, "-m", "rd_worker.main", "--processes", "1", "--threads", "2"],
         cwd=REPO,
         env=env,
         stdout=subprocess.DEVNULL,

@@ -107,3 +107,37 @@ def test_token_counts_and_lookalike_params_are_not_redacted() -> None:
     }
     assert redact_text("https://example.com/?monkey=banana&donkey=1") == "https://example.com/?monkey=banana&donkey=1"
     assert "s3cr3tvalue" not in redact_text("https://example.com/?x_api_key=s3cr3tvalue")
+
+
+def test_key_names_are_matched_word_wise() -> None:
+    for key in (
+        "refreshToken",
+        "accessToken",
+        "idToken",
+        "authToken",
+        "X-Api-Key",
+        "db_password",
+        "set-cookie",
+        "SENTRY_DSN",
+        "AWS_SECRET_ACCESS_KEY",
+        "client_secret",
+        "session_id",
+    ):
+        assert is_sensitive_key(key), key
+    for key in ("passenger", "compass", "secretary", "input_tokens", "tokens", "instrument", "keystone"):
+        assert not is_sensitive_key(key), key
+
+
+def test_free_text_credentials_masked() -> None:
+    tg = "123456789:" + "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawQ"
+    assert tg not in redact_text(f"POST https://api.telegram.org/bot{tg}/sendMessage")
+    assert "dXNlcjpwYXNz" not in redact_text("Authorization: Basic dXNlcjpwYXNz")
+    assert redact_text("Authorization: Basic dXNlcjpwYXNz").startswith("Authorization: Basic ")
+    hdr_value = "abcdef" + "123456"
+    assert hdr_value not in redact_text("x-api-key: " + hdr_value)
+    aws = "wJalrXUtnFEMIK7MDENG" + "bPxRfiCYEXAMPLEKEY"
+    assert aws not in redact_text(f"AWS_SECRET_ACCESS_KEY: {aws}")
+    assert "hunter2xyz" not in redact_text('{"password": "hunter2xyz", "user": "a"}')
+    assert '"user": "a"' in redact_text('{"password": "hunter2xyz", "user": "a"}')
+    assert "abc/defghij" not in redact_text("redis://default:" + "abc/defghij" + "@host:6379")
+    assert redact_text("see https://example.com:8080/path for docs") == "see https://example.com:8080/path for docs"

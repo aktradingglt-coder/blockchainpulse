@@ -5,8 +5,8 @@ from __future__ import annotations
 from alembic import command
 from alembic.config import Config
 
-from rd_core.logging import configure_logging, get_logger
-from rd_core.settings import get_settings
+from rd_core.bootstrap import bootstrap
+from rd_core.logging import get_logger
 from rd_db.health import MIGRATIONS_DIR
 
 
@@ -21,8 +21,7 @@ def upgrade_to_head() -> None:
 
 
 def main() -> None:
-    settings = get_settings()
-    configure_logging(service="rd-migrate", level=settings.log_level, fmt=settings.log_format)
+    bootstrap("rd-migrate")
     log = get_logger(__name__)
     log.info("migrate.start")
     upgrade_to_head()

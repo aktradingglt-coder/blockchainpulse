@@ -117,3 +117,28 @@ def test_empty_username_url_password_is_detected(tmp_path: Path) -> None:
     assert result.returncode == 1, result.stdout + result.stderr
     findings = json.loads((tmp_path / "report.json").read_text())
     assert {f["File"] for f in findings} == {"cfg.env", "client.py"}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        lambda: "DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/" + "1234567890123" + "/" + _random(60),
+        lambda: "SENTRY_DSN=https://" + secrets.token_hex(16) + "@o450000.ingest.example.io/4500001",
+        lambda: "REDIS_URL=" + "redis" + "://default:" + _random(6) + "/" + _random(10) + "@host:6379/0",
+        lambda: "TELEGRAM_BOT_TOKEN=" + "123456789:" + _random(35),
+    ],
+    ids=["discord-webhook", "sentry-dsn", "url-password-with-slash", "telegram-token"],
+)
+def test_section19_secret_types_detected(tmp_path: Path, content: object) -> None:
+    assert callable(content)
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "deploy.env").write_text(content() + "\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "plant")
+    result = subprocess.run(  # noqa: S603
+        [_gitleaks(), "git", "--config", str(REPO / ".gitleaks.toml"), "--no-banner", "--redact", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr

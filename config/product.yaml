@@ -69,8 +69,8 @@ commercial:
       features: ["house_reports", "email_delivery", "telegram_delivery", "track_record"]
     - id: "pro"
       name: "Pro"
-      price_usd_month: 149
-      price_usd_year: 1490
+      price_usd_month: 169
+      price_usd_year: 1690
       credits_month: 100
       seats: 1
       house_report_delay_hours: 0
@@ -79,8 +79,8 @@ commercial:
                  "screener", "alerts", "ask_the_desk", "pdf_export", "track_record"]
     - id: "desk"
       name: "Desk / Team"
-      price_usd_month: 599
-      price_usd_year: 5990
+      price_usd_month: 649
+      price_usd_year: 6490
       credits_month: 400
       seats: 5
       credits_pooled: true

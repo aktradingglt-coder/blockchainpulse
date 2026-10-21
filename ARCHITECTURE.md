@@ -64,7 +64,7 @@ by credits. Every scenario and level ever published is graded after its horizon 
  apps/mcp-server: read-only research tools for paying users' own AI clients (metered, licence-gated).
 ```
 
-### 3.1 Python packages (dependency direction is enforced: arrows point to allowed imports)
+### 3.1 Python packages (dependency direction enforced by import-linter contracts in `pyproject.toml`, D-025)
 
 | Package | Responsibility | May import |
 | --- | --- | --- |

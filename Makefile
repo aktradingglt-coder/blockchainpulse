@@ -67,6 +67,7 @@ logs: .env ## Tail logs
 lint: ## ruff (lint + format check), eslint
 	$(UV) run ruff check .
 	$(UV) run ruff format --check .
+	$(UV) run lint-imports
 	$(WEB) lint
 
 .PHONY: typecheck
@@ -100,7 +101,9 @@ licences: ## Dependency licence gate (allow-list + reviewed exceptions)
 
 .PHONY: coverage
 coverage: .env ## Unit + integration tests with the coverage gate (needs the running stack)
-	set -a; source .env; set +a; $(UV) run pytest --cov --cov-report=term-missing --cov-report=xml
+	rm -f .coverage .coverage.*
+	set -a; source .env; set +a; $(UV) run pytest --cov --cov-report=term-missing --cov-report=xml --cov-report=json
+	$(UV) run python scripts/check_coverage.py
 
 .PHONY: check
 check: lint typecheck test ## Everything a contributor runs before pushing

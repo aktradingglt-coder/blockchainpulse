@@ -18,11 +18,11 @@ not named here (PROMPT §2).
 ## Reading
 
 - The proposed **Starter $39/month** sits at the consumer AI-research price point.
-- **Pro $149/month** sits between consumer tools ($39–$99) and professional research software ($150–$500 per user),
+- **Pro $169/month** sits between consumer tools ($39–$99) and professional research software ($150–$500 per user),
   justified by multi-asset coverage, crypto derivatives, alerts and Ask the Desk.
-- **Desk $599/month for 5 seats** (~$120/seat) undercuts per-seat professional platforms.
+- **Desk $649/month for 5 seats** (~$130/seat) undercuts per-seat professional platforms.
 - **Self-hosted $1,999 once + $599/year updates** has no direct public comparable; it is priced at roughly
-  13 months of Pro, with no hosting or LLM cost for us because buyers bring their own keys.
+  12 months of Pro, with no hosting or LLM cost for us because buyers bring their own keys.
 
 These prices remain `pricing_status: proposed` until `scripts/cost_model.py` (P11) shows every tier at ≥70% gross
 margin at p90 usage; if the measurement says otherwise, prices or credit allowances change, not the guardrail.

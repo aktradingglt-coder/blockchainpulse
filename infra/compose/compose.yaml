@@ -38,14 +38,17 @@ services:
 
   valkey:
     image: mirror.gcr.io/valkey/valkey:8.1.4-alpine@sha256:e706d1213aaba6896c162bb6a3a9e1894e1a435f28f8f856d14fab2e10aa098b
-    # The password is written to a private config file at start so it never appears in the process list.
+    # The password goes into a private config file (never onto a command line); the image's own entrypoint then
+    # drops privileges to the `valkey` user before starting the server.
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - umask 077 && printf 'requirepass %s\nappendonly yes\n' "$$VALKEY_PASSWORD" > /tmp/valkey.conf && exec valkey-server /tmp/valkey.conf
+      - >-
+        umask 077 && printf 'requirepass %s\nappendonly yes\n' "$$VALKEY_PASSWORD" > /tmp/valkey.conf
+        && chown valkey:valkey /tmp/valkey.conf && exec docker-entrypoint.sh /tmp/valkey.conf
     ports: ["127.0.0.1:${VALKEY_PORT:-6379}:6379"]
     volumes: [valkey-data:/data]
     healthcheck:
-      test: ["CMD-SHELL", "valkey-cli -a \"$$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$VALKEY_PASSWORD\" valkey-cli ping | grep -q PONG"]
       interval: 3s
       timeout: 3s
       retries: 30
@@ -81,7 +84,7 @@ services:
     environment:
       <<: *python-env
       SERVICE_NAME: rd-worker
-    command: ["dramatiq", "rd_worker.actors", "--processes", "1", "--threads", "4", "--skip-logging"]
+    command: ["python", "-m", "rd_worker.main", "--processes", "1", "--threads", "4"]
     depends_on:
       migrate: {condition: service_completed_successfully}
       valkey: {condition: service_healthy}

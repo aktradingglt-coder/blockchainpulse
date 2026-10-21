@@ -75,9 +75,10 @@ caught. Fixture and eval directories are covered by the same scan, so no separat
 products; the self-hosted bundle must ship its licence text and allow replacement of the library (Python packages are
 replaceable by design). Recorded for the P10 licence-notice bundle.
 
-### D-017 · 2026-10-21 · Worker logs: `dramatiq --skip-logging`
-**Decision.** The worker runs with `--skip-logging` so every line comes from our structlog JSON pipeline (with
-redaction) instead of Dramatiq's plain-text formatter.
+### D-017 · 2026-10-21 · Worker logs: launcher configures JSON logging before Dramatiq starts
+**Decision.** The worker starts via `python -m rd_worker.main`, which configures structlog JSON logging (with
+redaction) in the Dramatiq supervisor process and then runs Dramatiq's CLI with `--skip-logging`, so neither the
+supervisor nor its children use Dramatiq's plain-text formatter.
 
 ### D-018 · 2026-10-21 · Compose stack runs via `make dev` only
 **Decision.** `infra/compose/compose.yaml` paths are relative to the repo root and require the generated `.env`;
@@ -115,13 +116,28 @@ Trial 3 credits (= one quick deep dive), Starter 20, Pro 100, Desk 400 pooled.
 roughly $0.40–0.50 of LLM cost keeps a standard deep dive (5 credits) inside the per-credit value of every paid
 tier. To be re-derived from measured token usage at P11.
 
-### D-023 · 2026-10-21 · Proposed tier and licence prices (§2 rule 7)
-**Decision.** Starter $39/mo ($390/yr), Pro $149/mo ($1,490/yr), Desk $599/mo for 5 seats ($5,990/yr), self-hosted
+### D-023 · 2026-10-21 · Proposed tier and licence prices (§2 rule 7) — revised after P0 review round 2
+**Decision.** Starter $39/mo ($390/yr), Pro $169/mo ($1,690/yr), Desk $649/mo for 5 seats ($6,490/yr), self-hosted
 $1,999 once with 12 months of updates and $599/yr renewal. Status `proposed`.
 **Basis.** (1) Comparables checked 2026-10-21 (`docs/vendor-notes/pricing-comparables.md`): consumer AI research
-$39–$99/mo, professional research software $150–$500 per user per month. (2) Unit-economics pre-estimate, to be
-replaced by measurement: at p90 a Pro user spends all 100 credits ≈ 20 standard deep dives ≈ $20–40 of LLM cost plus
-an amortised share of house reports; at $149 that is 73–87% gross before merchant fees (≈5% + $0.50). Starter at p90:
-4 deep dives ≈ $4–8 → 79–90%. Desk at p90: 80 deep dives ≈ $80–160 → 73–87%.
-**Gate.** P11's measured cost model must show ≥70% for every tier at p90; if not, credits or prices change.
-**Owner task.** Pricing confirmation (STATUS H6).
+$39–$99/mo, professional research software $150–$500 per user per month. (2) Unit-economics pre-estimate, **after
+merchant-of-record fees** (≈5% + $0.50 per transaction), using PROMPT §12.2's $1–2 per deep dive *before* caching
+as the cost range, all credits spent (p90 proxy), plus amortised house reports:
+| Tier | Price | p90 LLM cost (low–high) | Fee | Gross margin (high cost → low cost) |
+| --- | --- | --- | --- | --- |
+| Starter | $39 | $4–8 (4 deep dives) | $2.45 | 73.2% → 83.5% |
+| Pro | $169 | $20–40 (20 deep dives) | $8.95 | 71.0% → 82.9% |
+| Desk | $649 | $80–160 (80 deep dives) | $32.95 | 70.3% → 82.6% |
+Round 1's draft ($149 Pro, $599 Desk) fell to ~68% at the high cost bound once fees were counted; prices were raised
+so the pre-estimate clears 70% even at the upper bound. Margin formula: (price − LLM cost − fee) / price.
+**Gate.** P11's measured cost model (`scripts/cost_model.py`, merchant fees included) must show ≥70% for every tier at
+p90; if not, credits or prices change. **Owner task.** Pricing confirmation (STATUS H6).
+
+### D-024 · 2026-10-21 · Market-data vendors contracted: none (§2 rule 9)
+**Decision.** `{{DATA_VENDORS}}` = none. Free/public sources (CFTC, SEC EDGAR, EIA, US Treasury/BLS/BEA, one crypto
+exchange via CCXT) are built live in P1; FRED is built but off (D-010); commercial adapters (Twelve Data first,
+Databento later) are built behind feature flags with fixture-backed tests. Contracts are owner task H5.
+
+### D-025 · 2026-10-21 · Package dependency direction enforced by import-linter
+**Decision.** `[tool.importlinter]` contracts in `pyproject.toml` (run in `make lint`, pre-commit and CI) encode
+ARCHITECTURE.md §3.1; each new package adds its contract when it is created.
