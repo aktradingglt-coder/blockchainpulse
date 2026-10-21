@@ -6,6 +6,7 @@ import pytest
 
 from rd_data import recording
 from rd_data.cassette import Cassette, RecordingTransport
+from rd_data.registry import ADAPTERS
 
 
 def _patch_network(monkeypatch: pytest.MonkeyPatch, body: object) -> None:
@@ -83,3 +84,28 @@ def test_cassette_name_is_stable() -> None:
     b = DataRequest(kind=RequestKind.COT, params={"a": 2, "b": 1})
     assert recording.cassette_name(a) == recording.cassette_name(b)
     assert recording.cassette_name(a).startswith("cot-")
+
+
+def test_extra_requests_are_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Requests listed in the recording-request file are recorded on top of the providers' plans."""
+    _patch_network(monkeypatch, _recorded_tff_rows(2))
+    request_file = tmp_path / "request.json"
+    extra = {"provider": "cftc", "kind": "cot", "params": {"report_type": "tff", "market_code": "099741"}}
+    request_file.write_text(json.dumps({"providers": [], "requests": [extra]}))
+    out = tmp_path / "out"
+    recording.main(["--providers", "", "--out", str(out), "--requests", str(request_file)])
+    assert [p.name for p in (out / "cftc").glob("*.json")] == [
+        recording.cassette_name(recording.load_extra_requests(request_file)[0][1])
+    ]
+    request_file.write_text(json.dumps({"requests": [{**extra, "provider": "nope"}]}))
+    with pytest.raises(SystemExit, match="nope"):
+        recording.main(["--providers", "", "--out", str(out), "--requests", str(request_file)])
+
+
+def test_repository_recording_request_is_valid() -> None:
+    """The committed request file parses and names only known providers (CI would fail otherwise)."""
+    path = Path(__file__).resolve().parents[3] / ".github" / "recording-request.json"
+    extra = recording.load_extra_requests(path)
+    names = {cls.name for cls in ADAPTERS}
+    assert {name for name, _ in extra} <= names
+    assert set(json.loads(path.read_text())["providers"]) <= names

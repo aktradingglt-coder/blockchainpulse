@@ -1,7 +1,8 @@
 {
  "provider": "fred",
  "provenance": "schema-derived",
- "recorded_at": "2026-10-21T12:00:00Z",
+ "recorded_at": null,
+ "replay_at": "2026-10-21T12:00:00Z",
  "source": "schema-derived by the builder from the vendor's documented response format; all values are SYNTHETIC test values, not market data. Replace with a CI recording when a vendor key is configured (D-011).",
  "interactions": [
   {
@@ -17,7 +18,7 @@
    "response": {
     "status": 200,
     "content_type": "application/json",
-    "body": "{\"realtime_start\": \"2026-10-21\", \"realtime_end\": \"2026-10-21\", \"seriess\": [{\"id\": \"DGS10\", \"realtime_start\": \"2026-10-21\", \"realtime_end\": \"2026-10-21\", \"title\": \"Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity, Quoted on an Investment Basis\", \"observation_start\": \"1962-01-02\", \"observation_end\": \"2026-10-20\", \"frequency\": \"Daily\", \"frequency_short\": \"D\", \"units\": \"Percent\", \"units_short\": \"%\", \"seasonal_adjustment\": \"Not Seasonally Adjusted\", \"seasonal_adjustment_short\": \"NSA\", \"last_updated\": \"2026-10-21 15:18:02-05\", \"popularity\": 90, \"notes\": \"Synthetic schema-derived notes (no copyright notice).\"}]}",
+    "body": "{\"realtime_start\": \"2026-10-21\", \"realtime_end\": \"2026-10-21\", \"seriess\": [{\"id\": \"DGS10\", \"realtime_start\": \"2026-10-21\", \"realtime_end\": \"2026-10-21\", \"title\": \"Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity, Quoted on an Investment Basis\", \"observation_start\": \"1962-01-02\", \"observation_end\": \"2026-10-20\", \"frequency\": \"Daily\", \"frequency_short\": \"D\", \"units\": \"Percent\", \"units_short\": \"%\", \"seasonal_adjustment\": \"Not Seasonally Adjusted\", \"seasonal_adjustment_short\": \"NSA\", \"last_updated\": \"2026-10-20 15:18:02-05\", \"popularity\": 90, \"notes\": \"Synthetic schema-derived notes (no copyright notice).\"}]}",
     "shape": {
      "realtime_end": "string",
      "realtime_start": "string",

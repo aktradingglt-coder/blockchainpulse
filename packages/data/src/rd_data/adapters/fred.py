@@ -14,6 +14,7 @@ from typing import Any, ClassVar
 
 import orjson
 
+from rd_core.clock import ensure_utc
 from rd_data.adapters.base import (
     BaseAdapter,
     DataRequest,
@@ -26,7 +27,7 @@ from rd_data.adapters.base import (
 )
 from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import byo_key_only
-from rd_data.quality import check_series, with_schema_rejections
+from rd_data.quality import DataQualityReport, check_provider_order, check_series, with_schema_rejections
 from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, DataType, MacroObservation
 
@@ -87,24 +88,49 @@ class FredAdapter(BaseAdapter):
                         series_id=series, ts=ts, value=as_float(row.get("value")), unit=unit, frequency=frequency
                     )
                 )
-            except (KeyError, ValueError):
+            except (KeyError, TypeError, ValueError):
                 rejected += 1
-        quality = with_schema_rejections(check_series(obs, subject=f"fred:{series}"), rejected)
+        order = check_provider_order([o.ts for o in obs], descending=False)  # FRED returns ascending dates
+        obs.sort(key=lambda o: o.ts)
+        report, usable = check_series(obs, subject=f"fred:{series}")
+        quality = with_schema_rejections(
+            DataQualityReport(report.subject, (*report.checks, order), report.quarantined, report.record_count),
+            rejected,
+        )
         notes = ["FRED terms restrict generative-AI use; enabled only behind provider_fred (D-010)."]
         override = None
         if self.copyrighted(raw):
             notes.append("Series notes carry a third-party copyright notice: internal use only.")
             override = self.licence.model_copy(update={"commercial_use_allowed": False})
-        as_of = obs[-1].ts if obs else None
+        as_of = usable[-1].ts if usable else None
+        # Freshness is judged from the series' last update (its latest release), not from the observation date:
+        # a monthly value dated the 1st is released weeks later, and judging it from the 1st would block it on
+        # release day.
+        updated = _last_updated(meta.get("last_updated"))
         return ParseResult(
-            tuple(obs),
+            tuple(usable),
             quality,
             as_of,
             FreshnessSpec(DataType.MACRO_RELEASE, release_frequency=frequency),
+            quarantined=tuple(o for o in obs if o not in usable),
             notes=tuple(notes),
             licence_override=override,
+            freshness_as_of=updated or as_of,
         )
 
     @staticmethod
     def recording_plan() -> list[DataRequest]:
         return [DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"})]
+
+
+def _last_updated(text: object) -> datetime | None:
+    """FRED's ``last_updated``, e.g. ``2026-10-21 15:18:02-05`` (offset in hours)."""
+    if not isinstance(text, str) or not text:
+        return None
+    value = text.strip()
+    if len(value) >= 3 and value[-3] in "+-" and value[-2:].isdigit():
+        value += ":00"
+    try:
+        return ensure_utc(datetime.fromisoformat(value))
+    except ValueError:
+        return None

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -49,15 +49,17 @@ async def _replay(cls: type[BaseAdapter], request: DataRequest) -> tuple[DataRes
     path = CASSETTES / cls.name / cassette_name(request)
     assert path.exists(), f"missing cassette {path}; run the record-cassettes workflow"
     cassette = Cassette.load(path)
-    recorded = datetime.fromisoformat(cassette.recorded_at.replace("Z", "+00:00"))
     ctx = AdapterContext(
         settings=Settings(
-            sec_edgar_user_agent="Research Desk test ops@example.com", eia_api_key="k" * 20, fred_api_key="k" * 20
+            sec_edgar_user_agent="Research Desk test ops@example.com",
+            eia_api_key="k" * 20,
+            fred_api_key="k" * 20,
+            twelvedata_api_key="k" * 20,
         ),
         limiter=LocalRateLimiter(),
         breaker=CircuitBreaker(MemoryStateStore()),
         cache=None,
-        clock=FixedClock(recorded),
+        clock=FixedClock(cassette.replay_time),
         transport=ReplayTransport([cassette]),
         flags={cls.feature_flag: True} if cls.feature_flag else {},
     )
@@ -66,11 +68,6 @@ async def _replay(cls: type[BaseAdapter], request: DataRequest) -> tuple[DataRes
         return await adapter.fetch(request), cassette
     finally:
         await adapter.aclose()
-
-
-@pytest.fixture(autouse=True)
-def _vendor_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TWELVEDATA_API_KEY", "k" * 20)
 
 
 @pytest.mark.parametrize("item", PLAN, ids=_id)

@@ -127,3 +127,43 @@ def test_guards() -> None:
         classify(DataType.DAILY_BAR, date(2026, 10, 16), T0)
     with pytest.raises(InvalidArgs, match="unknown trading calendar"):
         ExchangeCalendar("NOPE")
+
+
+def test_interval_bars_are_judged_from_their_close() -> None:
+    close = datetime(2026, 10, 21, 10, tzinfo=UTC)  # the 09:00 1h bar
+    hour = timedelta(hours=1)
+    assert (
+        classify(DataType.INTERVAL_BAR, close, close + timedelta(minutes=5), bar_width=hour).status is Freshness.FRESH
+    )
+    # the 10:00 bar is due at 11:00; five minutes later it is overdue
+    assert classify(DataType.INTERVAL_BAR, close, close + hour + timedelta(minutes=6), bar_width=hour).status is (
+        Freshness.STALE
+    )
+    assert classify(DataType.INTERVAL_BAR, close, close + 3 * hour + timedelta(minutes=31), bar_width=hour).status is (
+        Freshness.BLOCKED
+    )
+    four = timedelta(hours=4)
+    four_close = datetime(2026, 10, 21, 8, tzinfo=UTC)  # the 04:00 4h bar
+    assert classify(
+        DataType.INTERVAL_BAR, four_close, datetime(2026, 10, 21, 10, 5, tzinfo=UTC), bar_width=four
+    ).status is (Freshness.FRESH)
+    delayed = classify(
+        DataType.INTERVAL_BAR, close, close + hour + timedelta(minutes=10), bar_width=hour, delay_minutes=15
+    )
+    assert delayed.status is Freshness.FRESH  # a 15-minute delayed feed gets its delay on top
+    with pytest.raises(InvalidArgs, match="bar_width"):
+        classify(DataType.INTERVAL_BAR, close, close)
+
+
+def test_market_open_state_per_calendar() -> None:
+    saturday = datetime(2026, 10, 17, 15, tzinfo=UTC)
+    tuesday_noon_ny = datetime(2026, 10, 20, 16, tzinfo=UTC)
+    tuesday_night = datetime(2026, 10, 21, 3, tzinfo=UTC)
+    assert ContinuousCalendar().is_open(saturday)
+    assert not WeekdayCalendar().is_open(saturday)
+    assert WeekdayCalendar().is_open(tuesday_night)
+    nyse = ExchangeCalendar("XNYS")
+    assert nyse.is_open(tuesday_noon_ny)
+    assert not nyse.is_open(tuesday_night)
+    assert not nyse.is_open(saturday)
+    assert not nyse.is_open(datetime(1950, 1, 3, 15, tzinfo=UTC))  # outside the calendar's range

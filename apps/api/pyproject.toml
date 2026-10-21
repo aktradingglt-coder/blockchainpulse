@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "rd-core",
+    "rd-data",
     "rd-db",
     "fastapi==0.156.4",
     "uvicorn[standard]==0.54.0",
@@ -22,4 +23,5 @@ module-name = "rd_api"
 
 [tool.uv.sources]
 rd-core = { workspace = true }
+rd-data = { workspace = true }
 rd-db = { workspace = true }

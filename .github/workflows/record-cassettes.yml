@@ -1,7 +1,8 @@
 name: record-cassettes
 
 # Records contract-test cassettes from live providers (D-011): the build sandbox cannot reach vendor hosts, CI can.
-# Trigger: edit .github/recording-request.json (providers to record) and push, or run manually.
+# Trigger: edit .github/recording-request.json (providers whose plans to record, plus optional extra "requests")
+# and push, or run manually.
 # Keyed providers record only when their secret exists (e.g. EIA_API_KEY); keyless ones always.
 
 on:
@@ -35,7 +36,7 @@ jobs:
           providers=$(python3 -c "import json; print(','.join(json.load(open('.github/recording-request.json'))['providers']))")
           if [ -z "${EIA_API_KEY}" ]; then providers=$(echo "$providers" | tr ',' '\n' | grep -v '^eia$' | paste -sd, -); fi
           set +e
-          uv run python -m rd_data.recording --providers "$providers" \
+          uv run python -m rd_data.recording --providers "$providers" --requests .github/recording-request.json \
             --source "GitHub Actions run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           echo "recorder exit code: $?"
           set -e

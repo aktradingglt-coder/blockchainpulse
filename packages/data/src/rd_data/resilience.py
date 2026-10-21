@@ -38,14 +38,18 @@ class RateLimit:
     per_day: float | None = None
 
     def buckets(self) -> list[tuple[str, float, float]]:
-        """(window name, capacity, refill tokens per second)."""
+        """(window name, capacity, refill tokens per second).
+
+        Capacity is at least one token, so a fractional limit (``per_second=0.5``) means one call every two seconds
+        rather than a bucket that can never hold a whole token.
+        """
         out = []
         if self.per_second:
-            out.append(("s", self.per_second, self.per_second))
+            out.append(("s", max(1.0, self.per_second), self.per_second))
         if self.per_minute:
-            out.append(("m", self.per_minute, self.per_minute / 60.0))
+            out.append(("m", max(1.0, self.per_minute), self.per_minute / 60.0))
         if self.per_day:
-            out.append(("d", self.per_day, self.per_day / 86_400.0))
+            out.append(("d", max(1.0, self.per_day), self.per_day / 86_400.0))
         return out
 
 
@@ -323,6 +327,10 @@ class ResponseCache:
 
     async def get(self, fingerprint: str) -> str | None:
         return await self._store.get(f"{self._ns}:{fingerprint}")
+
+    async def drop(self, fingerprint: str) -> None:
+        """Remove an entry that turned out to be unusable (corrupt or malformed), so the next call refetches."""
+        await self._store.delete(f"{self._ns}:{fingerprint}")
 
     async def put(self, fingerprint: str, payload: str, ttl_s: int) -> None:
         if ttl_s > 0:

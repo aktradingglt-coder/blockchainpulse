@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, ClassVar
 
 import orjson
@@ -26,7 +26,13 @@ from rd_data.adapters.base import (
 )
 from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
-from rd_data.quality import DataQualityReport, check_duplicates, check_monotonic, with_schema_rejections
+from rd_data.quality import (
+    CheckResult,
+    DataQualityReport,
+    check_duplicates,
+    check_provider_order,
+    with_schema_rejections,
+)
 from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, DataType, Filing, FundamentalFact, Instrument
 
@@ -118,16 +124,36 @@ class SecEdgarAdapter(BaseAdapter):
 
     # ------------------------------------------------------------------------------------------ filings
 
+    def _subject_check(self, request: DataRequest, data: Mapping[str, Any]) -> CheckResult:
+        """The response is about the company we asked for (EDGAR keys files by CIK; a mismatch is a wrong body)."""
+        asked = cik10(str(request.params["cik"]))
+        got = data.get("cik")
+        ok = got is None or cik10(str(got)) == asked
+        return CheckResult(
+            "subject_matches_request",
+            passed=ok,
+            blocking=True,
+            detail="ok" if ok else f"response is for CIK {got}, request was CIK {asked}",
+        )
+
     def _parse_filings(self, request: DataRequest, data: Mapping[str, Any]) -> ParseResult:
-        cik = cik10(str(data.get("cik", request.params["cik"])))
+        subject = self._subject_check(request, data)
+        cik = cik10(str(request.params["cik"]))
+        latest_allowed = self.ctx.clock.now().date() + timedelta(days=1)
         company = str(data.get("name", ""))
         recent = data.get("filings", {}).get("recent", {})
         forms = request.params.get("forms")
         wanted = {f.strip().upper() for f in str(forms).split(",")} if forms else None
         n = len(recent.get("accessionNumber", []))
         records: list[Filing] = []
+        raw_dates: list[date] = []
         rejected = 0
         for i in range(n):
+            filed = _date_or_none(recent.get("filingDate", []), i)
+            if filed is None or filed > latest_allowed:
+                rejected += 1  # missing, unparseable or future-dated filing date
+                continue
+            raw_dates.append(filed)
             try:
                 form = str(recent["form"][i])
                 if wanted and form.upper() not in wanted:
@@ -141,7 +167,7 @@ class SecEdgarAdapter(BaseAdapter):
                         cik=cik,
                         company=company,
                         form=form,
-                        filed=date.fromisoformat(str(recent["filingDate"][i])),
+                        filed=filed,
                         accepted_at=_parse_accepted(accepted_raw),
                         accession=accession,
                         primary_document=primary,
@@ -159,7 +185,14 @@ class SecEdgarAdapter(BaseAdapter):
         records.sort(key=lambda f: (f.filed, f.accession))
         quality = with_schema_rejections(
             DataQualityReport(
-                f"sec:filings:{cik}", (check_duplicates([f.accession for f in records]),), (), len(records)
+                f"sec:filings:{cik}",
+                (
+                    subject,
+                    check_provider_order(raw_dates, descending=True),  # EDGAR lists the newest filing first
+                    check_duplicates([f.accession for f in records]),
+                ),
+                (),
+                len(records),
             ),
             rejected,
         )
@@ -169,7 +202,9 @@ class SecEdgarAdapter(BaseAdapter):
     # ------------------------------------------------------------------------------------------ facts
 
     def _parse_facts(self, request: DataRequest, data: Mapping[str, Any]) -> ParseResult:
-        cik = cik10(str(data.get("cik", request.params["cik"])))
+        subject = self._subject_check(request, data)
+        cik = cik10(str(request.params["cik"]))
+        latest_allowed = self.ctx.clock.now().date() + timedelta(days=1)
         concepts_param = request.params.get("concepts")
         wanted = {c.strip() for c in str(concepts_param).split(",")} if concepts_param else None
         records: list[FundamentalFact] = []
@@ -182,6 +217,10 @@ class SecEdgarAdapter(BaseAdapter):
                     for fact in facts:
                         form = str(fact.get("form", ""))
                         if form not in FUNDAMENTAL_FORMS:
+                            continue
+                        filed = _date_or_none([fact.get("filed")], 0)
+                        if filed is not None and filed > latest_allowed:
+                            rejected += 1  # a fact filed in the future cannot be point-in-time correct
                             continue
                         try:
                             records.append(
@@ -210,7 +249,7 @@ class SecEdgarAdapter(BaseAdapter):
         quality = with_schema_rejections(
             DataQualityReport(
                 f"sec:facts:{cik}",
-                (check_monotonic([f.filed for f in records]), check_duplicates(keys)),
+                (subject, check_duplicates(keys)),
                 (),
                 len(records),
             ),
@@ -233,6 +272,13 @@ class SecEdgarAdapter(BaseAdapter):
             DataRequest(kind=RequestKind.FILINGS, params={"cik": "320193"}),
             DataRequest(kind=RequestKind.COMPANY_FACTS, params={"cik": "1018724"}),
         ]
+
+
+def _date_or_none(values: Any, i: int) -> date | None:  # noqa: ANN401 - provider arrays are untyped
+    try:
+        return date.fromisoformat(str(values[i]))
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
 
 
 def _parse_accepted(text: str) -> datetime | None:

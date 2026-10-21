@@ -168,3 +168,45 @@ only delay the label. Implemented in `rd_data.adapters.cftc.release_time`, teste
 `BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0` for bundled components. Zlib is an OSI-approved permissive licence
 (attribution in source distributions, altered versions marked); it imposes nothing on a proprietary hosted or
 self-hosted product beyond the notice bundle produced in P10.
+
+### D-029 · 2026-10-21 · CCXT exchange for P1: Kraken Futures
+**Decision.** The one CCXT exchange adapter built in P1 is Kraken Futures (public perpetual OHLCV, funding, open
+interest, mark/index prices).
+**Alternatives.** Binance, Bybit, OKX.
+**Reason.** Contract cassettes are recorded from GitHub Actions runners in the US (D-011); Binance and Bybit refuse
+US IPs for derivatives endpoints, so their responses could not be recorded or drift-checked. Kraken Futures serves
+public endpoints to US IPs and has perpetuals on the majors. Display terms remain unverified (crypto-exchanges.md):
+the adapter's licence is `byo_key_only` until the owner confirms them.
+
+### D-030 · 2026-10-21 · Freshness origin: bar close and release time; fixed-width bars
+**Decision.** Freshness is always measured from when data *became* true. Bars are judged from their close (a 1h bar
+labelled 10:00 is as of 11:00). Macro and inventory series are judged from their release: FRED from the series'
+`last_updated`, EIA weekly series from the scheduled release (petroleum Wednesday, natural gas Thursday, 15:30 UTC
+after the week-ending Friday), capped at the time we retrieved the data. Bars of a fixed width other than one
+session (1h, 4h, 1w) get a rule derived from the daily-bar row of §5.4: stale once the next bar is overdue
+(close + width + delay + 5 min), blocked after three missed bars (close + 3 × width + delay + 30 min). The delay of a
+delayed feed comes from the provider's recorded licence terms, never from the caller.
+**Alternatives.** Measure from the observation/period date (the literal timestamp on the record); treat intraday bars
+as crypto funding/OI.
+**Reason.** The independent P1 review showed the literal reading blocks monthly and quarterly releases on release
+day, labels EIA data stale three days after its release, and makes 1h bars permanently stale and 4h bars blocked half
+the time. §5.4 does not list fixed-width bars; the daily-bar rule (1 missed bar stale, 3 blocked) is its closest row.
+
+### D-031 · 2026-10-21 · Bad prints vs genuine moves: what is quarantined
+**Decision.** Price series: an extreme change (robust z > 10 on log returns, MAD with a mean-absolute-deviation
+fallback) that comes back within two points is a bad print and is quarantined. An extreme move in the last two
+points, or in the first two, cannot be told apart from a bad print and is quarantined as *unconfirmed* until later
+bars confirm it; confirmed level shifts are kept with a warning. Macro/inventory series: values outside the series'
+physical range (e.g. negative stocks, yields outside −5…30%) and reverting outliers are quarantined, but an extreme
+*latest* release is kept with a warning. Non-finite numbers are refused by every canonical schema.
+**Alternatives.** Quarantine only interior two-sided spikes (the original rule); quarantine every extreme latest
+value, macro included.
+**Reason.** A bad print on the latest bar is the most damaging error a report can repeat; holding it until
+confirmation costs at most two bars and the freshness label says so. Official statistics are revised rather than
+mis-printed, and hiding a genuine record release (e.g. April 2020 unemployment) would misstate the data.
+
+### D-032 · 2026-10-21 · Licence tags: display and derived rights are independent
+**Decision.** Add `display_only` to the licence tags: raw values may be shown, analytics derived from them may not.
+`ensure_displayable` passes `display_ok`/`display_only`; `ensure_derivable` passes `display_ok`/`derived_only`.
+**Reason.** PROMPT §5.1 makes derived analytics conditional on `derived_data_allowed` alone; some exchange and vendor
+terms allow display but forbid derived data, which the three-tag model could not represent (P1 review round 1).

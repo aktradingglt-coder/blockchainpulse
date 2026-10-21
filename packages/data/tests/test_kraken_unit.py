@@ -54,7 +54,7 @@ async def test_bar_parameter_validation(params: dict[str, Any]) -> None:
 
 async def test_derivative_symbol_validation_and_unknown_symbol() -> None:
     cassette = _cassette(DERIV)
-    recorded = datetime.fromisoformat(cassette.recorded_at.replace("Z", "+00:00"))
+    recorded = cassette.replay_time
     adapter = KrakenFuturesAdapter(_ctx(httpx.MockTransport(lambda r: httpx.Response(500)), recorded))
     with pytest.raises(InvalidArgs):
         await adapter.fetch(DataRequest(kind=RequestKind.CRYPTO_DERIVATIVES, params={"symbols": "BTCUSD"}))
@@ -75,7 +75,7 @@ async def test_forming_candle_is_dropped() -> None:
 
 async def test_provider_errors_are_typed() -> None:
     cassette = _cassette(BARS)
-    recorded = datetime.fromisoformat(cassette.recorded_at.replace("Z", "+00:00"))
+    recorded = cassette.replay_time
     instruments = next(i for i in cassette.interactions if "instruments" in i.url)
 
     def handler(request: httpx.Request) -> httpx.Response:

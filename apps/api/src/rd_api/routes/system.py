@@ -9,6 +9,8 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from rd_data.registry import effective_flags, provider_statuses
+from rd_data.resilience import CircuitBreaker, CircuitState, RedisStateStore
 from rd_db.health import check_database
 from rd_db.heartbeat import heartbeat_age, leader_of
 
@@ -49,7 +51,12 @@ async def readyz(request: Request) -> JSONResponse:
 
 @router.get("/v1/status")
 async def status(request: Request) -> dict[str, Any]:
-    """Public pipeline status (feeds the status page): worker/scheduler heartbeats, queue reachability, leadership."""
+    """Public pipeline status (feeds the status page).
+
+    ``components`` (worker/scheduler heartbeats, queue, leadership) decide ``ok``. ``providers`` shows each data
+    source's flag and circuit breaker; an open circuit degrades that source only and is listed in
+    ``degraded_providers`` rather than failing the whole pipeline.
+    """
     state = request.app.state.rd
     components: dict[str, Any] = {}
     for service in ("rd-worker", "rd-scheduler"):
@@ -71,7 +78,22 @@ async def status(request: Request) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - status reports, never raises
         components["rd-scheduler"]["leader_elected"] = False
         components["rd-scheduler"]["leader_error"] = type(exc).__name__
-    return {"components": components, "ok": all(c.get("ok", False) for c in components.values())}
+    providers: dict[str, Any]
+    try:
+        rt = state.runtime
+        breaker = CircuitBreaker(RedisStateStore(state.redis))
+        providers = await provider_statuses(effective_flags(rt.config, rt.settings), breaker)
+        degraded = sorted(
+            name for name, p in providers.items() if p["enabled"] and p["circuit"] != CircuitState.CLOSED.value
+        )
+    except Exception as exc:  # noqa: BLE001 - status reports, never raises
+        providers, degraded = {"error": type(exc).__name__}, []
+    return {
+        "components": components,
+        "providers": providers,
+        "degraded_providers": degraded,
+        "ok": all(c.get("ok", False) for c in components.values()),
+    }
 
 
 @router.get("/metrics", include_in_schema=False)

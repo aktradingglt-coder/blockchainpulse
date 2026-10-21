@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, time, timedelta
 from typing import Any, ClassVar
 
 import orjson
@@ -25,19 +26,49 @@ from rd_data.adapters.base import (
 )
 from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
-from rd_data.quality import check_series, with_schema_rejections
+from rd_data.quality import (
+    DataQualityReport,
+    check_cadence,
+    check_provider_order,
+    check_series,
+    with_schema_rejections,
+)
 from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, DataType, MacroObservation
 
 _ROUTE = re.compile(r"^[a-z0-9-]+(/[a-z0-9-]+){1,4}$")
 _SERIES = re.compile(r"^[A-Z0-9_.]{3,40}$")
-#: Well-known weekly series: id -> route.
-SERIES_ROUTES: Mapping[str, str] = {
-    "WCESTUS1": "petroleum/stoc/wstk",  # U.S. crude oil ending stocks excl. SPR (thousand barrels)
-    "WGTSTUS1": "petroleum/stoc/wstk",  # total motor gasoline stocks
-    "WDISTUS1": "petroleum/stoc/wstk",  # distillate fuel oil stocks
-    "NW2_EPG0_SWO_R48_BCF": "natural-gas/stor/wkly",  # Lower-48 working gas in storage (Bcf)
+
+
+@dataclass(frozen=True)
+class SeriesInfo:
+    route: str
+    #: Scheduled release relative to the period date (the week-ending Friday), in UTC. EIA publishes at 10:30
+    #: Eastern; 15:30 UTC is the later of the winter/summer offsets, so data is never judged older than it is.
+    release_lag: timedelta
+    #: Physically possible range in the series' unit; values outside are quarantined.
+    lo: float | None = 0.0
+    hi: float | None = None
+
+
+_WPSR = timedelta(days=5, hours=15, minutes=30)  # Weekly Petroleum Status Report: the following Wednesday
+_WNGSR = timedelta(days=6, hours=15, minutes=30)  # Weekly Natural Gas Storage Report: the following Thursday
+#: Well-known weekly series (stocks cannot be negative; upper bounds are far above any recorded level).
+SERIES: Mapping[str, SeriesInfo] = {
+    "WCESTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 2_000_000.0),  # crude excl. SPR, thousand barrels
+    "WGTSTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 1_000_000.0),  # motor gasoline, thousand barrels
+    "WDISTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 1_000_000.0),  # distillate, thousand barrels
+    "NW2_EPG0_SWO_R48_BCF": SeriesInfo("natural-gas/stor/wkly", _WNGSR, 0.0, 10_000.0),  # Lower-48 storage, Bcf
 }
+SERIES_ROUTES: Mapping[str, str] = {k: v.route for k, v in SERIES.items()}
+#: For series outside the catalogue: the latest a value of that frequency can be released after its period date.
+DEFAULT_RELEASE_LAG: Mapping[str, timedelta] = {
+    "weekly": timedelta(days=7),
+    "monthly": timedelta(days=62),
+    "quarterly": timedelta(days=120),
+    "annual": timedelta(days=400),
+}
+_PERIODS: Mapping[str, timedelta] = {"weekly": timedelta(days=7)}
 
 
 class EiaAdapter(BaseAdapter):
@@ -61,6 +92,9 @@ class EiaAdapter(BaseAdapter):
         length = request.params.get("length", 260)
         if not isinstance(length, int) or not 1 <= length <= 5000:
             raise InvalidArgs("eia: length must be an integer between 1 and 5000", provider=self.name)
+        frequency = str(request.params.get("frequency", "weekly"))
+        if frequency not in DEFAULT_RELEASE_LAG:
+            raise InvalidArgs(f"eia: frequency must be one of {sorted(DEFAULT_RELEASE_LAG)}", provider=self.name)
 
     async def _download(self, request: DataRequest) -> RawPayload:
         series = str(request.params["series"])
@@ -89,12 +123,18 @@ class EiaAdapter(BaseAdapter):
         series = str(request.params["series"])
         if not rows:
             raise NotFound(f"eia: no data for series {series}", provider=self.name)
-        frequency = str(response.get("frequency") or request.params.get("frequency", "weekly"))
+        frequency = str(request.params.get("frequency", "weekly"))
+        info = SERIES.get(series)
         obs: list[MacroObservation] = []
+        raw_times: list[datetime] = []
         rejected = 0
         for row in rows:
+            if str(row.get("series", series)) != series:
+                rejected += 1  # a row for a different series: never relabel another series' data
+                continue
             try:
                 ts = datetime.strptime(str(row["period"])[:10], "%Y-%m-%d").replace(tzinfo=UTC)
+                raw_times.append(ts)
                 unit = str(row.get("units") or row.get("value-units") or "")
                 obs.append(
                     MacroObservation(
@@ -106,21 +146,34 @@ class EiaAdapter(BaseAdapter):
                         note=row.get("series-description"),
                     )
                 )
-            except (KeyError, ValueError):
+            except (KeyError, TypeError, ValueError):
                 rejected += 1
         obs.sort(key=lambda o: o.ts)
-        quality = with_schema_rejections(check_series(obs, subject=f"eia:{series}"), rejected)
-        as_of = obs[-1].ts if obs else None
+        report, usable = check_series(
+            obs, subject=f"eia:{series}", lo=info.lo if info else None, hi=info.hi if info else None
+        )
+        extra = [check_provider_order(raw_times, descending=True)]
+        if frequency in _PERIODS:
+            extra.append(check_cadence([o.ts for o in obs], period=_PERIODS[frequency]))
+        quality = with_schema_rejections(
+            DataQualityReport(report.subject, (*report.checks, *extra), report.quarantined, report.record_count),
+            rejected,
+        )
+        latest = usable[-1].ts if usable else None
+        lag = info.release_lag if info else DEFAULT_RELEASE_LAG[frequency]
+        released = datetime.combine(latest.date(), time(0, tzinfo=UTC)) + lag if latest else None
         return ParseResult(
-            tuple(obs),
+            tuple(usable),
             quality,
-            as_of,
+            latest,
             FreshnessSpec(DataType.MACRO_RELEASE, release_frequency=frequency),
             source_tz="America/New_York",
+            quarantined=tuple(o for o in obs if o not in usable),
             notes=(
                 "Weekly values refer to the week ending on the period date; EIA releases them "
-                "the following Wednesday (petroleum) or Thursday (natural gas).",
+                "the following Wednesday (petroleum) or Thursday (natural gas). Freshness is judged from that release.",
             ),
+            freshness_as_of=released,
         )
 
     @staticmethod

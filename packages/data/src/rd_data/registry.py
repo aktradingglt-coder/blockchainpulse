@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 import redis.asyncio as aioredis
 
@@ -48,3 +49,21 @@ def build_context(settings: Settings, config: AppConfig, redis_client: aioredis.
 
 def build_adapters(ctx: AdapterContext) -> Mapping[str, BaseAdapter]:
     return {cls.name: cls(ctx) for cls in ADAPTERS}
+
+
+async def provider_statuses(flags: Mapping[str, bool], breaker: CircuitBreaker) -> dict[str, dict[str, Any]]:
+    """Per-provider state for the status page (PROMPT §5.1): feature flag, circuit breaker and licence status.
+
+    Read straight from the shared breaker state, without building adapters or opening HTTP clients.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for cls in ADAPTERS:
+        circuit = await breaker.status(cls.name)
+        out[cls.name] = {
+            "enabled": cls.feature_flag is None or bool(flags.get(cls.feature_flag, False)),
+            "circuit": circuit.state.value,
+            "consecutive_failures": circuit.consecutive_failures,
+            "last_error": circuit.last_error,
+            "terms_verified": cls.licence.terms_verified,
+        }
+    return out

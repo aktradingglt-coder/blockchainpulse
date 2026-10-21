@@ -17,7 +17,15 @@ from rd_data.adapters.base import BaseAdapter, DataRequest, FreshnessSpec, Parse
 from rd_data.errors import InvalidArgs, NotFound
 from rd_data.freshness import ExchangeCalendar
 from rd_data.licence import public_domain
-from rd_data.quality import DataQualityReport, check_duplicates, with_schema_rejections
+from rd_data.quality import (
+    CheckResult,
+    DataQualityReport,
+    check_duplicates,
+    check_provider_order,
+    check_range,
+    scan_spikes,
+    with_schema_rejections,
+)
 from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, DataType, TreasuryYieldPoint
 
@@ -38,6 +46,10 @@ COLUMNS: Mapping[str, str] = {
     "20 Yr": "20Y",
     "30 Yr": "30Y",
 }
+#: Tenors the Treasury has published every business day for decades; a header without them means the format changed.
+REQUIRED_COLUMNS = ("Date", "1 Mo", "3 Mo", "6 Mo", "1 Yr", "2 Yr", "5 Yr", "10 Yr", "30 Yr")
+#: Possible range for a par yield in percent; anything outside is a bad print (quarantined).
+YIELD_RANGE = (-5.0, 30.0)
 URL = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{year}/all"
 
 
@@ -62,15 +74,23 @@ class TreasuryAdapter(BaseAdapter):
         return RawPayload.from_results([result], self.ctx.clock.now())
 
     def _parse(self, request: DataRequest, raw: RawPayload) -> ParseResult:
+        year = int(request.params["year"])
         text = raw.bodies[0].decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text))
+        header = [h.strip() for h in reader.fieldnames or []]
+        missing_columns = [c for c in REQUIRED_COLUMNS if c not in header]
         points: list[TreasuryYieldPoint] = []
+        raw_dates: list[datetime] = []
         rejected = 0
         for row in reader:
             try:
                 ts = datetime.strptime(row["Date"], "%m/%d/%Y").replace(tzinfo=UTC)
-            except (KeyError, ValueError):
+            except (KeyError, TypeError, ValueError):
                 rejected += 1
+                continue
+            raw_dates.append(ts)
+            if ts.year != year:
+                rejected += 1  # a row from another year in this year's file: the response is not what we asked for
                 continue
             for column, tenor in COLUMNS.items():
                 value = (row.get(column) or "").strip()
@@ -80,27 +100,57 @@ class TreasuryAdapter(BaseAdapter):
                     points.append(TreasuryYieldPoint(ts=ts, tenor=tenor, yield_pct=float(value)))
                 except ValueError:
                     rejected += 1
-        if not points and not rejected:
-            raise NotFound(f"us_treasury: no curve rows for {request.params['year']}", provider=self.name)
+        if not points and not rejected and not missing_columns:
+            raise NotFound(f"us_treasury: no curve rows for {year}", provider=self.name)
         points.sort(key=lambda p: (p.ts, p.tenor))
-        quality = with_schema_rejections(
-            DataQualityReport(
-                f"treasury:{request.params['year']}",
-                (check_duplicates([(p.ts, p.tenor) for p in points]),),
-                (),
-                len(points),
+        range_check = check_range([p.yield_pct for p in points], lo=YIELD_RANGE[0], hi=YIELD_RANGE[1], what="yield")
+        bad_prints = _bad_prints_by_tenor(points, exclude=set(range_check.indices))
+        quarantine = sorted({*range_check.indices, *bad_prints})
+        usable = [p for i, p in enumerate(points) if i not in set(quarantine)]
+        checks: list[CheckResult] = [
+            CheckResult(
+                "csv_header",
+                passed=not missing_columns,
+                blocking=True,
+                detail=f"missing column(s) {missing_columns}" if missing_columns else "expected columns present",
             ),
-            rejected,
+            check_provider_order(raw_dates, descending=True),  # the Treasury CSV lists the newest day first
+            check_duplicates([(p.ts, p.tenor) for p in points]),
+            range_check,
+            CheckResult(
+                "outliers",
+                passed=not bad_prints,
+                blocking=False,
+                detail=f"{len(bad_prints)} reverting outlier(s) quarantined" if bad_prints else "ok",
+                indices=tuple(bad_prints),
+            ),
+        ]
+        quality = with_schema_rejections(
+            DataQualityReport(f"treasury:{year}", tuple(checks), tuple(quarantine), len(points)), rejected
         )
-        as_of = points[-1].ts if points else None
+        as_of = usable[-1].ts if usable else None
         return ParseResult(
-            tuple(points),
+            tuple(usable),
             quality,
             as_of,
             FreshnessSpec(DataType.DAILY_BAR, ExchangeCalendar("XNYS")),
             source_tz="America/New_York",
+            quarantined=tuple(p for i, p in enumerate(points) if i in set(quarantine)),
         )
 
     @staticmethod
     def recording_plan() -> list[DataRequest]:
         return [DataRequest(kind=RequestKind.TREASURY_CURVE, params={"year": 2026})]
+
+
+def _bad_prints_by_tenor(points: list[TreasuryYieldPoint], *, exclude: set[int]) -> list[int]:
+    """Indices (into ``points``) of yields that jump and come straight back, scanned per tenor in date order."""
+    by_tenor: dict[str, list[int]] = {}
+    for i, p in enumerate(points):
+        if i not in exclude:
+            by_tenor.setdefault(p.tenor, []).append(i)
+    flagged: list[int] = []
+    for idx in by_tenor.values():
+        scan = scan_spikes([points[i].yield_pct for i in idx])
+        flagged.extend(idx[j] for j in scan.bad_prints)
+    return sorted(flagged)

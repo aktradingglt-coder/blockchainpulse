@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     sec_edgar_user_agent: str | None = None
     fred_api_key: SecretStr | None = None
     eia_api_key: SecretStr | None = None
+    twelvedata_api_key: SecretStr | None = None
     billing_provider: str | None = None
     billing_api_key: SecretStr | None = None
     billing_webhook_secret: SecretStr | None = None

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -27,6 +26,7 @@ from rd_data.adapters.eia import EiaAdapter
 from rd_data.adapters.fred import FredAdapter
 from rd_data.adapters.twelvedata import TwelveDataAdapter
 from rd_data.cassette import Cassette, Interaction, json_shape
+from rd_data.http import redact_params, scrub_body, secret_values
 from rd_data.recording import DEFAULT_OUT, cassette_name
 from rd_data.resilience import CircuitBreaker, LocalRateLimiter, MemoryStateStore
 
@@ -64,8 +64,20 @@ def eia_body(request: httpx.Request) -> dict[str, Any]:
             "data": rows,
             "description": desc,
         },
-        "request": {"command": "/v2/data/"},
+        "request": {
+            "command": f"/v2/{request.url.path.removeprefix('/v2/').removesuffix('/data/')}/data/",
+            "params": {
+                "frequency": dict(request.url.params)["frequency"],
+                "data": ["value"],
+                "facets": {"series": [series]},
+                "sort": [{"column": "period", "direction": "desc"}],
+                "offset": 0,
+                "length": int(dict(request.url.params)["length"]),
+                "api_key": dict(request.url.params)["api_key"],  # EIA echoes the key; the recorder scrubs it
+            },
+        },
         "apiVersion": "2.1.8",
+        "ExcelAddInVersion": "2.1.0",
     }
 
 
@@ -117,7 +129,7 @@ def fred_body(request: httpx.Request) -> dict[str, Any]:
                 "units_short": "%",
                 "seasonal_adjustment": "Not Seasonally Adjusted",
                 "seasonal_adjustment_short": "NSA",
-                "last_updated": "2026-10-21 15:18:02-05",
+                "last_updated": "2026-10-20 15:18:02-05",
                 "popularity": 90,
                 "notes": "Synthetic schema-derived notes (no copyright notice).",
             }
@@ -156,7 +168,9 @@ def _capturing_handler(
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handler(req: httpx.Request) -> httpx.Response:
         payload = body(req)
-        params = {k: ("REDACTED" if k.lower() in ("api_key", "apikey") else v) for k, v in req.url.params.items()}
+        raw_params = dict(req.url.params)
+        params = redact_params(raw_params)
+        text = scrub_body(json.dumps(payload).encode(), secret_values(raw_params)).decode()
         url = str(req.url.copy_with(query=None))
         captured.append(
             Interaction(
@@ -165,8 +179,8 @@ def _capturing_handler(
                 dict(sorted(params.items())),
                 200,
                 "application/json",
-                json.dumps(payload),
-                json_shape(payload),
+                text,
+                json_shape(json.loads(text)),
             )
         )
         return httpx.Response(200, json=payload)
@@ -197,8 +211,8 @@ async def build(
         response = await adapter.fetch(request)
         await adapter.aclose()
         assert response.quality.passed  # noqa: S101 - build-time sanity check
-        recorded_at = AS_OF.isoformat().replace("+00:00", "Z")
-        cassette = Cassette(cls.name, "schema-derived", recorded_at, SOURCE, captured)
+        replay_at = AS_OF.isoformat().replace("+00:00", "Z")
+        cassette = Cassette(cls.name, "schema-derived", None, SOURCE, captured, replay_at=replay_at)
         path = out / cls.name / cassette_name(request)
         cassette.save(path)
         paths.append(path)
@@ -207,12 +221,11 @@ async def build(
 
 async def main() -> None:
     fake_key = "schema-derived-" + "0" * 16
-    os.environ.setdefault("TWELVEDATA_API_KEY", fake_key)
     out = DEFAULT_OUT
     written = []
     written += await build(EiaAdapter, eia_body, out, eia_api_key=fake_key)
     written += await build(FredAdapter, fred_body, out, fred_api_key=fake_key)
-    written += await build(TwelveDataAdapter, twelvedata_body, out)
+    written += await build(TwelveDataAdapter, twelvedata_body, out, twelvedata_api_key=fake_key)
     for p in written:
         print(p)
 

@@ -1,7 +1,8 @@
 {
  "provider": "twelvedata",
  "provenance": "schema-derived",
- "recorded_at": "2026-10-21T12:00:00Z",
+ "recorded_at": null,
+ "replay_at": "2026-10-21T12:00:00Z",
  "source": "schema-derived by the builder from the vendor's documented response format; all values are SYNTHETIC test values, not market data. Replace with a CI recording when a vendor key is configured (D-011).",
  "interactions": [
   {

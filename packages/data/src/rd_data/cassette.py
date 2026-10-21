@@ -2,18 +2,26 @@
 
 A cassette is JSON::
 
-    {"provider": "cftc", "provenance": "recorded" | "schema-derived", "recorded_at": "...", "source": "...",
+    {"provider": "cftc", "provenance": "recorded" | "schema-derived", "recorded_at": "..." | null,
+     "replay_at": "..." (schema-derived only), "source": "...",
      "interactions": [{"request": {"method": "GET", "url": "https://host/path", "params": {...}},
                        "response": {"status": 200, "content_type": "application/json", "body": "...",
                                     "shape": {...}}}]}
 
-``provenance`` is honest by construction: only :class:`RecordingTransport` writes ``recorded``. Hand-built fixtures
-(for vendors we cannot call without a contract) must say ``schema-derived`` (D-011). Credentials in query strings
-are replaced by ``REDACTED`` before anything is written, and request matching ignores their values.
+``provenance`` is honest by construction: only :class:`RecordingTransport` writes ``recorded`` (with the time of
+the recording). Hand-built fixtures (for vendors we cannot call without a contract) say ``schema-derived``, carry no
+``recorded_at``, and name the synthetic moment their content describes in ``replay_at`` (D-011). Credentials in
+query strings are replaced by ``REDACTED`` before anything is written, any echo of them inside a response body is
+scrubbed too, and request matching ignores their values.
+
+``shape`` is the structural signature used for drift detection: JSON structure for JSON bodies, the header row for
+CSV bodies.
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -24,7 +32,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import httpx
 
-from rd_data.http import redact_params
+from rd_data.http import redact_params, scrub_body, secret_values
 
 Provenance = Literal["recorded", "schema-derived"]
 
@@ -51,6 +59,23 @@ def json_shape(value: Any, *, depth: int = 0) -> Any:  # noqa: ANN401, PLR0911 -
     return "string"
 
 
+def csv_shape(text: str) -> dict[str, list[str]]:
+    """Signature of a CSV body: its header row (renamed or removed columns break parsers)."""
+    header = next(csv.reader(io.StringIO(text.lstrip("\ufeff"))), [])
+    return {"csv_header": [h.strip() for h in header]}
+
+
+def body_shape(content_type: str, text: str) -> Any:  # noqa: ANN401
+    if "json" in content_type:
+        try:
+            return json_shape(json.loads(text))
+        except json.JSONDecodeError:
+            return None
+    if "csv" in content_type:
+        return csv_shape(text)
+    return None
+
+
 def _merge_shapes(shapes: list[Any]) -> Any:  # noqa: ANN401
     if not shapes:
         return "empty"
@@ -65,6 +90,9 @@ def _merge_shapes(shapes: list[Any]) -> Any:  # noqa: ANN401
 
 def shape_drift(expected: Any, actual: Any, path: str = "$") -> list[str]:  # noqa: ANN401
     """Differences that break parsers: missing keys and changed types (added keys are tolerated)."""
+    if isinstance(expected, dict) and "csv_header" in expected:
+        have = set(actual.get("csv_header", [])) if isinstance(actual, dict) else set()
+        return [f"{path}.csv_header: column {c!r} missing" for c in expected["csv_header"] if c not in have]
     if isinstance(expected, dict) and isinstance(actual, dict):
         out: list[str] = []
         for key, sub in expected.items():
@@ -114,9 +142,18 @@ class Interaction:
 class Cassette:
     provider: str
     provenance: Provenance
-    recorded_at: str
+    recorded_at: str | None
     source: str
     interactions: list[Interaction] = field(default_factory=list)
+    #: The "now" a replay should use; defaults to ``recorded_at`` (schema-derived cassettes set it explicitly).
+    replay_at: str | None = None
+
+    @property
+    def replay_time(self) -> datetime:
+        stamp = self.replay_at or self.recorded_at
+        if stamp is None:
+            raise ValueError(f"cassette for {self.provider} has neither replay_at nor recorded_at")
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
     @classmethod
     def load(cls, path: Path) -> Cassette:
@@ -133,7 +170,14 @@ class Cassette:
             )
             for i in data["interactions"]
         ]
-        return cls(data["provider"], data["provenance"], data["recorded_at"], data["source"], items)
+        return cls(
+            data["provider"],
+            data["provenance"],
+            data.get("recorded_at"),
+            data["source"],
+            items,
+            data.get("replay_at"),
+        )
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,11 +185,12 @@ class Cassette:
             "provider": self.provider,
             "provenance": self.provenance,
             "recorded_at": self.recorded_at,
+            **({"replay_at": self.replay_at} if self.replay_at else {}),
             "source": self.source,
             "interactions": [i.as_dict() for i in self.interactions],
         }
-        # Bodies are stored verbatim (fidelity); credentials never reach them because request parameters are
-        # redacted above and public providers do not echo keys. The committed files are covered by gitleaks.
+        # Bodies are stored as received except for credentials echoed back by the provider, which the recording
+        # transport scrubs. The committed files are also covered by gitleaks.
         path.write_text(json.dumps(payload, indent=1, sort_keys=False, ensure_ascii=False) + "\n")
 
 
@@ -188,14 +233,11 @@ class RecordingTransport(httpx.AsyncBaseTransport):
         response = await self._inner.handle_async_request(request)
         body = await response.aread()
         method, url, params = _split(request)
+        raw_params = dict(parse_qsl(urlsplit(str(request.url)).query, keep_blank_values=True))
+        stored = scrub_body(body, secret_values(raw_params))
         content_type = response.headers.get("content-type", "application/octet-stream").split(";")[0]
-        text = body.decode("utf-8", errors="replace")
-        shape: Any = None
-        if "json" in content_type:
-            try:
-                shape = json_shape(json.loads(text))
-            except json.JSONDecodeError:
-                shape = None
+        text = stored.decode("utf-8", errors="replace")
+        shape = body_shape(content_type, text)
         self.interactions.append(Interaction(method, url, params, response.status_code, content_type, text, shape))
         # ``body`` is already decoded: drop transfer/encoding headers so httpx does not decode it a second time.
         headers = [

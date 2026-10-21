@@ -34,6 +34,8 @@ class DataType(StrEnum):
     INTRADAY_REALTIME = "intraday_realtime"
     INTRADAY_DELAYED = "intraday_delayed"
     DAILY_BAR = "daily_bar"
+    #: Bars of a fixed width other than one session (1h, 4h, 1w); measured from the bar's close.
+    INTERVAL_BAR = "interval_bar"
     CRYPTO_DERIVATIVES = "crypto_derivatives"
     COT = "cot"
     MACRO_RELEASE = "macro_release"
@@ -43,7 +45,7 @@ class DataType(StrEnum):
 
 
 class _Record(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class Instrument(_Record):

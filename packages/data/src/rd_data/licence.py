@@ -15,9 +15,20 @@ from rd_data.errors import LicenceBlocked
 
 
 class LicenceTag(StrEnum):
-    DISPLAY_OK = "display_ok"  # raw values may be shown to users
+    """What the current deployment mode may show. Display and derived rights are independent (PROMPT §5.1)."""
+
+    DISPLAY_OK = "display_ok"  # raw values and analytics derived from them may be shown
+    DISPLAY_ONLY = "display_only"  # raw values may be shown; no analytics may be derived from them
     DERIVED_ONLY = "derived_only"  # only computed analytics may be shown, never the raw values
-    INTERNAL_ONLY = "internal_only"  # nothing derived from it may be shown
+    INTERNAL_ONLY = "internal_only"  # nothing from it may be shown
+
+    @property
+    def raw_display_allowed(self) -> bool:
+        return self in (LicenceTag.DISPLAY_OK, LicenceTag.DISPLAY_ONLY)
+
+    @property
+    def derived_allowed(self) -> bool:
+        return self in (LicenceTag.DISPLAY_OK, LicenceTag.DERIVED_ONLY)
 
 
 class LicenceTerms(BaseModel):
@@ -34,9 +45,12 @@ class LicenceTerms(BaseModel):
     def tag_for(self, mode: DeploymentMode) -> LicenceTag:
         if not self.commercial_use_allowed:
             return LicenceTag.INTERNAL_ONLY
-        if mode in self.display_allowed:
+        display, derived = mode in self.display_allowed, mode in self.derived_data_allowed
+        if display and derived:
             return LicenceTag.DISPLAY_OK
-        if mode in self.derived_data_allowed:
+        if display:
+            return LicenceTag.DISPLAY_ONLY
+        if derived:
             return LicenceTag.DERIVED_ONLY
         return LicenceTag.INTERNAL_ONLY
 
@@ -75,12 +89,12 @@ def byo_key_only(attribution: str, *, delay_minutes: int = 0) -> LicenceTerms:
 
 
 def ensure_displayable(tag: LicenceTag, *, provider: str) -> None:
-    """Renderer-side gate for raw values: only ``display_ok`` passes."""
-    if tag is not LicenceTag.DISPLAY_OK:
+    """Renderer-side gate for raw values: ``display_ok`` or ``display_only`` pass."""
+    if not tag.raw_display_allowed:
         raise LicenceBlocked(f"raw values from {provider} may not be displayed ({tag.value})", provider=provider)
 
 
 def ensure_derivable(tag: LicenceTag, *, provider: str) -> None:
     """Gate for analytics computed from a provider's values: ``display_ok`` or ``derived_only`` pass."""
-    if tag is LicenceTag.INTERNAL_ONLY:
-        raise LicenceBlocked(f"values from {provider} are internal only", provider=provider)
+    if not tag.derived_allowed:
+        raise LicenceBlocked(f"analytics derived from {provider} may not be shown ({tag.value})", provider=provider)

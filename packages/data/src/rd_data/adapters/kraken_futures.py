@@ -29,7 +29,14 @@ from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.freshness import ContinuousCalendar
 from rd_data.http import HttpFetcher
 from rd_data.licence import byo_key_only
-from rd_data.quality import DataQualityReport, check_bars, check_duplicates, with_schema_rejections
+from rd_data.quality import (
+    CheckResult,
+    DataQualityReport,
+    check_bars,
+    check_duplicates,
+    check_range,
+    with_schema_rejections,
+)
 from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, Bar, CryptoDerivativeMetric, DataType
 
@@ -40,6 +47,16 @@ TIMEFRAMES: Mapping[str, tuple[str, timedelta]] = {
 }
 #: Kraken perpetuals fund hourly.
 FUNDING_INTERVAL_HOURS = 1.0
+#: Physically possible range per derivative metric; values outside are quarantined, not shown.
+METRIC_RANGES: Mapping[str, tuple[float | None, float | None]] = {
+    "funding_rate": (-1.0, 1.0),  # a rate of ±100% per hourly interval does not occur; beyond it is a bad print
+    "mark_price": (0.0, None),
+    "index_price": (0.0, None),
+    "open_interest": (0.0, None),
+    "volume_24h": (0.0, None),
+}
+#: A symbol whose ticker is older than the §5.4 block threshold for funding/OI is quarantined from the response.
+SYMBOL_MAX_AGE = timedelta(hours=6)
 
 
 class _RoutedKrakenFutures(ccxt_async.krakenfutures):  # type: ignore[misc]  # ccxt classes are untyped
@@ -181,8 +198,9 @@ class KrakenFuturesAdapter(BaseAdapter):
         spec: FreshnessSpec | None = (
             FreshnessSpec(DataType.DAILY_BAR, ContinuousCalendar())
             if tf == "1d"
-            else FreshnessSpec(DataType.CRYPTO_DERIVATIVES)
+            else FreshnessSpec(DataType.INTERVAL_BAR, bar_width=width)
         )
+        freshness_as_of = as_of + width if as_of is not None and tf != "1d" else None
         since = request.params.get("since_ms")
         if since is not None:
             window_end = datetime.fromtimestamp(int(since) / 1000, tz=UTC) + width * int(
@@ -192,7 +210,15 @@ class KrakenFuturesAdapter(BaseAdapter):
                 # An explicit historical window is not "latest data": freshness does not apply to it.
                 spec = None
                 notes.append(f"Historical window ending {window_end.date().isoformat()}; freshness not applicable.")
-        return ParseResult(tuple(usable), report, as_of, spec, quarantined=quarantined, notes=tuple(notes))
+        return ParseResult(
+            tuple(usable),
+            report,
+            as_of,
+            spec,
+            quarantined=quarantined,
+            notes=tuple(notes),
+            freshness_as_of=freshness_as_of,
+        )
 
     def _parse_derivatives(self, parsed: Mapping[str, Any]) -> ParseResult:
         metrics: list[CryptoDerivativeMetric] = []
@@ -227,21 +253,35 @@ class KrakenFuturesAdapter(BaseAdapter):
         if not metrics and not rejected:
             raise NotFound("kraken_futures: no derivative metrics returned", provider=self.name)
         metrics.sort(key=lambda m: (m.symbol, m.metric))
+        range_checks = [
+            check_range([m.value if m.metric == metric else None for m in metrics], lo=lo, hi=hi, what=metric)
+            for metric, (lo, hi) in METRIC_RANGES.items()
+        ]
+        out_of_range = {i for c in range_checks for i in c.indices}
+        now = self.ctx.clock.now()
+        stale_symbols = sorted({m.symbol for m in metrics if now - m.ts > SYMBOL_MAX_AGE})
+        quarantine_idx = sorted(out_of_range | {i for i, m in enumerate(metrics) if m.symbol in stale_symbols})
+        usable = [m for i, m in enumerate(metrics) if i not in set(quarantine_idx)]
+        stale_check = _stale_symbols_check(stale_symbols) if stale_symbols else ()
         quality = with_schema_rejections(
             DataQualityReport(
                 "kraken_futures:derivatives",
-                (check_duplicates([(m.symbol, m.metric) for m in metrics]),),
-                (),
+                (check_duplicates([(m.symbol, m.metric) for m in metrics]), *range_checks, *stale_check),
+                tuple(quarantine_idx),
                 len(metrics),
             ),
             rejected,
         )
-        as_of = max((m.ts for m in metrics), default=None)
+        # Freshness follows the *oldest* symbol still in the response, so one stale ticker can never ride on a
+        # fresh one; symbols past the block threshold are quarantined above and reported.
+        pool = usable or metrics
+        as_of = min((m.ts for m in pool), default=None)
         return ParseResult(
-            tuple(metrics),
+            tuple(usable),
             quality,
             as_of,
             FreshnessSpec(DataType.CRYPTO_DERIVATIVES),
+            quarantined=tuple(m for i, m in enumerate(metrics) if i in set(quarantine_idx)),
             notes=("Funding rate = Kraken absolute funding / mark price, per hourly interval (CCXT).",),
         )
 
@@ -254,3 +294,14 @@ class KrakenFuturesAdapter(BaseAdapter):
             ),
             DataRequest(kind=RequestKind.CRYPTO_DERIVATIVES, params={"symbols": "BTC/USD:USD,ETH/USD:USD"}),
         ]
+
+
+def _stale_symbols_check(symbols: list[str]) -> tuple[CheckResult, ...]:
+    return (
+        CheckResult(
+            "stale_symbols",
+            passed=False,
+            blocking=False,
+            detail=f"{len(symbols)} symbol(s) older than {SYMBOL_MAX_AGE} quarantined: {', '.join(symbols)}",
+        ),
+    )

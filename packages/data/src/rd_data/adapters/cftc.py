@@ -24,9 +24,15 @@ from rd_data.adapters.base import (
     as_float,
     require_param,
 )
-from rd_data.errors import InvalidArgs, NotFound
+from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
-from rd_data.quality import check_positioning, with_schema_rejections
+from rd_data.quality import (
+    DataQualityReport,
+    check_cadence,
+    check_positioning,
+    check_provider_order,
+    with_schema_rejections,
+)
 from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, DataType, PositionCounts, PositioningReport
 
@@ -134,8 +140,10 @@ class CftcAdapter(BaseAdapter):
         if not code or not set(code) <= _MARKET_CODE_CHARS or len(code) > 12:
             raise InvalidArgs(f"cftc: invalid market_code {code!r}", provider=self.name)
         weeks = request.params.get("weeks", 156)
-        if not isinstance(weeks, int) or not 1 <= weeks <= 1000:
+        if not isinstance(weeks, int) or isinstance(weeks, bool) or not 1 <= weeks <= 1000:
             raise InvalidArgs("cftc: weeks must be an integer between 1 and 1000", provider=self.name)
+        if not isinstance(request.params.get("futures_only", True), bool):
+            raise InvalidArgs("cftc: futures_only must be a boolean", provider=self.name)
 
     def _dataset(self, request: DataRequest) -> str:
         report_type = cast("ReportType", request.params["report_type"])
@@ -157,7 +165,9 @@ class CftcAdapter(BaseAdapter):
         futures_only = bool(request.params.get("futures_only", True))
         rows = orjson.loads(raw.bodies[0])
         if not isinstance(rows, list):
-            raise InvalidArgs(f"cftc: unexpected response type {type(rows).__name__}", provider=self.name)
+            raise ProviderDown(
+                f"cftc: malformed response (expected a list, got {type(rows).__name__})", provider=self.name
+            )
         if not rows:
             raise NotFound(
                 f"cftc: no {report_type} rows for market {request.params['market_code']}", provider=self.name
@@ -169,9 +179,13 @@ class CftcAdapter(BaseAdapter):
                 records.append(self._row(row, report_type, futures_only=futures_only))
             except (KeyError, ValueError, TypeError):
                 rejected += 1
+        order = check_provider_order([r.as_of for r in records], descending=True)  # requested newest first
         records.sort(key=lambda r: r.as_of)
+        base = check_positioning(records, subject=f"cftc:{report_type}:{request.params['market_code']}")
+        cadence = check_cadence([r.as_of for r in records], period=timedelta(days=7))
         quality = with_schema_rejections(
-            check_positioning(records, subject=f"cftc:{report_type}:{request.params['market_code']}"), rejected
+            DataQualityReport(base.subject, (order, *base.checks, cadence), base.quarantined, base.record_count),
+            rejected,
         )
         as_of = records[-1].as_of if records else None
         released = release_time(as_of) if as_of else None

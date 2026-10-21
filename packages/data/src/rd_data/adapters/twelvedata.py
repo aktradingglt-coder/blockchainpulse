@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
 import orjson
@@ -26,11 +26,17 @@ from rd_data.adapters.base import (
 from rd_data.errors import InvalidArgs, NotFound, ProviderDown, RateLimited
 from rd_data.freshness import ContinuousCalendar, ExchangeCalendar, TradingCalendar, WeekdayCalendar
 from rd_data.licence import byo_key_only
-from rd_data.quality import check_bars
+from rd_data.quality import DataQualityReport, check_bars, check_provider_order
 from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, Bar, DataType
 
 INTERVALS: Mapping[str, str] = {"1h": "1h", "4h": "4h", "1d": "1day", "1w": "1week"}
+WIDTHS: Mapping[str, timedelta] = {
+    "1h": timedelta(hours=1),
+    "4h": timedelta(hours=4),
+    "1d": timedelta(days=1),
+    "1w": timedelta(weeks=1),
+}
 _SYMBOL = re.compile(r"^[A-Za-z0-9.:/^-]{1,20}$")
 
 
@@ -53,12 +59,10 @@ class TwelveDataAdapter(BaseAdapter):
     cache_ttl_s: ClassVar[Mapping[RequestKind, int]] = {RequestKind.BARS: 300}
 
     def _api_key(self) -> str:
-        import os  # noqa: PLC0415 - vendor keys follow the <VENDOR>_API_KEY convention (PROMPT §19)
-
-        key = os.environ.get("TWELVEDATA_API_KEY")
-        if not key:
+        key = self.ctx.settings.twelvedata_api_key
+        if key is None or not key.get_secret_value():
             raise ProviderDown("twelvedata: TWELVEDATA_API_KEY is not configured", provider=self.name)
-        return key
+        return key.get_secret_value()
 
     def _validate(self, request: DataRequest) -> None:
         symbol = str(require_param(request, "symbol", self.name))
@@ -97,17 +101,26 @@ class TwelveDataAdapter(BaseAdapter):
             raise InvalidArgs(f"twelvedata: {message}", provider=self.name)
         symbol = str(request.params["symbol"])
         interval = str(request.params.get("interval", "1d"))
+        width = WIDTHS[interval]
+        asset_class = str(request.params.get("asset_class", "fx"))
+        cal = calendar_for(asset_class)
+        now = self.ctx.clock.now()
         bars: list[Bar] = []
         rejected = 0
+        forming = 0
         for row in body.get("values") or []:
             try:
                 text = str(row["datetime"])
                 fmt = "%Y-%m-%d %H:%M:%S" if " " in text else "%Y-%m-%d"
+                ts = datetime.strptime(text, fmt).replace(tzinfo=UTC)
+                if _closes_at(ts, interval, width, cal) > now:
+                    forming += 1
+                    continue  # candle still forming: never present an incomplete bar as a close
                 bars.append(
                     Bar(
                         symbol=symbol,
                         interval=interval,
-                        ts=datetime.strptime(text, fmt).replace(tzinfo=UTC),
+                        ts=ts,
                         open=float(row["open"]),
                         high=float(row["high"]),
                         low=float(row["low"]),
@@ -115,29 +128,42 @@ class TwelveDataAdapter(BaseAdapter):
                         volume=float(row["volume"]) if row.get("volume") not in (None, "") else None,
                     )
                 )
-            except (KeyError, ValueError):
+            except (KeyError, TypeError, ValueError):
                 rejected += 1
         if not bars and not rejected:
-            raise NotFound(f"twelvedata: no bars for {symbol}", provider=self.name)
+            raise NotFound(f"twelvedata: no closed {interval} bars for {symbol}", provider=self.name)
+        order = check_provider_order([b.ts for b in bars], descending=False)  # requested order=ASC
         bars.sort(key=lambda b: b.ts)
-        asset_class = str(request.params.get("asset_class", "fx"))
-        cal = calendar_for(asset_class)
         report, usable = check_bars(
             bars,
             subject=f"twelvedata:{symbol}:{interval}",
             calendar=cal,
+            market_open_at_end=cal.is_open(now),
             rejected_rows=rejected,
             split_dates=[] if asset_class == "equity" else None,
         )
+        report = DataQualityReport(report.subject, (order, *report.checks), report.quarantined, report.record_count)
         quarantined = tuple(b for b in bars if b not in usable)
         as_of = usable[-1].ts if usable else None
-        spec = (
-            FreshnessSpec(DataType.DAILY_BAR, cal)
-            if interval == "1d"
-            else FreshnessSpec(DataType.INTRADAY_DELAYED, delay_minutes=int(request.params.get("delay_minutes", 0)))
+        delay = self.licence.delay_minutes  # the plan's delay, from the recorded terms, never from the caller
+        if interval == "1d":
+            spec = FreshnessSpec(DataType.DAILY_BAR, cal)
+            freshness_as_of = None
+        else:
+            spec = FreshnessSpec(DataType.INTERVAL_BAR, delay_minutes=delay, bar_width=width)
+            freshness_as_of = as_of + width if as_of is not None else None
+        notes = (f"{forming} forming bar(s) dropped.",) if forming else ()
+        return ParseResult(
+            tuple(usable), report, as_of, spec, quarantined=quarantined, notes=notes, freshness_as_of=freshness_as_of
         )
-        return ParseResult(tuple(usable), report, as_of, spec, quarantined=quarantined)
 
     @staticmethod
     def recording_plan() -> list[DataRequest]:
         return [DataRequest(kind=RequestKind.BARS, params={"symbol": "EUR/USD", "interval": "1d", "outputsize": 30})]
+
+
+def _closes_at(ts: datetime, interval: str, width: timedelta, cal: TradingCalendar) -> datetime:
+    """When the bar labelled ``ts`` closes: the session close for daily bars, else the end of its interval."""
+    if interval == "1d":
+        return cal.closes_after(ts.date() - timedelta(days=1), 1)[0]
+    return ts + width

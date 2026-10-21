@@ -80,3 +80,52 @@ def test_licence_gate_blocks_restricted_values() -> None:
     with pytest.raises(LicenceBlocked):
         ensure_displayable(LicenceTag.DERIVED_ONLY, provider="v")
     ensure_displayable(LicenceTag.DISPLAY_OK, provider="cftc")
+
+
+def test_display_rights_do_not_imply_derived_rights() -> None:
+    """Terms that allow showing raw values but forbid derived data must block analytics (PROMPT §5.1)."""
+    display_only = LicenceTerms(
+        display_allowed=frozenset({DeploymentMode.HOSTED}),
+        derived_data_allowed=frozenset(),
+        redistribution_allowed=False,
+        commercial_use_allowed=True,
+        delay_minutes=0,
+        attribution_text="Data: exchange",
+        terms_verified=True,
+    )
+    tag = display_only.tag_for(DeploymentMode.HOSTED)
+    assert tag is LicenceTag.DISPLAY_ONLY
+    ensure_displayable(tag, provider="exchange")
+    with pytest.raises(LicenceBlocked, match="derived"):
+        ensure_derivable(tag, provider="exchange")
+    assert display_only.tag_for(DeploymentMode.SELF_HOSTED) is LicenceTag.INTERNAL_ONLY
+
+
+@pytest.mark.parametrize(
+    ("display", "derived", "expected"),
+    [
+        (True, True, LicenceTag.DISPLAY_OK),
+        (True, False, LicenceTag.DISPLAY_ONLY),
+        (False, True, LicenceTag.DERIVED_ONLY),
+        (False, False, LicenceTag.INTERNAL_ONLY),
+    ],
+)
+def test_gates_follow_each_right_independently(display: bool, derived: bool, expected: LicenceTag) -> None:
+    modes = frozenset({DeploymentMode.HOSTED})
+    terms = LicenceTerms(
+        display_allowed=modes if display else frozenset(),
+        derived_data_allowed=modes if derived else frozenset(),
+        redistribution_allowed=False,
+        commercial_use_allowed=True,
+        delay_minutes=0,
+        attribution_text="x",
+        terms_verified=True,
+    )
+    tag = terms.tag_for(DeploymentMode.HOSTED)
+    assert tag is expected
+    for gate, allowed in ((ensure_displayable, display), (ensure_derivable, derived)):
+        if allowed:
+            gate(tag, provider="p")
+        else:
+            with pytest.raises(LicenceBlocked):
+                gate(tag, provider="p")

@@ -7,6 +7,7 @@ excluded from the usable series but kept, with their indices, in the report.
 
 from __future__ import annotations
 
+import itertools
 import math
 import statistics
 from collections.abc import Sequence
@@ -114,6 +115,52 @@ def check_monotonic(times: Sequence[datetime | date]) -> CheckResult:
     return _ok("monotonic_timestamps")
 
 
+def check_provider_order(times: Sequence[datetime | date], *, descending: bool) -> CheckResult:
+    """The provider returned rows in the order we asked for (checked *before* any sorting on our side).
+
+    Rows out of the requested order mean the API, pagination or a proxy mangled the response.
+    """
+    seq = list(reversed(times)) if descending else list(times)
+    bad = tuple(i for i in range(1, len(seq)) if seq[i] < seq[i - 1])
+    if bad:
+        order = "descending" if descending else "ascending"
+        return _fail("provider_order", f"{len(bad)} row(s) not in the requested {order} order", blocking=True)
+    return _ok("provider_order")
+
+
+def check_cadence(
+    times: Sequence[datetime | date],
+    *,
+    period: timedelta,
+    tolerance: timedelta = timedelta(days=1),
+    max_gap_fraction: float = MAX_GAP_FRACTION,
+) -> CheckResult:
+    """Regular series (weekly COT and inventories): missing periods between the first and last observation.
+
+    Holiday shifts within ``tolerance`` are fine; a longer gap counts the periods it skips. Blocking above
+    ``max_gap_fraction`` of the expected periods, otherwise a warning that names the gaps.
+    """
+    ordered = sorted({_as_date(t) for t in times})
+    if len(ordered) < 2:
+        return _ok("cadence_gaps", "fewer than two observations")
+    missing: list[date] = []
+    for prev, cur in itertools.pairwise(ordered):
+        step = cur - prev
+        if step > period + tolerance:
+            skipped = round(step / period) - 1
+            missing.extend(prev + period * (k + 1) for k in range(max(skipped, 1)))
+    expected = len(ordered) + len(missing)
+    if not missing:
+        return _ok("cadence_gaps", f"{len(ordered)} consecutive periods")
+    sample = ", ".join(d.isoformat() for d in missing[:5])
+    detail = f"{len(missing)} of {expected} expected periods missing (e.g. {sample})"
+    return _fail("cadence_gaps", detail, blocking=len(missing) / expected > max_gap_fraction)
+
+
+def _as_date(value: datetime | date) -> date:
+    return value.date() if isinstance(value, datetime) else value
+
+
 def check_duplicates(keys: Sequence[object]) -> CheckResult:
     seen: dict[object, int] = {}
     dups: list[int] = []
@@ -128,61 +175,140 @@ def check_duplicates(keys: Sequence[object]) -> CheckResult:
 
 
 def robust_z_scores(values: Sequence[float]) -> list[float]:
-    """Robust z = 0.6745 * (x - median) / MAD. Zero MAD yields 0 for values equal to the median, else ±inf."""
+    """Robust z = 0.6745 * (x - median) / MAD.
+
+    When more than half the values are identical the MAD is 0; the scale then falls back to the mean absolute
+    deviation (z = (x - median) / (1.2533 * MeanAD)), the usual companion estimator. Only when every value equals
+    the median is the scale 0: values equal to it score 0, any other ±inf.
+    """
     if not values:
         return []
     med = statistics.median(values)
     mad = statistics.median(abs(v - med) for v in values)
-    if mad == 0:
-        return [0.0 if v == med else math.copysign(math.inf, v - med) for v in values]
-    return [0.6745 * (v - med) / mad for v in values]
+    if mad > 0:
+        return [0.6745 * (v - med) / mad for v in values]
+    mean_ad = statistics.fmean(abs(v - med) for v in values)
+    if mean_ad > 0:
+        return [(v - med) / (1.253314 * mean_ad) for v in values]
+    return [0.0 if v == med else math.copysign(math.inf, v - med) for v in values]
 
 
-def check_outliers(values: Sequence[float], *, threshold: float = OUTLIER_Z) -> CheckResult:
-    """Flags robust-z outliers in a level series (e.g. macro values); non-blocking: the caller quarantines."""
-    if len(values) < 10:
-        return _ok("outliers", "fewer than 10 values: not evaluated", blocking=False)
-    flagged = tuple(i for i, z in enumerate(robust_z_scores(values)) if abs(z) > threshold)
-    if flagged:
-        return _fail(
-            "outliers",
-            f"{len(flagged)} value(s) with |robust z| > {threshold:g} quarantined",
-            blocking=False,
-            indices=flagged,
-        )
-    return _ok("outliers", blocking=False)
+#: Longest run of consecutive points treated as a bad print when the series returns to its prior level afterwards.
+MAX_BAD_RUN = 2
+
+
+@dataclass(frozen=True)
+class SpikeScan:
+    """Result of :func:`scan_spikes` on a level series (indices are positions in the series)."""
+
+    evaluated: bool
+    bad_prints: tuple[int, ...] = ()  # extreme move that reverses within MAX_BAD_RUN points
+    unconfirmed: tuple[int, ...] = ()  # extreme move at either end of the series that cannot be confirmed yet
+    jumps: tuple[int, ...] = ()  # extreme move confirmed by more than MAX_BAD_RUN later points
+
+
+def scan_spikes(levels: Sequence[float], *, threshold: float = OUTLIER_Z) -> SpikeScan:
+    """Bad prints vs genuine moves, on point-to-point changes of ``levels`` scored by robust z (MAD).
+
+    An extreme change is a *bad print* when the series comes back (within half the move) after at most
+    :data:`MAX_BAD_RUN` points. One that does not come back is a genuine level shift once more than
+    :data:`MAX_BAD_RUN` points sit at the new level; with fewer (at the end of the series), or when the shift is
+    within the first :data:`MAX_BAD_RUN` points, it is *unconfirmed*: the move cannot be told apart from a bad print.
+    """
+    n = len(levels)
+    if n < 11:
+        return SpikeScan(evaluated=False)
+    changes = [levels[i + 1] - levels[i] for i in range(n - 1)]
+    extreme = [abs(z) > threshold for z in robust_z_scores(changes)]  # extreme[k]: the change into point k + 1
+    bad: set[int] = set()
+    unconfirmed: set[int] = set()
+    jumps: list[int] = []
+    return_legs: set[int] = set()
+    for k, is_extreme in enumerate(extreme):
+        if not is_extreme or k in return_legs:
+            continue
+        run = _reversal_run(levels, changes, extreme, k)
+        if run:
+            bad.update(range(k + 1, k + 1 + run))
+            return_legs.add(k + run)
+        elif k + 1 <= MAX_BAD_RUN:
+            unconfirmed.update(range(k + 1))  # the first point(s) may be the bad print: nothing before to compare
+        elif n - 1 - k <= MAX_BAD_RUN:
+            unconfirmed.update(range(k + 1, n))  # too few points at the new level to confirm the move
+        else:
+            jumps.append(k + 1)
+    return SpikeScan(
+        evaluated=True,
+        bad_prints=tuple(sorted(bad)),
+        unconfirmed=tuple(sorted(unconfirmed - bad)),
+        jumps=tuple(jumps),
+    )
+
+
+def _reversal_run(levels: Sequence[float], changes: Sequence[float], extreme: Sequence[bool], k: int) -> int:
+    """Length of the run of points after change ``k`` from which the series comes back, or 0 if it does not."""
+    n = len(levels)
+    for run in range(1, MAX_BAD_RUN + 1):
+        back = k + run  # index of the change out of the candidate run
+        if back > n - 2:
+            return 0
+        if run > 1 and extreme[back - 1]:
+            return 0  # another extreme move inside the run: not a single bad print
+        if extreme[back] and abs(levels[back + 1] - levels[k]) < 0.5 * abs(changes[k]):
+            return run
+    return 0
 
 
 def check_price_spikes(closes: Sequence[float], *, threshold: float = OUTLIER_Z) -> tuple[CheckResult, CheckResult]:
-    """Bad prints vs genuine moves, on log returns scored by robust z.
+    """Bad prints on log closes. Returns (price_spikes, large_moves).
 
-    A *spike* — a bar whose incoming and outgoing returns are both extreme with opposite signs — is a bad print and
-    is quarantined. A one-sided extreme return (a real jump or level shift) is kept and reported as a warning.
-    Returns (spikes, jumps).
+    Bad prints and *unconfirmed* extreme moves at the ends of the series are quarantined: a bad print on the latest
+    bar is the most damaging error a report can repeat, so an extreme last move is held back until later bars
+    confirm it. Confirmed level shifts are kept and reported as a warning.
     """
     if len(closes) < 11 or any(c <= 0 for c in closes):
         skipped = _ok("price_spikes", "fewer than 11 positive closes: not evaluated", blocking=False)
         return skipped, _ok("large_moves", "not evaluated", blocking=False)
-    rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
-    z = robust_z_scores(rets)
-    extreme = [abs(v) > threshold for v in z]  # extreme[k] is the return into bar k + 1
-    spikes: list[int] = []
-    for bar in range(1, len(closes)):
-        into, out = bar - 1, bar
-        if extreme[into] and out < len(rets) and extreme[out] and (rets[into] > 0) != (rets[out] > 0):
-            spikes.append(bar)
-    jumps = tuple(k + 1 for k, e in enumerate(extreme) if e and (k + 1) not in spikes and (k + 1) - 1 not in spikes)
+    scan = scan_spikes([math.log(c) for c in closes], threshold=threshold)
+    quarantined = tuple(sorted({*scan.bad_prints, *scan.unconfirmed}))
     spike_res = (
-        _fail("price_spikes", f"{len(spikes)} isolated spike(s) quarantined", blocking=False, indices=tuple(spikes))
-        if spikes
+        _fail(
+            "price_spikes",
+            f"{len(scan.bad_prints)} bad print(s) and {len(scan.unconfirmed)} unconfirmed extreme move(s) quarantined",
+            blocking=False,
+            indices=quarantined,
+        )
+        if quarantined
         else _ok("price_spikes", blocking=False)
     )
     jump_res = (
-        _fail("large_moves", f"{len(jumps)} extreme one-sided move(s) kept for review", blocking=False, indices=jumps)
-        if jumps
+        _fail(
+            "large_moves",
+            f"{len(scan.jumps)} confirmed extreme move(s) kept for review",
+            blocking=False,
+            indices=scan.jumps,
+        )
+        if scan.jumps
         else _ok("large_moves", blocking=False)
     )
     return spike_res, jump_res
+
+
+def check_range(values: Sequence[float | None], *, lo: float | None, hi: float | None, what: str) -> CheckResult:
+    """Values outside the physically possible range for the series (e.g. negative stocks, a 400% yield)."""
+    bad = tuple(
+        i
+        for i, v in enumerate(values)
+        if v is not None and ((lo is not None and v < lo) or (hi is not None and v > hi))
+    )
+    if bad:
+        return _fail(
+            "value_range",
+            f"{len(bad)} {what} value(s) outside [{lo}, {hi}] quarantined",
+            blocking=False,
+            indices=bad,
+        )
+    return _ok("value_range", f"{what} within [{lo}, {hi}]", blocking=False)
 
 
 def check_stale_run(values: Sequence[float], *, run: int = STALE_RUN, market_open_at_end: bool = True) -> CheckResult:
@@ -205,7 +331,7 @@ def _bar_is_sane(b: Bar, *, allow_non_positive: bool) -> bool:
         return False
     if not (b.low <= min(b.open, b.close) and max(b.open, b.close) <= b.high):
         return False
-    if b.volume is not None and b.volume < 0:
+    if b.volume is not None and (not math.isfinite(b.volume) or b.volume < 0):
         return False
     return allow_non_positive or min(prices) > 0
 
@@ -336,20 +462,45 @@ def check_bars(
     return report, usable
 
 
-def check_series(observations: Sequence[MacroObservation], *, subject: str) -> DataQualityReport:
-    """Macro/inventory series: ordering, duplicates, finite values; missing values are allowed but counted."""
+def check_series(
+    observations: Sequence[MacroObservation],
+    *,
+    subject: str,
+    lo: float | None = None,
+    hi: float | None = None,
+) -> tuple[DataQualityReport, list[MacroObservation]]:
+    """Macro/inventory series: order, duplicates, finite values, physical range and bad prints.
+
+    Out-of-range values and extreme moves that revert are quarantined. An extreme *latest* value is kept with a
+    warning: official releases are revised rather than mis-printed, and hiding a genuine release (e.g. a record jump
+    in unemployment) would misstate the data. Missing values are allowed and counted.
+    """
     values = [o.value for o in observations]
     missing = sum(1 for v in values if v is None)
     nonfinite = tuple(i for i, v in enumerate(values) if v is not None and not math.isfinite(v))
+    range_check = check_range(values, lo=lo, hi=hi, what="series")
+    present = [(i, v) for i, v in enumerate(values) if v is not None and i not in range_check.indices]
+    scan = scan_spikes([v for _, v in present])
+    reverted = tuple(present[j][0] for j in scan.bad_prints)
+    edge = tuple(present[j][0] for j in (*scan.unconfirmed, *scan.jumps))
     checks = [
-        check_monotonic([o.ts for o in observations]),
+        check_monotonic([o.ts for o in observations]),  # callers pass rows sorted; raw order: check_provider_order
         check_duplicates([o.ts for o in observations]),
         _fail("finite_values", f"{len(nonfinite)} non-finite value(s)", blocking=True, indices=nonfinite)
         if nonfinite
         else _ok("finite_values"),
+        range_check,
+        _fail("outliers", f"{len(reverted)} reverting outlier(s) quarantined", blocking=False, indices=reverted)
+        if reverted
+        else _ok("outliers", "evaluated" if scan.evaluated else "fewer than 11 values: not evaluated", blocking=False),
+        _fail("large_moves", f"{len(edge)} extreme move(s) kept for review", blocking=False, indices=edge)
+        if edge
+        else _ok("large_moves", blocking=False),
         _ok("missing_values", f"{missing} observation(s) reported as missing by the source", blocking=False),
     ]
-    return DataQualityReport(subject, tuple(checks), (), len(observations))
+    quarantined = tuple(sorted({*range_check.indices, *reverted}))
+    usable = [o for i, o in enumerate(observations) if i not in set(quarantined)]
+    return DataQualityReport(subject, tuple(checks), quarantined, len(observations)), usable
 
 
 def check_positioning(

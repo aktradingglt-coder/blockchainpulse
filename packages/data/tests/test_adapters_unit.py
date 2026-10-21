@@ -195,13 +195,13 @@ async def test_sec_facts_are_point_in_time_and_validated(ctx_factory: Any) -> No
 
 
 async def test_sec_filings_and_tickers(ctx_factory: Any) -> None:
-    recent = {
-        "accessionNumber": ["0001-26-000001", "0001-26-000002"],
-        "filingDate": ["2026-10-01", "2026-10-15"],
-        "reportDate": ["2026-09-30", ""],
-        "acceptanceDateTime": ["2026-10-01T20:01:02.000Z", ""],
-        "form": ["10-Q", "8-K"],
-        "primaryDocument": ["q.htm", ""],
+    recent = {  # EDGAR lists the newest filing first
+        "accessionNumber": ["0001-26-000002", "0001-26-000001"],
+        "filingDate": ["2026-10-15", "2026-10-01"],
+        "reportDate": ["", "2026-09-30"],
+        "acceptanceDateTime": ["", "2026-10-01T20:01:02.000Z"],
+        "form": ["8-K", "10-Q"],
+        "primaryDocument": ["", "q.htm"],
     }
     ctx, rec = ctx_factory(_json({"cik": "320193", "name": "Apple Inc.", "filings": {"recent": recent}}), **UA)
     resp = await SecEdgarAdapter(ctx).fetch(DataRequest(kind=RequestKind.FILINGS, params={"cik": "320193"}))

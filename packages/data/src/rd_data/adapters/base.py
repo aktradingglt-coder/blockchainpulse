@@ -14,7 +14,7 @@ import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Any, ClassVar, Protocol
 
@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from rd_core.clock import Clock, SystemClock, isoformat_z
 from rd_core.settings import DeploymentMode, Settings
-from rd_data.errors import FeatureDisabled, InvalidArgs
+from rd_data.errors import DataError, FeatureDisabled, InvalidArgs, ProviderDown
 from rd_data.freshness import FreshnessResult, TradingCalendar, classify
 from rd_data.http import FetchResult, HttpFetcher
 from rd_data.licence import LicenceTag, LicenceTerms
@@ -105,6 +105,7 @@ class FreshnessSpec:
     release_frequency: str | None = None
     next_release_at: datetime | None = None
     delay_minutes: int = 0
+    bar_width: timedelta | None = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +233,38 @@ class BaseAdapter(ABC):
     def _validate(self, request: DataRequest) -> None:  # noqa: B027 - optional hook; default accepts the request
         """Adapter-specific parameter validation; raise :class:`InvalidArgs`."""
 
+    async def _from_cache(self, request: DataRequest, fingerprint: str) -> tuple[RawPayload | None, ParseResult | None]:
+        """A cached payload and its parse, or (None, None) when absent or unusable (the entry is then dropped)."""
+        assert self.ctx.cache is not None  # noqa: S101 - only called when caching is on
+        cached = await self.ctx.cache.get(fingerprint)
+        if cached is None:
+            return None, None
+        try:
+            raw = RawPayload.from_json(cached)
+            return raw, await self._parse_checked(request, raw, from_cache=True)
+        except (*MALFORMED, ProviderDown):
+            await self.ctx.cache.drop(fingerprint)
+            return None, None
+
+    async def _parse_checked(self, request: DataRequest, raw: RawPayload, *, from_cache: bool) -> ParseResult:
+        """Run the parser; a payload it cannot understand becomes :class:`ProviderDown`, never a raw exception.
+
+        A malformed live response counts as a provider failure for the circuit breaker.
+        """
+        try:
+            return self._parse(request, raw)
+        except ProviderDown as exc:
+            if not from_cache:
+                await self.ctx.breaker.record_failure(self.name, str(exc))
+            raise
+        except DataError:
+            raise
+        except MALFORMED as exc:
+            detail = f"{self.name}: malformed response ({type(exc).__name__})"
+            if not from_cache:
+                await self.ctx.breaker.record_failure(self.name, detail)
+            raise ProviderDown(detail, provider=self.name) from exc
+
     async def fetch(self, request: DataRequest) -> DataResponse:
         if request.kind not in self.supported:
             raise InvalidArgs(f"{self.name} does not serve {request.kind.value}", provider=self.name)
@@ -239,17 +272,19 @@ class BaseAdapter(ABC):
             raise FeatureDisabled(f"{self.name} is disabled (feature flag {self.feature_flag!r})", provider=self.name)
         self._validate(request)
         fingerprint = request.fingerprint(self.name)
+        cacheable = self.ctx.cache is not None and self.cache_ttl_s.get(request.kind, 0) > 0
         raw: RawPayload | None = None
-        from_cache = False
-        if self.ctx.cache is not None and self.cache_ttl_s.get(request.kind, 0) > 0:
-            cached = await self.ctx.cache.get(fingerprint)
-            if cached is not None:
-                raw, from_cache = RawPayload.from_json(cached), True
-        if raw is None:
+        parsed: ParseResult | None = None
+        if cacheable:
+            raw, parsed = await self._from_cache(request, fingerprint)
+        from_cache = parsed is not None
+        if raw is None or parsed is None:
             raw = await self._download(request)
-            if self.ctx.cache is not None and self.cache_ttl_s.get(request.kind, 0) > 0:
+            parsed = await self._parse_checked(request, raw, from_cache=False)
+            parsed.quality.require_passed(provider=self.name)
+            if cacheable:  # only payloads that passed QA are cached
+                assert self.ctx.cache is not None  # noqa: S101 - narrowed by ``cacheable``
                 await self.ctx.cache.put(fingerprint, raw.to_json(), self.cache_ttl_s[request.kind])
-        parsed = self._parse(request, raw)
         parsed.quality.require_passed(provider=self.name)
         now = self.ctx.clock.now()
         freshness: FreshnessResult | None = None
@@ -257,12 +292,13 @@ class BaseAdapter(ABC):
             spec = parsed.freshness
             freshness = classify(
                 spec.data_type,
-                parsed.freshness_as_of or parsed.as_of,
+                _freshness_origin(parsed, raw.retrieved_at),
                 now,
                 delay_minutes=spec.delay_minutes,
                 calendar=spec.calendar,
                 release_frequency=spec.release_frequency,
                 next_release_at=spec.next_release_at,
+                bar_width=spec.bar_width,
             )
             freshness.require_usable(provider=self.name)
         terms = parsed.licence_override or self.licence
@@ -283,6 +319,23 @@ class BaseAdapter(ABC):
             source_urls=raw.urls,
             notes=parsed.notes,
         )
+
+
+def _freshness_origin(parsed: ParseResult, retrieved_at: datetime) -> datetime | date:
+    """Where freshness is measured from. An *estimated* release time (``freshness_as_of``) is capped at the moment
+    the data was retrieved: a value cannot have been published after we already held it (e.g. a release that came
+    out earlier than the scheduled time we assume)."""
+    estimate = parsed.freshness_as_of
+    if estimate is None:
+        assert parsed.as_of is not None  # noqa: S101 - caller checks
+        return parsed.as_of
+    if isinstance(estimate, datetime):
+        return min(estimate, retrieved_at)
+    return estimate
+
+
+#: Exceptions a parser raises on a payload it cannot understand (wrong type, missing key, not JSON, bad number).
+MALFORMED = (ValueError, KeyError, TypeError, AttributeError, IndexError, UnicodeDecodeError)
 
 
 def require_param(request: DataRequest, name: str, provider: str) -> ParamValue:

@@ -5,13 +5,16 @@
 | Intraday price, real-time    | 2 min                                | 15 min                             |
 | Intraday price, delayed      | delay + 5 min                        | delay + 30 min                     |
 | Daily bars                   | 1 missed trading session             | 3 missed trading sessions          |
+| Other fixed-width bars (D-029)| close + width + delay + 5 min       | close + 3*width + delay + 30 min |
 | Crypto funding / OI          | 1 h                                  | 6 h                                |
 | COT                          | 8 days                               | 15 days                            |
 | Inventories / macro releases | next scheduled release + 1 day       | next scheduled release + 7 days    |
 | Fundamentals                 | next expected filing + 7 days        | 120 days after filing              |
 | News ("latest" sections)     | 24 h                                 | 7 days                             |
 
-Daily bars count *sessions* of the instrument's trading calendar, so a Friday bar is still fresh on Sunday.
+Daily bars count *sessions* of the instrument's trading calendar, so a Friday bar is still fresh on Sunday. Bars are
+always judged from their *close*: a bar labelled 10:00 with a 1-hour width is as of 11:00. Macro and inventory series
+are judged from the time the latest value was *released* (or last updated), never from the period it describes.
 """
 
 from __future__ import annotations
@@ -61,6 +64,10 @@ class TradingCalendar(Protocol):
         """UTC closes of the next ``count`` sessions strictly after ``session``."""
         ...
 
+    def is_open(self, at: datetime) -> bool:
+        """Whether the market trades at ``at`` (stale-quote checks only apply while it does)."""
+        ...
+
 
 class ContinuousCalendar:
     """Crypto: a session every calendar day, closing at 00:00 UTC of the next day (PROMPT §3.2 crypto rule)."""
@@ -72,6 +79,9 @@ class ContinuousCalendar:
             datetime.combine(session + timedelta(days=k + 1), time(0, tzinfo=UTC)) + timedelta(days=1)
             for k in range(count)
         ]
+
+    def is_open(self, at: datetime) -> bool:  # noqa: ARG002 - crypto trades around the clock
+        return True
 
 
 class WeekdayCalendar:
@@ -88,6 +98,9 @@ class WeekdayCalendar:
                 out.append(datetime.combine(day + timedelta(days=1), time(0, tzinfo=UTC)))
         return out
 
+    def is_open(self, at: datetime) -> bool:
+        return ensure_utc(at).weekday() < 5
+
 
 class ExchangeCalendar:
     """Exchange sessions, early closes and holidays from ``exchange_calendars`` (e.g. ``XNYS``, ``CMES``)."""
@@ -103,6 +116,12 @@ class ExchangeCalendar:
             raise InvalidArgs(f"{self.name} calendar does not cover {session.isoformat()}")
         sessions = self._cal.sessions_in_range(start, end)[:count]
         return [ensure_utc(self._cal.session_close(s).to_pydatetime()) for s in sessions]
+
+    def is_open(self, at: datetime) -> bool:
+        minute = pd.Timestamp(ensure_utc(at)).floor("min")
+        if not self._cal.first_minute <= minute <= self._cal.last_minute:
+            return False
+        return bool(self._cal.is_trading_minute(minute))
 
 
 @lru_cache(maxsize=16)
@@ -148,8 +167,12 @@ def classify(
     next_release_at: datetime | None = None,
     release_frequency: str | None = None,
     next_filing_expected_at: datetime | None = None,
+    bar_width: timedelta | None = None,
 ) -> FreshnessResult:
-    """Classify data as fresh, stale (label it) or blocked (do not use)."""
+    """Classify data as fresh, stale (label it) or blocked (do not use).
+
+    ``as_of`` is when the data became true: a bar's close, a macro value's release, a filing's date.
+    """
     as_of_dt = _as_datetime(as_of)
     now = ensure_utc(now)
     if as_of_dt > now + timedelta(minutes=5):
@@ -166,6 +189,8 @@ def classify(
         reason = f"delayed feed ({delay_minutes} min): stale after delay+5 min, blocked after delay+30 min"
     elif data_type is DataType.DAILY_BAR:
         return _classify_daily(as_of_dt, now, calendar)
+    elif data_type is DataType.INTERVAL_BAR:
+        stale_after, blocked_after, reason = _interval_bounds(as_of_dt, bar_width, delay_minutes)
     elif data_type is DataType.MACRO_RELEASE:
         if next_release_at is None:
             if release_frequency not in RELEASE_INTERVALS:
@@ -188,6 +213,24 @@ def classify(
     elif now >= stale_after:
         status = Freshness.STALE
     return FreshnessResult(status, as_of_dt, now, stale_after, blocked_after, reason)
+
+
+def _interval_bounds(
+    close: datetime, bar_width: timedelta | None, delay_minutes: int
+) -> tuple[datetime, datetime, str]:
+    """Fixed-width bars (D-030): stale once the next bar is overdue, blocked after three missed bars."""
+    if bar_width is None or bar_width <= timedelta(0):
+        raise InvalidArgs("interval-bar freshness needs a positive bar_width")
+    delay = timedelta(minutes=delay_minutes)
+    reason = (
+        f"{bar_width} bars closed at {close.isoformat()}: stale once the next bar is overdue "
+        "(width + delay + 5 min), blocked after three missed bars (+30 min)"
+    )
+    return (
+        close + bar_width + delay + timedelta(minutes=5),
+        close + 3 * bar_width + delay + timedelta(minutes=30),
+        reason,
+    )
 
 
 def _classify_daily(as_of: datetime, now: datetime, calendar: TradingCalendar | None) -> FreshnessResult:

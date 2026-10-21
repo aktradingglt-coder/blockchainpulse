@@ -60,6 +60,8 @@ def test_status_reports_unavailable_components(client: TestClient) -> None:
     assert body["components"]["rd-worker"]["ok"] is False
     assert body["components"]["rd-scheduler"]["leader_elected"] is False
     assert body["components"]["queue"]["ok"] is False
+    assert body["providers"] == {"error": "ConnectionError"}  # breaker state lives in Valkey, which is down
+    assert body["degraded_providers"] == []
 
 
 def test_metrics_count_requests_by_route_template(client: TestClient) -> None:

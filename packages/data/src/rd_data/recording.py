@@ -101,21 +101,44 @@ async def _run_one(
     return summary
 
 
-async def run(providers: Sequence[str], out: Path, *, check_drift: bool, source: str) -> list[dict[str, Any]]:
+def load_extra_requests(path: Path) -> list[tuple[str, DataRequest]]:
+    """Requests beyond the adapters' recording plans, from the ``requests`` list of a JSON file such as
+    ``.github/recording-request.json``: ``[{"provider": "cftc", "kind": "cot", "params": {...}}, ...]``. Used to
+    record (and so verify) a new endpoint before its contract test is added."""
+    data = json.loads(path.read_text())
+    return [
+        (str(item["provider"]), DataRequest(kind=item["kind"], params=item.get("params", {})))
+        for item in data.get("requests", [])
+    ]
+
+
+async def run(
+    providers: Sequence[str],
+    out: Path,
+    *,
+    check_drift: bool,
+    source: str,
+    extra: Sequence[tuple[str, DataRequest]] = (),
+) -> list[dict[str, Any]]:
     settings = Settings()
     flags = effective_flags(load_config(settings.config_dir), settings)
-    selected = [cls for cls in ADAPTERS if cls.name in providers]
-    unknown = set(providers) - {cls.name for cls in ADAPTERS}
+    by_name = {cls.name: cls for cls in ADAPTERS}
+    unknown = (set(providers) | {name for name, _ in extra}) - set(by_name)
     if unknown:
         raise SystemExit(f"unknown provider(s): {sorted(unknown)}")
-    results = []
-    for cls in selected:
+    jobs: list[tuple[type[BaseAdapter], DataRequest]] = []
+    results: list[dict[str, Any]] = []
+    for cls in ADAPTERS:
+        if cls.name not in providers:
+            continue
         plan = getattr(cls, "recording_plan", None)
         if plan is None:
             results.append({"provider": cls.name, "ok": False, "error": "no recording_plan"})
             continue
-        for request in plan():
-            results.append(await _run_one(cls, request, settings, flags, out, check_drift=check_drift, source=source))
+        jobs.extend((cls, request) for request in plan())
+    jobs.extend((by_name[name], request) for name, request in extra)
+    for cls, request in jobs:
+        results.append(await _run_one(cls, request, settings, flags, out, check_drift=check_drift, source=source))
     return results
 
 
@@ -125,6 +148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--check-drift", action="store_true")
     parser.add_argument("--source", default="manual run")
+    parser.add_argument("--requests", type=Path, help="JSON file whose 'requests' list adds requests to record")
     args = parser.parse_args(argv)
     configure_logging(service="rd-recorder", level="WARNING", fmt="json")
     results = asyncio.run(
@@ -133,6 +157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.out,
             check_drift=args.check_drift,
             source=args.source,
+            extra=load_extra_requests(args.requests) if args.requests else (),
         )
     )
     for r in results:

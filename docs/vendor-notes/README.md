@@ -17,7 +17,8 @@ confirms it. GitHub Actions runners do have open egress, so live smoke tests and
 | Vendor | File | Status |
 | --- | --- | --- |
 | Anthropic (models, pricing, SDKs) | anthropic.md | verified via bundled current API reference (cached 2026-10-06) + code.claude.com |
-| CFTC COT (Socrata) | cftc.md | dataset IDs **[unverified]** |
+| CFTC COT (Socrata) | cftc.md | futures-only IDs verified by CI recordings; combined IDs recording requested |
+| U.S. Treasury yield curve | treasury.md | format verified by CI recording; reuse statement **[verify]** |
 | SEC EDGAR | sec-edgar.md | rate limit + UA verified via sec.gov search snippet |
 | FRED | fred.md | **legal risk flagged** |
 | EIA | eia.md | partially verified |
