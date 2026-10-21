@@ -245,3 +245,14 @@ Responses above 64 MB are refused without buffering, and one call waits at most 
 (a longer `Retry-After` is reported as `RateLimited` with the hint, for the caller or scheduler to honour).
 **Reason.** P1 review round 3 showed a multi-call provider could never recover once its circuit opened (the second
 call met the taken probe), and that `Retry-After` × retries could stall a fetch for minutes.
+
+### D-035 · 2026-10-21 · QA always sees at least 30 points of history
+**Decision.** Every series adapter fetches at least `QA_CONTEXT` = 30 points (bars, weeks, days) whatever window was
+asked for, runs every quality check on that history, and trims the response to the request afterwards. Early in a
+year the Treasury adapter also fetches the previous year's file as context (never returned). A series still too
+short to check reports "bad prints could not be checked" as a warning rather than passing silently. Week-on-week
+open-interest moves are held only beyond ×3/÷3 (expiry rolls of 20–40% are shown, flagged). EIA supports weekly
+series only until monthly/quarterly periods and release calendars are modelled; unlisted weekly series assume the
+earliest (Wednesday) release so a genuine release is never refused as "not yet published".
+**Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
+stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.

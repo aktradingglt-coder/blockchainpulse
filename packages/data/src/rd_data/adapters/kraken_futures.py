@@ -26,11 +26,12 @@ from rd_data.adapters.base import (
     as_float,
     require_param,
 )
-from rd_data.errors import InvalidArgs, NotFound, ProviderDown
+from rd_data.errors import InvalidArgs, NotFound, ProviderDown, RateLimited
 from rd_data.freshness import ContinuousCalendar
 from rd_data.http import HttpFetcher
 from rd_data.licence import byo_key_only
 from rd_data.quality import (
+    QA_CONTEXT,
     CheckResult,
     DataQualityReport,
     check_bars,
@@ -159,13 +160,18 @@ class KrakenFuturesAdapter(BaseAdapter):
         try:
             await self._load_markets(exchange)
             if request.kind is RequestKind.BARS:
-                tf = TIMEFRAMES[str(request.params.get("timeframe", "1d"))][0]
+                tf, width = TIMEFRAMES[str(request.params.get("timeframe", "1d"))]
                 since = request.params.get("since_ms")
+                limit = int(request.params.get("limit", 200))
+                # Never fewer than QA_CONTEXT bars, so the latest bar is always checked for bad prints; extra bars
+                # come from before the requested window and are trimmed off after QA.
+                fetch_limit = max(limit, QA_CONTEXT)
+                extra_ms = (fetch_limit - limit) * int(width.total_seconds() * 1000)
                 rows = await exchange.fetch_ohlcv(
                     str(request.params["symbol"]),
                     tf,
-                    since=int(since) if since is not None else None,
-                    limit=int(request.params.get("limit", 200)),
+                    since=int(since) - extra_ms if since is not None else None,
+                    limit=fetch_limit,
                 )
                 decoded: dict[str, Any] = {"ohlcv": rows}
             else:
@@ -178,12 +184,17 @@ class KrakenFuturesAdapter(BaseAdapter):
                     },
                     "tickers": tickers,
                 }
-        except (NotFound, InvalidArgs, ProviderDown):
+        except (NotFound, InvalidArgs, ProviderDown, RateLimited):
             raise
         except ccxt_async.BadSymbol as exc:
             raise NotFound(f"kraken_futures: {exc}", provider=self.name) from exc
+        except ccxt_async.RateLimitExceeded as exc:
+            raise RateLimited(f"kraken_futures: {type(exc).__name__}", provider=self.name) from exc
         except ccxt_async.BaseError as exc:
-            raise ProviderDown(f"kraken_futures: {type(exc).__name__}", provider=self.name) from exc
+            # The exchange answered with an error body (maintenance, unavailable, auth): an outage for the breaker.
+            detail = f"kraken_futures: exchange error ({type(exc).__name__})"
+            await self.http.report_malformed(detail)
+            raise ProviderDown(detail, provider=self.name) from exc
         finally:
             await exchange.close()
         return RawPayload(tuple(exchange.rd_bodies), tuple(exchange.rd_urls), self.ctx.clock.now(), decoded)
@@ -235,16 +246,27 @@ class KrakenFuturesAdapter(BaseAdapter):
             rejected_rows=rejected,
             bar_width=width,
         )
-        quarantined = tuple(b for b in bars if b not in usable)
+        since = request.params.get("since_ms")
+        limit = int(request.params.get("limit", 200))
+        if since is not None:
+            start = datetime.fromtimestamp(int(since) / 1000, tz=UTC)
+            window = [b for b in usable if b.ts >= start][:limit]
+        else:
+            window = usable[-limit:]
+        first = window[0].ts if window else (bars[-1].ts if bars else now)
+        quarantined = tuple(b for b in bars if b not in usable and b.ts >= first)
+        usable = window
         as_of = usable[-1].ts if usable else None
-        notes = ["Perpetual trade-price candles; daily bars close at 00:00 UTC."]
+        notes = [
+            "Perpetual trade-price candles; daily bars close at 00:00 UTC.",
+            f"Quality checks used {len(bars)} bars of context for {len(usable)} returned.",
+        ]
         spec: FreshnessSpec | None = (
             FreshnessSpec(DataType.DAILY_BAR, ContinuousCalendar())
             if tf == "1d"
             else FreshnessSpec(DataType.INTERVAL_BAR, bar_width=width)
         )
         freshness_as_of = as_of + width if as_of is not None and tf != "1d" else None
-        since = request.params.get("since_ms")
         if since is not None:
             window_end = datetime.fromtimestamp(int(since) / 1000, tz=UTC) + width * int(
                 request.params.get("limit", 200)

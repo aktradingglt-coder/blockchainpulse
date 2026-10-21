@@ -50,6 +50,8 @@ class FredAdapter(BaseAdapter):
     credential_setting = "fred_api_key"
 
     def _validate(self, request: DataRequest) -> None:
+        if "start" in request.params and _start_of(request) is None:
+            raise InvalidArgs("fred: start must be a date (YYYY-MM-DD)", provider=self.name)
         if self.ctx.settings.fred_api_key is None:
             raise ProviderDown("fred: FRED_API_KEY is not configured", provider=self.name)
         series = str(require_param(request, "series", self.name))
@@ -62,10 +64,9 @@ class FredAdapter(BaseAdapter):
         series = str(request.params["series"])
         common: dict[str, Any] = {"series_id": series, "api_key": key.get_secret_value(), "file_type": "json"}
         info = await self.http.get("https://api.stlouisfed.org/fred/series", common)
-        params = dict(common)
-        if "start" in request.params:
-            params["observation_start"] = str(request.params["start"])
-        obs = await self.http.get("https://api.stlouisfed.org/fred/series/observations", params)
+        # The whole history is fetched (no observation_start) so the earliest requested value is checked against
+        # what came before it; ``start`` trims the response after QA.
+        obs = await self.http.get("https://api.stlouisfed.org/fred/series/observations", common)
         return RawPayload.from_results([info, obs], self.ctx.clock.now())
 
     def copyrighted(self, raw: RawPayload) -> bool:
@@ -113,6 +114,10 @@ class FredAdapter(BaseAdapter):
         if self.copyrighted(raw):
             notes.append("Series notes carry a third-party copyright notice: internal use only.")
             override = self.licence.model_copy(update={"commercial_use_allowed": False})
+        start = _start_of(request)
+        held = tuple(o for o in obs if o not in usable and (start is None or o.ts >= start))
+        if start is not None:
+            usable = [o for o in usable if o.ts >= start]
         reported = [o for o in usable if o.value is not None]
         if usable and not reported:
             raise DataQualityError(
@@ -129,7 +134,7 @@ class FredAdapter(BaseAdapter):
             quality,
             as_of,
             FreshnessSpec(DataType.MACRO_RELEASE, release_frequency=frequency),
-            quarantined=tuple(o for o in obs if o not in usable),
+            quarantined=held,
             notes=tuple(notes),
             licence_override=override,
             freshness_as_of=updated or as_of,
@@ -150,4 +155,11 @@ def _last_updated(text: object) -> datetime | None:
     try:
         return ensure_utc(datetime.fromisoformat(value))
     except ValueError:
+        return None
+
+
+def _start_of(request: DataRequest) -> datetime | None:
+    try:
+        return datetime.strptime(str(request.params["start"]), "%Y-%m-%d").replace(tzinfo=UTC)
+    except (KeyError, ValueError):
         return None

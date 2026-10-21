@@ -26,12 +26,13 @@ from rd_data.adapters.eia import EiaAdapter
 from rd_data.adapters.fred import FredAdapter
 from rd_data.adapters.kraken_futures import KrakenFuturesAdapter
 from rd_data.adapters.sec_edgar import SecEdgarAdapter
-from rd_data.adapters.treasury import TreasuryAdapter
+from rd_data.adapters.treasury import COLUMNS, TreasuryAdapter
 from rd_data.adapters.twelvedata import TwelveDataAdapter
 from rd_data.cassette import Cassette, RecordingTransport, ReplayTransport
 from rd_data.errors import DataQualityError, InvalidArgs, ProviderDown, RateLimited, Stale
-from rd_data.freshness import Freshness
+from rd_data.freshness import ExchangeCalendar, Freshness
 from rd_data.http import HttpFetcher, redact_params
+from rd_data.quality import check_interval_gaps
 from rd_data.recording import cassette_name
 from rd_data.registry import provider_statuses
 from rd_data.resilience import (
@@ -1179,4 +1180,272 @@ async def test_oversized_bodies_and_long_retry_after_are_bounded(ctx_factory: An
 
 @pytest.mark.parametrize("name", ["pwd", "pass", "authorization", "access_key_id", "Authorization"])
 def test_more_credential_names_are_redacted(name: str) -> None:
+    assert redact_params({name: "v" * 12}) == {name: "REDACTED"}
+
+
+# ------------------------------------------------------------------------------------- review round 4 (P1)
+
+
+def _hourly_candles(n: int, end: datetime, *, last_factor: float = 1.0) -> list[dict[str, Any]]:
+    out = []
+    for k in range(n, 0, -1):
+        close = 100 + 0.3 * math.sin(k) + 0.1 * math.cos(3 * k)
+        factor = last_factor if k == 1 else 1.0
+        out.append(
+            {
+                "time": int((end - timedelta(hours=k)).timestamp() * 1000),
+                "open": str(close * factor),
+                "high": str(close * 1.002 * factor),
+                "low": str(close * 0.998 * factor),
+                "close": str(close * factor),
+                "volume": "5",
+            }
+        )
+    return out
+
+
+@pytest.mark.parametrize("limit", [1, 2, 6, 10])
+async def test_short_kraken_windows_are_still_checked_for_bad_prints(ctx_factory: Any, limit: int) -> None:
+    hour = datetime(2026, 10, 21, 10, tzinfo=UTC)
+    candles = _hourly_candles(40, hour, last_factor=50)
+    sent: list[httpx.Request] = []
+    handler = _kraken_handler(candles)
+
+    def recording(req: httpx.Request) -> httpx.Response:
+        sent.append(req)
+        return handler(req)
+
+    ctx, _ = ctx_factory(recording, now=hour + timedelta(minutes=5), cache=False)
+    adapter = KrakenFuturesAdapter(ctx)
+    params = {"symbol": "BTC/USD:USD", "timeframe": "1h", "limit": limit}
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params=params))
+    await adapter.aclose()
+    bars = [b for b in resp.records if isinstance(b, Bar)]
+    assert len(bars) == limit
+    assert max(b.close for b in bars) < 200  # the x50 latest bar is held, never shown
+    assert len(resp.quarantined) == 1
+    charts = next(r for r in sent if "/charts/" in r.url.path)
+    span = int(charts.url.params["to"]) - int(charts.url.params["from"])
+    assert span >= 30 * 3600 - 1  # at least 30 hourly bars of context were requested, whatever the limit
+
+
+async def test_short_twelvedata_and_eia_windows_are_still_checked(ctx_factory: Any) -> None:
+    days = sorted(
+        d for d in (datetime(2026, 10, 20, tzinfo=UTC) - timedelta(days=k) for k in range(60)) if d.weekday() < 5
+    )
+    values = [
+        {
+            "datetime": d.strftime("%Y-%m-%d"),
+            "open": "1.1",
+            "high": "1.2",
+            "low": "1.0",
+            "close": f"{1.1 + 0.002 * math.sin(i)}",
+        }
+        for i, d in enumerate(days)
+    ]
+    for k in ("open", "high", "low", "close"):
+        values[-1][k] = f"{float(values[-1][k]) * 100:.4f}"
+    body = {"meta": {"symbol": "EUR/USD", "type": "Physical Currency"}, "values": values, "status": "ok"}
+    ctx, rec = ctx_factory(lambda _r: httpx.Response(200, json=body), flags={"provider_twelvedata": True}, **SETTINGS)
+    adapter = TwelveDataAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "EUR/USD", "outputsize": 5}))
+    await adapter.aclose()
+    assert int(rec.requests[0].url.params["outputsize"]) >= 30
+    assert len(resp.records) == 5
+    assert all(isinstance(b, Bar) and b.close < 2 for b in resp.records)
+
+    crude = _crude()
+    crude[-1] = (crude[-1] or 0.0) * 0.5
+    ctx, rec = ctx_factory(lambda _r: httpx.Response(200, json=_eia_body(crude)), **SETTINGS)
+    eia = EiaAdapter(ctx)
+    resp = await eia.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1", "length": 4}))
+    await eia.aclose()
+    assert int(rec.requests[0].url.params["length"]) >= 30
+    assert len(resp.records) == 4
+    assert len(resp.quarantined) == 1
+
+
+async def test_short_cot_window_is_still_checked(ctx_factory: Any) -> None:
+    request = _plan(CftcAdapter, RequestKind.COT, report_type="disaggregated", futures_only=None)
+    rows = json.loads(Cassette.load(CASSETTES / "cftc" / cassette_name(request)).interactions[0].body)
+    rows[0] = {
+        k: (str(float(v) * 10) if ("positions" in k or k == "open_interest_all") else v) for k, v in rows[0].items()
+    }
+    ctx, rec = ctx_factory(
+        lambda _r: httpx.Response(200, json=rows),
+        now=Cassette.load(CASSETTES / "cftc" / cassette_name(request)).replay_time,
+    )
+    adapter = CftcAdapter(ctx)
+    params = {"report_type": "disaggregated", "market_code": "067651", "weeks": 4}
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.COT, params=params))
+    await adapter.aclose()
+    assert int(rec.requests[0].url.params["$limit"]) >= 30
+    assert len(resp.records) == 4
+    assert len(resp.quarantined) == 1
+
+
+def _treasury_csv(days: list[datetime], tenyr: list[float]) -> str:
+    header = "Date," + ",".join(COLUMNS)
+    rows = []
+    for k, (d, ten) in enumerate(sorted(zip(days, tenyr, strict=True), reverse=True)):  # newest first, like Treasury
+        base = 3.7 + 0.02 * math.cos(k)
+        curve = [f"{base + 0.05 * i:.2f}" for i in range(len(COLUMNS))]
+        curve[list(COLUMNS).index("10 Yr")] = f"{ten:.2f}"
+        rows.append(d.strftime("%m/%d/%Y") + "," + ",".join(curve))
+    return "\n".join([header, *rows]) + "\n"
+
+
+async def test_early_year_treasury_file_gets_last_year_as_context(ctx_factory: Any) -> None:
+    """In early January the year's file holds a few days; the previous year's file gives the QA its history."""
+    nyse = ExchangeCalendar("XNYS")
+
+    def sessions(start: datetime, end: datetime) -> list[datetime]:
+        out, d = [], start.date()
+        while d <= end.date():
+            out.append(datetime.combine(d, datetime.min.time(), tzinfo=UTC))
+            d = nyse.closes_after(d, 1)[0].date()
+        return out
+
+    last_year = sessions(datetime(2025, 10, 1, tzinfo=UTC), datetime(2025, 12, 31, tzinfo=UTC))
+    this_year = sessions(datetime(2026, 1, 2, tzinfo=UTC), datetime(2026, 1, 9, tzinfo=UTC))
+    level = [4.2 + 0.03 * math.sin(i) for i in range(len(last_year) + len(this_year))]
+    level[-1] *= 2  # the latest 10Y doubled
+    files = {
+        "2025": _treasury_csv(last_year, level[: len(last_year)]),
+        "2026": _treasury_csv(this_year, level[len(last_year) :]),
+    }
+    ctx, rec = ctx_factory(
+        lambda r: httpx.Response(200, text=files[r.url.path.rsplit("/", 2)[-2]]),
+        now=datetime(2026, 1, 9, 23, tzinfo=UTC),
+    )
+    adapter = TreasuryAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.TREASURY_CURVE, params={"year": 2026}))
+    await adapter.aclose()
+    assert [r.url.path.rsplit("/", 2)[-2] for r in rec.requests] == ["2026", "2025"]
+    assert all(isinstance(p, TreasuryYieldPoint) and p.ts.year == 2026 for p in resp.records)  # context not returned
+    held = [p for p in resp.quarantined if isinstance(p, TreasuryYieldPoint)]
+    assert [(p.tenor, p.ts.date().isoformat()) for p in held] == [("10Y", "2026-01-09")]
+    assert resp.as_of == datetime(2026, 1, 8, tzinfo=UTC)  # the newest day with a full, usable curve
+
+
+async def test_exchange_error_bodies_and_corrupt_gzip_count_on_the_breaker(ctx_factory: Any) -> None:
+    request = _plan(KrakenFuturesAdapter, RequestKind.CRYPTO_DERIVATIVES)
+    markets = next(
+        it.body
+        for it in Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request)).interactions
+        if "instruments" in it.url
+    )
+
+    def kraken(req: httpx.Request) -> httpx.Response:
+        if "instruments" in req.url.path:
+            return httpx.Response(200, text=markets)
+        return httpx.Response(200, json={"result": "error", "error": "Unavailable"})
+
+    ctx, _ = ctx_factory(kraken, cache=False)
+    adapter = KrakenFuturesAdapter(ctx)
+    derivatives = DataRequest(kind=RequestKind.CRYPTO_DERIVATIVES, params={"symbols": "BTC/USD:USD"})
+    for _ in range(5):
+        with pytest.raises(ProviderDown, match="exchange error"):
+            await adapter.fetch(derivatives)
+    with pytest.raises(ProviderDown, match="circuit open"):
+        await adapter.fetch(derivatives)
+    await adapter.aclose()
+
+    def garbage(_r: httpx.Request) -> httpx.Response:  # decoded only when read, like a real network response
+        return httpx.Response(200, stream=httpx.ByteStream(b"not gzip at all"), headers={"content-encoding": "gzip"})
+
+    ctx, _ = ctx_factory(garbage, cache=False)
+    cftc = CftcAdapter(ctx)
+    cftc.http._sleep = _record_sleep([])
+    cot = DataRequest(kind=RequestKind.COT, params={"report_type": "tff", "market_code": "099741"})
+    with pytest.raises(ProviderDown, match="DecodingError"):
+        await cftc.fetch(cot)
+    await cftc.aclose()
+    assert (await ctx.breaker.status("cftc")).consecutive_failures >= 1
+
+
+async def test_expiry_week_open_interest_drops_are_not_withheld() -> None:
+    """S&P 500 open interest falls ~23% at the September roll: a genuine move, shown (flagged), not held."""
+    request = _plan(CftcAdapter, RequestKind.COT, report_type="legacy", futures_only=None)
+    resp = await _replay(CftcAdapter, request)
+    assert resp.quarantined == ()
+    dates = {r.as_of.isoformat() for r in resp.records if hasattr(r, "as_of")}
+    assert {"2026-09-22", "2026-09-29"} <= dates
+
+
+async def test_eia_only_weekly_and_unlisted_series_on_release_day(ctx_factory: Any) -> None:
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json={}), **SETTINGS)
+    adapter = EiaAdapter(ctx)
+    with pytest.raises(InvalidArgs, match="weekly"):
+        await adapter.fetch(
+            DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1", "frequency": "monthly"})
+        )
+    await adapter.aclose()
+    body = _eia_body(_crude(), series="WTTSTUS1")
+    wednesday = datetime(2026, 10, 21, 16, tzinfo=UTC)  # released this morning (10:30 ET)
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=body), now=wednesday, **SETTINGS)
+    adapter = EiaAdapter(ctx)
+    resp = await adapter.fetch(
+        DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WTTSTUS1", "route": "petroleum/stoc/wstk"})
+    )
+    await adapter.aclose()
+    assert resp.freshness is not None
+    assert resp.freshness.status is Freshness.FRESH
+
+
+async def test_vendor_error_codes_and_calendar_from_the_answer(ctx_factory: Any) -> None:
+    async def twelve(body: dict[str, Any], now: datetime | None = None, **params: Any) -> DataResponse:
+        ctx, _ = ctx_factory(
+            lambda _r: httpx.Response(200, json=body), now=now, flags={"provider_twelvedata": True}, **SETTINGS
+        )
+        adapter = TwelveDataAdapter(ctx)
+        try:
+            return await adapter.fetch(DataRequest(kind=RequestKind.BARS, params=params))
+        finally:
+            await adapter.aclose()
+
+    with pytest.raises(ProviderDown, match="server error 503"):
+        await twelve({"status": "error", "code": 503, "message": "maintenance"}, symbol="EUR/USD")
+
+    days = [datetime(2026, 10, 15, tzinfo=UTC) - timedelta(days=k) for k in range(40, -1, -1)]  # crypto: every day
+    values = [
+        {
+            "datetime": d.strftime("%Y-%m-%d"),
+            "open": "60000",
+            "high": "61000",
+            "low": "59000",
+            "close": f"{60000 + 50 * math.sin(i)}",
+        }
+        for i, d in enumerate(days)
+    ]
+    body = {"meta": {"symbol": "BTC/USD", "type": "Digital Currency"}, "values": values, "status": "ok"}
+    # Sunday 10-18: two crypto sessions (16th, 17th) have closed since the 15th. On an FX calendar it would be fresh.
+    resp = await twelve(body, now=datetime(2026, 10, 18, 12, tzinfo=UTC), symbol="BTC/USD")
+    assert resp.freshness is not None
+    assert resp.freshness.status is Freshness.STALE
+
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json={"error": "too many requests", "code": 429}), **SETTINGS)
+    adapter = EiaAdapter(ctx)
+    with pytest.raises(RateLimited):
+        await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1"}))
+    await adapter.aclose()
+
+
+def test_weekly_equity_gaps_are_detected() -> None:
+    mondays = [datetime(2026, 6, 1, tzinfo=UTC) + timedelta(weeks=k) for k in range(20) if k != 7]
+    bars = [
+        Bar(symbol="AAPL", interval="1w", ts=m, open=100, high=101, low=99, close=100 + 0.1 * i)
+        for i, m in enumerate(mondays)
+    ]
+    res = check_interval_gaps(bars, timedelta(weeks=1), ExchangeCalendar("XNYS"))
+    assert not res.passed
+    assert "1 of 20" in res.detail
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["app_key", "appid", "subscription-key", "Ocp-Apim-Subscription-Key", "X-Amz-Signature", "X-Amz-Credential",
+     "AWSAccessKeyId", "privatekey", "hmac"],
+)  # fmt: skip
+def test_round4_credential_names_are_redacted(name: str) -> None:
     assert redact_params({name: "v" * 12}) == {name: "REDACTED"}

@@ -26,11 +26,19 @@ from rd_data.adapters.base import (
 from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown, RateLimited
 from rd_data.freshness import ContinuousCalendar, ExchangeCalendar, TradingCalendar, WeekdayCalendar
 from rd_data.licence import byo_key_only
-from rd_data.quality import DataQualityReport, check_bars, check_provider_order
+from rd_data.quality import QA_CONTEXT, DataQualityReport, check_bars, check_provider_order
 from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, Bar, DataType
 
 INTERVALS: Mapping[str, str] = {"1h": "1h", "4h": "4h", "1d": "1day", "1w": "1week"}
+#: Twelve Data ``meta.type`` -> our asset class (decides the trading calendar).
+META_TYPES: Mapping[str, str] = {
+    "Digital Currency": "crypto",
+    "Physical Currency": "fx",
+    "Common Stock": "equity",
+    "ETF": "equity",
+    "Index": "equity",
+}
 WIDTHS: Mapping[str, timedelta] = {
     "1h": timedelta(hours=1),
     "4h": timedelta(hours=4),
@@ -85,7 +93,8 @@ class TwelveDataAdapter(BaseAdapter):
         params: dict[str, Any] = {
             "symbol": str(request.params["symbol"]),
             "interval": INTERVALS[str(request.params.get("interval", "1d"))],
-            "outputsize": int(request.params.get("outputsize", 200)),
+            # never fewer than QA_CONTEXT bars, so the latest bar is checked for bad prints; trimmed after QA
+            "outputsize": max(int(request.params.get("outputsize", 200)), QA_CONTEXT),
             "timezone": "UTC",
             "order": "ASC",
             "apikey": self._api_key(),
@@ -96,26 +105,19 @@ class TwelveDataAdapter(BaseAdapter):
     def _parse(self, request: DataRequest, raw: RawPayload) -> ParseResult:
         body = orjson.loads(raw.bodies[0])
         if body.get("status") == "error":
-            code = int(body.get("code", 0) or 0)
-            message = str(body.get("message", "error"))
-            if code == 429:
-                raise RateLimited(f"twelvedata: {message}", provider=self.name)
-            if code in (401, 403):
-                raise ProviderDown(
-                    f"twelvedata: authorization rejected ({code}); check the API key or plan", provider=self.name
-                )
-            if code == 404 or "not found" in message.lower():
-                raise NotFound(f"twelvedata: {message}", provider=self.name)
-            raise InvalidArgs(f"twelvedata: {message}", provider=self.name)
+            raise _error(body)
         symbol = str(request.params["symbol"])
-        answered = str((body.get("meta") or {}).get("symbol", ""))
+        meta = body.get("meta") or {}
+        answered = str(meta.get("symbol", ""))
         if answered.upper() != symbol.upper():
             raise DataQualityError(
                 f"twelvedata: response is for symbol {answered!r}, request was {symbol!r}", provider=self.name
             )
         interval = str(request.params.get("interval", "1d"))
         width = WIDTHS[interval]
-        asset_class = str(request.params.get("asset_class", "fx"))
+        # The instrument type comes from the vendor's answer, never from the caller: a crypto pair judged on the FX
+        # calendar would look fresh over a weekend it actually traded through.
+        asset_class = META_TYPES.get(str(meta.get("type", "")), str(request.params.get("asset_class", "fx")))
         cal = calendar_for(asset_class)
         # Judge "still forming" and "market open" at the moment the payload was fetched, not now: a cached payload
         # re-parsed later must not turn the partial bar it holds into a final close.
@@ -159,7 +161,11 @@ class TwelveDataAdapter(BaseAdapter):
             split_dates=[] if asset_class == "equity" else None,
         )
         report = DataQualityReport(report.subject, (order, *report.checks), report.quarantined, report.record_count)
-        quarantined = tuple(b for b in bars if b not in usable)
+        wanted = int(request.params.get("outputsize", 200))
+        window = usable[-wanted:]
+        first = window[0].ts if window else (bars[-1].ts if bars else fetched)
+        quarantined = tuple(b for b in bars if b not in usable and b.ts >= first)
+        usable = window
         as_of = usable[-1].ts if usable else None
         delay = self.licence.delay_minutes  # the plan's delay, from the recorded terms, never from the caller
         if interval == "1d":
@@ -183,3 +189,20 @@ def _closes_at(ts: datetime, interval: str, width: timedelta, cal: TradingCalend
     if interval == "1d":
         return cal.closes_after(ts.date() - timedelta(days=1), 1)[0]
     return ts + width
+
+
+def _error(body: Mapping[str, Any]) -> Exception:
+    """Twelve Data answers errors with HTTP 200 and ``{"status": "error", "code": ..., "message": ...}``."""
+    code = int(body.get("code", 0) or 0)
+    message = str(body.get("message", "error"))
+    if code == 429:
+        return RateLimited(f"twelvedata: {message}", provider="twelvedata")
+    if code >= 500:
+        return ProviderDown(f"twelvedata: server error {code}: {message}", provider="twelvedata")
+    if code in (401, 403):
+        return ProviderDown(
+            f"twelvedata: authorization rejected ({code}); check the API key or plan", provider="twelvedata"
+        )
+    if code == 404 or "not found" in message.lower():
+        return NotFound(f"twelvedata: {message}", provider="twelvedata")
+    return InvalidArgs(f"twelvedata: {message}", provider="twelvedata")

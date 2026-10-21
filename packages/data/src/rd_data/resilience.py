@@ -259,6 +259,8 @@ class MemoryStateStore:
 #: The half-open probe held by the current task. An adapter sets it for a whole fetch, so every HTTP call of that
 #: fetch (FRED: series + observations; Kraken: instruments + data) belongs to the one probe it was admitted with.
 PROBE_TOKEN: ContextVar[str | None] = ContextVar("rd_probe_token", default=None)
+#: Upper bound on one fetch: the 60 s retry-wait budget plus per-attempt timeouts.
+PROBE_MAX_FETCH_S = 300
 
 
 class CircuitBreaker:
@@ -296,9 +298,10 @@ class CircuitBreaker:
             key = self._k(provider, "probe")
             if token is not None and await self._store.get(key) == token:
                 return  # a later call of the fetch that already holds the probe
-            got_probe = await self._store.set(
-                key, token or "probe", ttl_s=max(1, int(self._cooldown)), only_if_absent=True
-            )
+            # The probe outlives the slowest possible fetch (retry budget + timeouts), so no second probe is admitted
+            # while the first is still running.
+            ttl = int(self._cooldown + PROBE_MAX_FETCH_S)
+            got_probe = await self._store.set(key, token or "probe", ttl_s=ttl, only_if_absent=True)
             if got_probe:
                 return
         raise ProviderDown(f"circuit open for {provider} (last error: {status.last_error})", provider=provider)

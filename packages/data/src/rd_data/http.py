@@ -63,10 +63,27 @@ SECRET_PARAMS = frozenset(
         "authorization",
         "access_key_id",
         "secret_access_key",
+        "app_key",
+        "appkey",
+        "appid",
+        "app_id",
+        "privatekey",
+        "hmac",
+        "awsaccesskeyid",
     }
 )
 #: Name endings that always mean a credential (``x_auth_token``, ``client_secret``, ``db_password``).
-SECRET_SUFFIXES = ("_token", "_secret", "_password", "_passphrase", "_private_key")
+SECRET_SUFFIXES = (
+    "_token",
+    "_secret",
+    "_password",
+    "_passphrase",
+    "_private_key",
+    "_key_id",
+    "_signature",
+    "_credential",
+    "subscription_key",
+)
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 REDACTED_PARAM = "REDACTED"
 #: Secrets shorter than this are not scrubbed from bodies (too likely to match ordinary text).
@@ -193,7 +210,7 @@ class HttpFetcher:
                 if size > self._max_body:
                     await self._breaker.record_failure(self.provider, "response too large")
                     raise ProviderDown(
-                        f"{self.provider}: response larger than {self._max_body // (1024 * 1024)} MB refused",
+                        f"{self.provider}: response larger than {self._max_body:,} bytes refused",
                         provider=self.provider,
                     )
                 chunks.append(chunk)
@@ -229,7 +246,9 @@ class HttpFetcher:
             started = time.perf_counter()
             try:
                 status, resp_headers, body = await self._fetch_capped(url, params, headers)
-            except httpx.TransportError as exc:
+            except httpx.RequestError as exc:
+                # Connection failures and bodies that cannot be decoded (a corrupt gzip stream) alike: the
+                # provider did not deliver a usable response, which counts against the circuit breaker.
                 last_error = f"{type(exc).__name__}"
                 self._log.warning(
                     "provider.transport_error", provider=self.provider, url=shown, attempt=attempt, error=last_error

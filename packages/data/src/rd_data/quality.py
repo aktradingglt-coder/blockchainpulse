@@ -19,6 +19,9 @@ from rd_data.errors import DataQualityError
 from rd_data.freshness import TradingCalendar
 from rd_data.schemas import Bar, MacroObservation, PositioningReport
 
+#: History every series adapter fetches at minimum, whatever window was asked for, so that bad-print and stock-move
+#: checks always have enough context (they need 11 points); the response is trimmed to the request afterwards.
+QA_CONTEXT = 30
 #: Robust z-score (median absolute deviation) above which a return is an outlier.
 OUTLIER_Z = 10.0
 #: Consecutive identical closes that make a quote stale while the market is open.
@@ -200,6 +203,8 @@ MAX_BAD_RUN = 2
 LONG_BAD_RUN = 5
 #: A single-bar price move beyond x10 (or ÷10) is implausible for any instrument we cover (D-031).
 IMPLAUSIBLE_LOG_MOVE = math.log(10.0)
+#: A week-on-week open-interest move beyond x3 (or /3) is a corrupted row, not an expiry roll.
+OI_IMPLAUSIBLE_LOG_MOVE = math.log(3.0)
 
 
 @dataclass(frozen=True)
@@ -278,7 +283,9 @@ def check_price_spikes(closes: Sequence[float], *, threshold: float = OUTLIER_Z)
     confirm it. Confirmed level shifts are kept and reported as a warning.
     """
     if len(closes) < 11 or any(c <= 0 for c in closes):
-        skipped = _ok("price_spikes", "fewer than 11 positive closes: not evaluated", blocking=False)
+        skipped = _fail(
+            "price_spikes", "fewer than 11 positive closes: bad prints could not be checked", blocking=False
+        )
         return skipped, _ok("large_moves", "not evaluated", blocking=False)
     scan = scan_spikes([math.log(c) for c in closes], threshold=threshold, implausible=IMPLAUSIBLE_LOG_MOVE)
     quarantined = tuple(sorted({*scan.bad_prints, *scan.unconfirmed}))
@@ -427,7 +434,7 @@ def check_interval_gaps(
     for prev, cur in itertools.pairwise(bars):
         t, steps = prev.ts + width, 0
         while t < cur.ts and steps < 10_000:
-            if calendar.is_open(t):
+            if _trades_during(calendar, t, width):
                 missing.append(t)
             t, steps = t + width, steps + 1
     expected = len(bars) + len(missing)
@@ -436,6 +443,15 @@ def check_interval_gaps(
         detail += f" (e.g. {', '.join(m.isoformat() for m in missing[:3])})"
         return _fail("calendar_gaps", detail, blocking=len(missing) / expected > max_gap_fraction)
     return _ok("calendar_gaps", detail)
+
+
+def _trades_during(calendar: TradingCalendar, start: datetime, width: timedelta) -> bool:
+    """Whether a bar starting at ``start`` should exist: the market is open at its start (intraday), or a session
+    falls inside it (bars a day or wider, e.g. a weekly bar labelled Monday 00:00 UTC for an exchange)."""
+    if width < timedelta(days=1):
+        return calendar.is_open(start)
+    first_close = calendar.closes_after(start.date() - timedelta(days=1), 1)[0]
+    return _session_of_close(first_close, calendar) < (start + width).date()
 
 
 def _session_of_close(close: datetime, calendar: TradingCalendar) -> date:
@@ -598,8 +614,16 @@ def check_open_interest_moves(reports: Sequence[PositioningReport]) -> tuple[Che
     levels = [r.open_interest for r in reports]
     if any(v <= 0 for v in levels):
         return _ok("open_interest_outliers", "not evaluated", blocking=False), _ok("large_moves", blocking=False)
-    scan = scan_spikes([math.log(v) for v in levels], implausible=IMPLAUSIBLE_LOG_MOVE)
-    held = tuple(sorted({*scan.bad_prints, *scan.unconfirmed}))
+    logs = [math.log(v) for v in levels]
+    scan = scan_spikes(logs, implausible=IMPLAUSIBLE_LOG_MOVE)
+
+    def implausible(i: int) -> bool:
+        # Quarterly expiry routinely moves open interest by 20-40% in a week (and it rebuilds afterwards); only a
+        # move beyond x3 / /3 is a corruption rather than a roll.
+        neighbours = [abs(logs[i] - logs[j]) for j in (i - 1, i + 1) if 0 <= j < len(logs)]
+        return max(neighbours, default=0.0) > OI_IMPLAUSIBLE_LOG_MOVE
+
+    held = tuple(sorted(i for i in {*scan.bad_prints, *scan.unconfirmed} if implausible(i)))
     quarantine = (
         _fail("open_interest_outliers", f"{len(held)} week(s) quarantined", blocking=False, indices=held)
         if held

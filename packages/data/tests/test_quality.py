@@ -309,7 +309,8 @@ def test_robust_z_helpers() -> None:
     # MAD is 0 when most values are equal: the mean absolute deviation takes over as the scale.
     assert robust_z_scores([1.0, 1.0, 1.0, 1.0, 5.0])[4] == pytest.approx(4 / (1.253314 * 0.8))
     skipped, _ = check_price_spikes([1.0, 2.0])
-    assert "not evaluated" in skipped.detail
+    assert "could not be checked" in skipped.detail
+    assert not skipped.passed  # an unchecked series says so in the warnings, never silently
     assert not scan_spikes([1.0] * 5).evaluated
 
 

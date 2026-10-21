@@ -24,9 +24,10 @@ from rd_data.adapters.base import (
     as_float,
     require_param,
 )
-from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown
+from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown, RateLimited
 from rd_data.licence import public_domain
 from rd_data.quality import (
+    QA_CONTEXT,
     CheckResult,
     DataQualityReport,
     check_cadence,
@@ -66,13 +67,10 @@ SERIES: Mapping[str, SeriesInfo] = {
     "NW2_EPG0_SWO_R48_BCF": SeriesInfo("natural-gas/stor/wkly", _WNGSR, 0.0, 6_000.0),  # Lower-48 storage, Bcf
 }
 SERIES_ROUTES: Mapping[str, str] = {k: v.route for k, v in SERIES.items()}
-#: For series outside the catalogue: the latest a value of that frequency can be released after its period date.
-DEFAULT_RELEASE_LAG: Mapping[str, timedelta] = {
-    "weekly": timedelta(days=7),
-    "monthly": timedelta(days=62),
-    "quarterly": timedelta(days=120),
-    "annual": timedelta(days=400),
-}
+#: Release lag assumed for weekly series outside the catalogue: the earliest weekly schedule (Wednesday 15:30 UTC
+#: after the week-ending Friday). Assuming the earliest never refuses a genuine release as "not yet published"; a
+#: series released on Thursday is at worst labelled stale a day early.
+DEFAULT_RELEASE_LAG: Mapping[str, timedelta] = {"weekly": _WPSR}
 _PERIODS: Mapping[str, timedelta] = {"weekly": timedelta(days=7)}
 
 
@@ -103,7 +101,9 @@ class EiaAdapter(BaseAdapter):
             raise InvalidArgs("eia: length must be an integer between 1 and 5000", provider=self.name)
         frequency = str(request.params.get("frequency", "weekly"))
         if frequency not in DEFAULT_RELEASE_LAG:
-            raise InvalidArgs(f"eia: frequency must be one of {sorted(DEFAULT_RELEASE_LAG)}", provider=self.name)
+            # Monthly/quarterly/annual EIA periods (YYYY-MM, YYYY-Qn, YYYY) and release calendars are not modelled
+            # yet; refusing is better than mis-dating them.
+            raise InvalidArgs("eia: only weekly series are supported", provider=self.name)
 
     async def _download(self, request: DataRequest) -> RawPayload:
         series = str(request.params["series"])
@@ -118,7 +118,8 @@ class EiaAdapter(BaseAdapter):
             "sort[0][column]": "period",
             "sort[0][direction]": "desc",
             "offset": 0,
-            "length": int(request.params.get("length", 260)),
+            # never fewer than QA_CONTEXT weeks, so the latest week is checked against its history; trimmed after QA
+            "length": max(int(request.params.get("length", 260)), QA_CONTEXT),
         }
         result = await self.http.get(f"https://api.eia.gov/v2/{route}/data/", params)
         return RawPayload.from_results([result], self.ctx.clock.now())
@@ -184,6 +185,11 @@ class EiaAdapter(BaseAdapter):
             DataQualityReport(report.subject, (*report.checks, *extra), report.quarantined, report.record_count),
             rejected,
         )
+        wanted = int(request.params.get("length", 260))
+        window = usable[-wanted:]
+        first = window[0].ts if window else (obs[-1].ts if obs else raw.retrieved_at)
+        held = tuple(o for o in obs if o not in usable and o.ts >= first)
+        usable = window
         reported = [o for o in usable if o.value is not None]
         if usable and not reported:
             raise DataQualityError(
@@ -199,7 +205,7 @@ class EiaAdapter(BaseAdapter):
             latest,
             FreshnessSpec(DataType.MACRO_RELEASE, release_frequency=frequency),
             source_tz="America/New_York",
-            quarantined=tuple(o for o in obs if o not in usable),
+            quarantined=held,
             notes=(
                 "Weekly values refer to the week ending on the period date; EIA releases them "
                 "the following Wednesday (petroleum) or Thursday (natural gas). Freshness is judged from that release.",
@@ -223,6 +229,8 @@ def _error(payload: Mapping[str, Any], provider: str) -> Exception:
     except (TypeError, ValueError):
         code = 0
     lowered = message.lower()
+    if code == 429 or "rate limit" in lowered:
+        return RateLimited(f"eia: {message}", provider=provider)
     if code in (401, 403) or code >= 500 or "api_key" in lowered or "unavailable" in lowered:
         return ProviderDown(f"eia: {message}", provider=provider)
     return InvalidArgs(f"eia: {message}", provider=provider)

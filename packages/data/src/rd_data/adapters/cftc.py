@@ -27,6 +27,7 @@ from rd_data.adapters.base import (
 from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
 from rd_data.quality import (
+    QA_CONTEXT,
     DataQualityReport,
     check_cadence,
     check_open_interest_moves,
@@ -159,7 +160,8 @@ class CftcAdapter(BaseAdapter):
         params = {
             "$where": f"cftc_contract_market_code='{code}'",
             "$order": "report_date_as_yyyy_mm_dd DESC",
-            "$limit": int(request.params.get("weeks", 156)),
+            # never fewer than QA_CONTEXT weeks, so the latest week is checked against its history; trimmed after QA
+            "$limit": max(int(request.params.get("weeks", 156)), QA_CONTEXT),
         }
         result = await self.http.get(f"{self.base_url}/{self._dataset(request)}.json", params)
         return RawPayload.from_results([result], self.ctx.clock.now())
@@ -199,8 +201,11 @@ class CftcAdapter(BaseAdapter):
             ),
             rejected,
         )
-        quarantined = tuple(r for i, r in enumerate(records) if i in set(oi_outliers.indices))
+        held = [r for i, r in enumerate(records) if i in set(oi_outliers.indices)]
         records = [r for i, r in enumerate(records) if i not in set(oi_outliers.indices)]
+        records = records[-int(request.params.get("weeks", 156)) :]
+        first = records[0].as_of if records else (held[-1].as_of if held else None)
+        quarantined = tuple(r for r in held if first is None or r.as_of >= first)
         as_of = records[-1].as_of if records else None
         released = release_time(as_of) if as_of else None
         return ParseResult(

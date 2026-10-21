@@ -244,10 +244,11 @@ CSV = (
 
 
 async def test_treasury_curve(ctx_factory: Any) -> None:
-    ctx, rec = ctx_factory(
-        lambda _r: httpx.Response(200, text=CSV.replace("not a date,1,1,1,1,1,1,1,1,1,1,1,1,1,1\n", ""))
-    )
+    this_year = CSV.replace("not a date,1,1,1,1,1,1,1,1,1,1,1,1,1,1\n", "")
+    header_only = CSV.splitlines()[0] + "\n"  # previous year's file, fetched as QA context for a short year
+    ctx, rec = ctx_factory(lambda r: httpx.Response(200, text=this_year if "/2026/" in r.url.path else header_only))
     resp = await TreasuryAdapter(ctx).fetch(DataRequest(kind=RequestKind.TREASURY_CURVE, params={"year": 2026}))
+    assert [r.url.path.rsplit("/", 2)[-2] for r in rec.requests] == ["2026", "2025"]
     assert len(resp.records) == 27  # 4M missing on 2026-10-20
     tenyr = [p for p in of_type(resp.records, TreasuryYieldPoint) if p.tenor == "10Y"]
     assert [p.yield_pct for p in tenyr] == [3.86, 3.85]
