@@ -34,6 +34,8 @@ _SENSITIVE_WORDS = frozenset(
         "sessionid",
         "jwt",
         "bearer",
+        "auth",
+        "pgpassword",
     }
 )
 _SENSITIVE_PAIRS = frozenset(
@@ -66,7 +68,10 @@ _VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
 )
 # user:password@ — the user part may be empty (redis://:password@host).
-_URL_CREDENTIALS = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<user>[^:/@\s]*):(?P<pw>[^@\s]+)@")
+# The password may itself contain "@" or "/": it runs to the last "@" before the host.
+_URL_CREDENTIALS = re.compile(
+    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<user>[^:/@\s]*):(?P<pw>\S+)@(?=[^@\s]*(?:\s|$))"
+)
 # Key-only URL credentials such as Sentry DSNs (https://<hex key>@host/project).
 _URL_KEY_ONLY = re.compile(r"(?P<scheme>https?://)[0-9a-f]{32}@")
 _QUERY_SECRET = re.compile(
@@ -80,9 +85,17 @@ _AUTH_HEADER = re.compile(
 )
 _KEY_VALUE = re.compile(
     r"(?i)(?P<k>(?P<q>[\"']?)\b(?:x-api-key|api[_-]?key|apikey|aws_secret_access_key|client[_-]?secret|"
-    r"secret[_-]?key|password|passwd)\b(?P=q)\s*[:=]\s*)(?P<vq>[\"']?)(?P<v>[^\s\"',;&]+)"
+    r"secret[_-]?key|password|passwd|passphrase|pass|pgpassword|secret|token|[a-z0-9]+_(?:password|passwd|auth|"
+    r"token|secret))\b(?P=q)\s*[:=]\s*)(?P<v>\"[^\"]*\"|'[^']*'|[^\s\"',;&]+)"
 )
+_COOKIE_HEADER = re.compile(r"(?im)(?P<k>\b(?:set-)?cookie\s*:\s*)[^\r\n]+")
 _DISCORD_WEBHOOK = re.compile(r"(https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/)[\w-]+")
+
+
+def _mask_key_value(m: re.Match[str]) -> str:
+    value = m.group("v")
+    quote = value[0] if value[:1] in ("'", '"') else ""
+    return f"{m.group('k')}{quote}{REDACTED}{quote}"
 
 
 def redact_text(text: str) -> str:
@@ -96,7 +109,8 @@ def redact_text(text: str) -> str:
     out = _AUTH_HEADER.sub(
         lambda m: f"{m.group('k')}{(m.group('scheme') + ' ') if m.group('scheme') else ''}{REDACTED}", out
     )
-    out = _KEY_VALUE.sub(lambda m: f"{m.group('k')}{m.group('vq')}{REDACTED}", out)
+    out = _KEY_VALUE.sub(_mask_key_value, out)
+    out = _COOKIE_HEADER.sub(lambda m: f"{m.group('k')}{REDACTED}", out)
     return _DISCORD_WEBHOOK.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
 
 
@@ -111,6 +125,13 @@ def is_sensitive_key(key: str) -> bool:
     return any(pair in _SENSITIVE_PAIRS for pair in itertools.pairwise(words))
 
 
+def _is_secret_like(value: Any) -> bool:  # noqa: ANN401 - inspects arbitrary values
+    """Numbers, booleans and empty values under a sensitive-looking key (e.g. token_count) are not secrets."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return False
+    return not (isinstance(value, str) and value == "")
+
+
 def redact(value: Any, *, _depth: int = 0) -> Any:  # noqa: ANN401 - structurally generic by design
     """Recursively redact mappings, sequences and strings. Non-container scalars pass through."""
     if _depth > 32:
@@ -121,7 +142,7 @@ def redact(value: Any, *, _depth: int = 0) -> Any:  # noqa: ANN401 - structurall
         return {
             k: (
                 REDACTED
-                if isinstance(k, str) and is_sensitive_key(k) and v not in (None, "")
+                if isinstance(k, str) and is_sensitive_key(k) and _is_secret_like(v)
                 else redact(v, _depth=_depth + 1)
             )
             for k, v in value.items()

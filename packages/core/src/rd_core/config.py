@@ -93,12 +93,21 @@ class SelfHostedLicence(_Strict):
     offline_grace_days: int = Field(gt=0)
 
 
+class CostAssumptions(_Strict):
+    status: Literal["pre_measurement", "measured"]
+    llm_cost_per_credit_usd_high: float = Field(gt=0)
+    house_reports_cost_per_seat_month_usd: float = Field(ge=0)
+    merchant_fee_pct: float = Field(ge=0, lt=1)
+    merchant_fee_fixed_usd: float = Field(ge=0)
+
+
 class Commercial(_Strict):
     trial_days: int = Field(gt=0)
     min_gross_margin: float = Field(gt=0, lt=1)
     billing_provider: Literal["paddle", "lemonsqueezy"]
     billing_fallback_provider: Literal["paddle", "lemonsqueezy"]
     pricing_status: Literal["proposed", "confirmed"]
+    cost_assumptions: CostAssumptions
     credits: Credits
     tiers: list[Tier]
     self_hosted_licence: SelfHostedLicence
@@ -113,6 +122,15 @@ class Commercial(_Strict):
         return self
 
 
+def gross_margin(
+    price: float, *, months: int, llm_cost_month: float, house_cost_month: float, fee_pct: float, fee_fixed: float
+) -> float:
+    """Gross margin of one billing period: (revenue - LLM - amortised house research - merchant fee) / revenue."""
+    revenue = price
+    cost = months * (llm_cost_month + house_cost_month) + fee_pct * price + fee_fixed
+    return (revenue - cost) / revenue
+
+
 class ProductConfig(_Strict):
     schema_version: Literal[1]
     identity: Identity
@@ -121,6 +139,28 @@ class ProductConfig(_Strict):
     markets: Markets
     defaults: Defaults
     commercial: Commercial
+
+    def tier_margins(self) -> dict[str, tuple[float, float]]:
+        """(monthly, annual) gross margin per paid tier at p90 usage = every credit spent at the high cost bound."""
+        c = self.commercial
+        a = c.cost_assumptions
+        out: dict[str, tuple[float, float]] = {}
+        for tier in c.tiers:
+            if tier.price_usd_month == 0:
+                continue
+            llm = tier.credits_month * a.llm_cost_per_credit_usd_high
+            house = a.house_reports_cost_per_seat_month_usd * tier.seats
+            kw = {
+                "llm_cost_month": llm,
+                "house_cost_month": house,
+                "fee_pct": a.merchant_fee_pct,
+                "fee_fixed": a.merchant_fee_fixed_usd,
+            }
+            out[tier.id] = (
+                gross_margin(tier.price_usd_month, months=1, **kw),
+                gross_margin(tier.price_usd_year, months=12, **kw),
+            )
+        return out
 
 
 class ModelSpec(_Strict):

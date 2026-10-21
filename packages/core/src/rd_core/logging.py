@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from collections.abc import MutableMapping
+from types import TracebackType
 from typing import Any
 
 import orjson
@@ -90,7 +92,31 @@ def configure_logging(*, service: str, level: str = "INFO", fmt: str = "json") -
         lib_logger.propagate = True
     # uvicorn's access log would print raw request lines (full query strings); the API logs requests itself.
     logging.getLogger("uvicorn.access").disabled = True
+    _install_excepthooks()
     _configured = True
+
+
+def _log_uncaught(exc_type: type[BaseException], exc: BaseException, tb: TracebackType | None) -> None:
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc, tb)
+        return
+    structlog.get_logger("rd.uncaught").critical("process.uncaught_exception", exc_info=(exc_type, exc, tb))
+
+
+def _log_thread_uncaught(args: threading.ExceptHookArgs) -> None:
+    if args.exc_value is None:
+        return
+    structlog.get_logger("rd.uncaught").critical(
+        "thread.uncaught_exception",
+        thread=args.thread.name if args.thread else None,
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+    )
+
+
+def _install_excepthooks() -> None:
+    """Uncaught exceptions are logged as redacted JSON instead of raw tracebacks on stderr."""
+    sys.excepthook = _log_uncaught
+    threading.excepthook = _log_thread_uncaught
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:

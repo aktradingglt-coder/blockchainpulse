@@ -13,7 +13,8 @@ keywords = ["sk-ant-"]
 [[rules]]
 id = "url-embedded-password"
 description = "Credentials embedded in a connection URL (user part may be empty, e.g. redis://:pw@host)"
-regex = '''[a-z][a-z0-9+.\-]*://[^:/@\s]*:([^@\s$]{8,})@[^\s]+'''
+# The password may contain "@", "/" or "$" (but not a "${VAR}" placeholder); it runs to the last "@" before the host.
+regex = '''[a-z][a-z0-9+.\-]*://[^:/@\s]*:((?:[^\s$]|\$[^{\s]){8,})@[^@\s]+'''
 secretGroup = 1
 entropy = 3.0
 keywords = ["://"]
@@ -39,6 +40,13 @@ regex = '''(?:^|[^\d])(\d{6,12}:[A-Za-z0-9_\-]{30,})'''
 secretGroup = 1
 entropy = 3.0
 keywords = [":"]
+
+[[rules]]
+id = "paddle-key"
+description = "Paddle API key or notification (webhook) secret"
+regex = '''\b(pdl_[a-z0-9]+_[A-Za-z0-9_]{16,})'''
+secretGroup = 1
+keywords = ["pdl_"]
 
 [allowlist]
 description = "Lockfiles hold integrity hashes, not secrets"

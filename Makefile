@@ -76,12 +76,12 @@ typecheck: ## mypy --strict, tsc --noEmit
 	$(WEB) typecheck
 
 .PHONY: test
-test: ## Unit tests (no services needed)
+test: tools ## Unit tests (no services needed)
 	$(UV) run pytest -m "not integration"
 	$(WEB) test
 
 .PHONY: test-integration
-test-integration: .env ## Integration tests against the dev stack's Postgres/Valkey (run `make dev` first)
+test-integration: .env tools ## Integration tests against the dev stack's Postgres/Valkey (run `make dev` first)
 	set -a; source .env; set +a; $(UV) run pytest -m integration
 
 .PHONY: secrets-scan
@@ -100,7 +100,7 @@ licences: ## Dependency licence gate (allow-list + reviewed exceptions)
 	$(UV) run python scripts/check_licences.py
 
 .PHONY: coverage
-coverage: .env ## Unit + integration tests with the coverage gate (needs the running stack)
+coverage: .env tools ## Unit + integration tests with the coverage gate (needs the running stack)
 	rm -f .coverage .coverage.*
 	set -a; source .env; set +a; $(UV) run pytest --cov --cov-report=term-missing --cov-report=xml --cov-report=json
 	$(UV) run python scripts/check_coverage.py

@@ -27,11 +27,11 @@ Browser ↔ web/API (internet) · API ↔ billing provider webhooks (internet) �
 | API | **S** forged tokens | JWT via JWKS verification, short expiry | P7 |
 | API | **T** CSRF on cookie-auth routes | SameSite cookies + CSRF token for state-changing routes | P7 |
 | API | **R** disputed credit spend / admin action | Append-only audit log for admin, billing, entitlement, licence events | P7 |
-| API | **I** data leak across tenants | Org-scoped repository layer + Postgres RLS + isolation tests | P7 |
+| API | **I** data leak across tenants | Org-scoped repository layer + Postgres RLS + isolation tests; the application connects as a dedicated non-superuser, non-owner role (superusers and table owners bypass RLS) | P7 (dev stack currently connects as the database owner) |
 | API | **I** stack traces / secrets in responses or logs | Generic error bodies; every logger (incl. uvicorn, dramatiq supervisor and children, alembic, sqlalchemy) routed through structlog JSON with redaction; uvicorn access log disabled, access events log the route template only; settings validation never echoes input (`hide_input_in_errors`) and start-up failures print one redacted JSON line | Done: `test_redaction.py`, `test_logging_tracing.py`, `apps/api/tests/test_uvicorn_logging.py`, `packages/core/tests/test_startup_errors.py` |
 | API | **D** request floods, credit-burning abuse | Rate limits per user/IP/token, abuse detection, budgets per run | P7/P11 |
 | API | **E** privilege escalation via admin routes | Role checks + MFA-required admin scope, authz matrix tests | P7 |
-| API | **I** browser cross-origin reads | Strict CORS allow-list from settings | Done: `test_cors_allows_only_configured_origins` |
+| API | **I** browser cross-origin reads | Strict CORS allow-list from settings; wildcards rejected; https-only origins in staging/production | Done: `test_cors_allows_only_configured_origins`, `test_cors_wildcards_rejected`, `test_cors_requires_https_in_production` |
 | Billing webhooks | **S/T** forged or replayed events | HMAC signature verification over raw body, timestamp tolerance, event-ID idempotency store | P7 |
 | Worker / agents | **T** prompt injection via news/filings | Untrusted wrapping; tool-less readers; injection evals at 100% | P3–P5 |
 | Worker / agents | **I** model writes invented numbers | Numeric binding, number linter, verifier, direction checks | P3–P5 |
@@ -47,7 +47,7 @@ Browser ↔ web/API (internet) · API ↔ billing provider webhooks (internet) �
 | Self-hosted licence | **S/T** forged or tampered licence | Ed25519 signatures, public key compiled in, fails closed | P10 |
 | Self-hosted updates | **T** malicious update | Signed release manifests verified before apply | P10 |
 | BYO keys | **I** leakage of customer vendor keys | Envelope encryption at rest, never logged, redaction | P7/P10 |
-| Observability | **I** secrets in traces/Sentry | Sentry `before_send` redaction, `send_default_pii=False`; spans carry IDs not payloads | Done (P0 config) |
+| Observability | **I** secrets in traces/Sentry | Every span exporter is wrapped by `RedactingSpanExporter`: URL attributes lose their query string, `url.query` is dropped, sensitive keys and secret-shaped text are masked; Sentry `before_send` redaction, `send_default_pii=False` | Done: `apps/api/tests/test_tracing_redaction.py` (real app, planted query secret absent from exported spans) |
 
 ## Open questions for P11 review
 

@@ -16,7 +16,7 @@ def _load(name: str) -> ModuleType:
     return module
 
 
-def test_package_coverage_aggregates_lines_and_branches() -> None:
+def test_package_coverage_separates_lines_and_branches() -> None:
     cov = _load("check_coverage")
     report = {
         "files": {
@@ -31,10 +31,11 @@ def test_package_coverage_aggregates_lines_and_branches() -> None:
         }
     }
     result = cov.package_coverage(report)
-    assert result["rd_core"] == 100.0 * 19 / 22
-    assert result["rd_worker"] == 0.0
+    assert result["rd_core"] == (100.0 * 18 / 20, 50.0)
+    assert result["rd_worker"] == (0.0, 100.0)
     assert set(result) == {"rd_core", "rd_worker"}
     assert "rd_quant" in cov.STRICT
+    assert {"rd_core", "rd_db", "rd_api", "rd_worker", "rd_scheduler"} <= cov.workspace_packages()
 
 
 def test_worker_launcher_always_skips_dramatiq_logging() -> None:

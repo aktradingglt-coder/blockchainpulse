@@ -19,11 +19,16 @@ broker.add_middleware(HeartbeatMiddleware(_runtime.settings, service=SERVICE))
 _log = get_logger(__name__)
 
 
+def validate_nonce(nonce: str) -> str:
+    if not nonce or len(nonce) > 64 or not nonce.isalnum():
+        raise ValueError("nonce must be 1-64 alphanumeric characters")
+    return nonce
+
+
 @dramatiq.actor(queue_name=QUEUE_DEFAULT, max_retries=3)
 async def system_echo(nonce: str) -> None:
     """End-to-end pipeline probe: API/CLI enqueues a nonce, the worker writes it back to Redis."""
-    if not nonce or len(nonce) > 64 or not nonce.isalnum():
-        raise ValueError("nonce must be 1-64 alphanumeric characters")
+    validate_nonce(nonce)
     client = aioredis.from_url(str(_runtime.settings.redis_url))
     try:
         await client.set(f"{ECHO_KEY_PREFIX}{nonce}", "ok", ex=ECHO_TTL_SECONDS)

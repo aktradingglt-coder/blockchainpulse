@@ -33,3 +33,20 @@ def test_stdlib_logging_goes_through_redaction(capsys: pytest.CaptureFixture[str
     out = capsys.readouterr().out
     assert secret not in out
     assert "third.party" in out or "token is" in out
+
+
+def test_uncaught_exceptions_are_logged_as_redacted_json(capsys: pytest.CaptureFixture[str]) -> None:
+    import sys  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+
+    configure_logging(service="rd-test", level="INFO", fmt="json")
+    secret = "gh" + "p_" + "c" * 36
+    exc = RuntimeError(f"boom with {secret}")
+    sys.excepthook(type(exc), exc, None)
+    t = threading.Thread(target=lambda: (_ for _ in ()).throw(ValueError(f"thread {secret}")), name="probe")
+    t.start()
+    t.join()
+    lines = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    events = {line["event"] for line in lines}
+    assert {"process.uncaught_exception", "thread.uncaught_exception"} <= events
+    assert secret not in json.dumps(lines)

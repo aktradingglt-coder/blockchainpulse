@@ -102,3 +102,23 @@ def test_unknown_flag_override_rejected() -> None:
     cfg.validate_flag_overrides({"publishing_enabled": False})
     with pytest.raises(ConfigError, match=r"publishing_enabeld"):
         cfg.validate_flag_overrides({"publishing_enabeld": False})
+
+
+def test_every_paid_tier_meets_margin_guardrail_monthly_and_annual() -> None:
+    """PROMPT §12.2 guardrail on the pre-measurement assumptions (replaced by measured costs at P11)."""
+    product = load_config(CONFIG_DIR).product
+    floor = product.commercial.min_gross_margin
+    margins = product.tier_margins()
+    assert set(margins) == {"starter", "pro", "desk"}
+    for tier, (monthly, annual) in margins.items():
+        assert monthly >= floor, (tier, monthly)
+        assert annual >= floor, (tier, annual)
+
+
+def test_gross_margin_formula() -> None:
+    from rd_core.config import gross_margin  # noqa: PLC0415
+
+    m = gross_margin(100.0, months=1, llm_cost_month=20.0, house_cost_month=3.0, fee_pct=0.05, fee_fixed=0.5)
+    assert m == pytest.approx((100 - 20 - 3 - 5 - 0.5) / 100)
+    y = gross_margin(1200.0, months=12, llm_cost_month=20.0, house_cost_month=3.0, fee_pct=0.05, fee_fixed=0.5)
+    assert y == pytest.approx((1200 - 12 * 23 - 60 - 0.5) / 1200)

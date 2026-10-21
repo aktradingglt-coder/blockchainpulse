@@ -116,22 +116,28 @@ Trial 3 credits (= one quick deep dive), Starter 20, Pro 100, Desk 400 pooled.
 roughly $0.40–0.50 of LLM cost keeps a standard deep dive (5 credits) inside the per-credit value of every paid
 tier. To be re-derived from measured token usage at P11.
 
-### D-023 · 2026-10-21 · Proposed tier and licence prices (§2 rule 7) — revised after P0 review round 2
-**Decision.** Starter $39/mo ($390/yr), Pro $169/mo ($1,690/yr), Desk $649/mo for 5 seats ($6,490/yr), self-hosted
+### D-023 · 2026-10-21 · Proposed tier and licence prices (§2 rule 7) — revised after P0 review rounds 2 and 3
+**Decision.** Starter $49/mo ($539/yr), Pro $179/mo ($2,090/yr), Desk $719/mo for 5 seats ($8,450/yr); self-hosted
 $1,999 once with 12 months of updates and $599/yr renewal. Status `proposed`.
-**Basis.** (1) Comparables checked 2026-10-21 (`docs/vendor-notes/pricing-comparables.md`): consumer AI research
-$39–$99/mo, professional research software $150–$500 per user per month. (2) Unit-economics pre-estimate, **after
-merchant-of-record fees** (≈5% + $0.50 per transaction), using PROMPT §12.2's $1–2 per deep dive *before* caching
-as the cost range, all credits spent (p90 proxy), plus amortised house reports:
-| Tier | Price | p90 LLM cost (low–high) | Fee | Gross margin (high cost → low cost) |
-| --- | --- | --- | --- | --- |
-| Starter | $39 | $4–8 (4 deep dives) | $2.45 | 73.2% → 83.5% |
-| Pro | $169 | $20–40 (20 deep dives) | $8.95 | 71.0% → 82.9% |
-| Desk | $649 | $80–160 (80 deep dives) | $32.95 | 70.3% → 82.6% |
-Round 1's draft ($149 Pro, $599 Desk) fell to ~68% at the high cost bound once fees were counted; prices were raised
-so the pre-estimate clears 70% even at the upper bound. Margin formula: (price − LLM cost − fee) / price.
-**Gate.** P11's measured cost model (`scripts/cost_model.py`, merchant fees included) must show ≥70% for every tier at
-p90; if not, credits or prices change. **Owner task.** Pricing confirmation (STATUS H6).
+**Basis.** (1) Comparables checked 2026-10-21 (`docs/vendor-notes/pricing-comparables.md`). (2) Pre-measurement
+unit economics, encoded in `config/product.yaml → commercial.cost_assumptions` and enforced by
+`test_every_paid_tier_meets_margin_guardrail_monthly_and_annual`:
+- p90 proxy: every credit spent, at the **upper** cost bound of $0.40 per credit (≈$2 per 5-credit deep dive before
+  caching, PROMPT §12.2);
+- amortised house research (R1/R3/R4/R5 generated once for everyone): $3 per seat per month, i.e. ≈$500/month of
+  house reports spread over ≥170 paying seats. Below that scale the house-report cost is a launch investment and the
+  per-tier guardrail does not hold — stated here rather than hidden;
+- merchant-of-record fee ≈5% + $0.50 per transaction (monthly: 12 fees a year; annual: one).
+Margin = (price − LLM − house − fee) / price for the billing period:
+| Tier | Monthly price → margin | Annual price → margin | Annual discount |
+| --- | --- | --- | --- |
+| Starter (20 cr) | $49 → 71.5% | $539 → 70.4% | 8.3% |
+| Pro (100 cr) | $179 → 70.7% | $2,090 → 70.3% | 2.7% |
+| Desk (400 cr, 5 seats) | $719 → 70.6% | $8,450 → 70.1% | 2.1% |
+History: round-1 draft ($39/$149/$599, annual = 10× monthly) ignored fees; round-2 revision ($169/$649) still failed
+on annual plans and omitted house reports (P0 review round 3, N3). Prices are deliberately conservative because the
+cost bound is pre-caching; P11's measured cost model (`scripts/cost_model.py`) replaces the assumptions and may
+allow lower prices or larger annual discounts. **Owner task.** Pricing confirmation (STATUS H6).
 
 ### D-024 · 2026-10-21 · Market-data vendors contracted: none (§2 rule 9)
 **Decision.** `{{DATA_VENDORS}}` = none. Free/public sources (CFTC, SEC EDGAR, EIA, US Treasury/BLS/BEA, one crypto
@@ -141,3 +147,8 @@ Databento later) are built behind feature flags with fixture-backed tests. Contr
 ### D-025 · 2026-10-21 · Package dependency direction enforced by import-linter
 **Decision.** `[tool.importlinter]` contracts in `pyproject.toml` (run in `make lint`, pre-commit and CI) encode
 ARCHITECTURE.md §3.1; each new package adds its contract when it is created.
+
+### D-026 · 2026-10-21 · Web container logs: Next.js defaults until P7
+**Decision.** The Next.js standalone server only prints start-up lines in P0 (no request handling beyond the landing
+page and health route). Structured JSON request logging for the web app (via instrumentation hook and the same
+redaction rules) is delivered with authentication in P7, when the web app starts handling user data.

@@ -10,6 +10,7 @@ import socket
 import sys
 from datetime import timedelta
 
+from rd_core.redaction import redact_text
 from rd_core.settings import get_settings
 from rd_db.engine import make_engine
 from rd_db.heartbeat import is_fresh_for_host
@@ -29,7 +30,12 @@ def main() -> None:
     if len(sys.argv) != 2:
         sys.stderr.write("usage: python -m rd_db.healthcheck <service>\n")
         sys.exit(2)
-    sys.exit(0 if asyncio.run(check(sys.argv[1], socket.gethostname())) else 1)
+    try:
+        healthy = asyncio.run(check(sys.argv[1], socket.gethostname()))
+    except Exception as exc:  # noqa: BLE001 - a healthcheck reports, it never dumps a traceback into health logs
+        sys.stdout.write(f"unhealthy: {type(exc).__name__}: {redact_text(str(exc))}\n")
+        sys.exit(1)
+    sys.exit(0 if healthy else 1)
 
 
 if __name__ == "__main__":

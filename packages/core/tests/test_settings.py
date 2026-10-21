@@ -52,3 +52,26 @@ def test_log_format_validated(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOG_FORMAT", "jsn")
     with pytest.raises(ValidationError):
         Settings()
+
+
+@pytest.mark.parametrize("origins", ["*", "https://*.example.com"])
+def test_cors_wildcards_rejected(monkeypatch: pytest.MonkeyPatch, origins: str) -> None:
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", origins)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_cors_requires_https_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "http://app.example.com")
+    with pytest.raises(ValidationError):
+        Settings()
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://app.example.com")
+    assert Settings().cors_allowed_origins == ["https://app.example.com"]
+
+
+@pytest.mark.parametrize("url", ["postgresql://u@h:5432/d", "postgresql+psycopg2://u@h:5432/d"])
+def test_database_url_must_be_asyncpg(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    monkeypatch.setenv("DATABASE_URL", url)
+    with pytest.raises(ValidationError):
+        Settings()

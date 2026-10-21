@@ -14,12 +14,11 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def _gitleaks() -> str:
-    found = shutil.which("gitleaks") or (
-        str(REPO / ".tools/bin/gitleaks") if (REPO / ".tools/bin/gitleaks").exists() else None
-    )
-    if found is None:
-        pytest.fail("gitleaks not installed: run `make tools` (CI installs it with a pinned checksum)")
-    return found
+    """Always the pinned, checksum-verified binary from `make tools`, never whatever is on PATH."""
+    pinned = REPO / ".tools/bin/gitleaks"
+    if not pinned.exists():
+        pytest.fail("pinned gitleaks missing: run `make tools` (make test does this automatically)")
+    return str(pinned)
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -142,3 +141,44 @@ def test_section19_secret_types_detected(tmp_path: Path, content: object) -> Non
         check=False,
     )
     assert result.returncode == 1, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        lambda: "BILLING_API_KEY_ALT = '" + "pdl_" + "sdbx_apikey_" + _random(40) + "'",
+        lambda: "x = '" + "pdl_" + "ntfset_" + _random(32) + "'",
+        lambda: "DATABASE_URL=" + "postgresql" + "://admin:" + _random(6) + "$" + _random(8) + "@db.internal:5432/x",
+        lambda: "DATABASE_URL=" + "postgresql" + "://admin:" + _random(6) + "@" + _random(8) + "@db.internal:5432/x",
+    ],
+    ids=["paddle-api-key", "paddle-webhook-secret", "url-password-with-dollar", "url-password-with-at"],
+)
+def test_round3_secret_shapes_detected(tmp_path: Path, content: object) -> None:
+    assert callable(content)
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "settings.py").write_text(content() + "\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "plant")
+    result = subprocess.run(  # noqa: S603
+        [_gitleaks(), "git", "--config", str(REPO / ".gitleaks.toml"), "--no-banner", "--redact", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_compose_placeholders_are_not_flagged(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "compose.yaml").write_text(
+        "DATABASE_URL: postgresql+asyncpg://rdesk:${POSTGRES_PASSWORD:?run make dev}@db:5432/rdesk\n"
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "placeholder")
+    result = subprocess.run(  # noqa: S603
+        [_gitleaks(), "git", "--config", str(REPO / ".gitleaks.toml"), "--no-banner", "--redact", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

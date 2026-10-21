@@ -141,3 +141,42 @@ def test_free_text_credentials_masked() -> None:
     assert '"user": "a"' in redact_text('{"password": "hunter2xyz", "user": "a"}')
     assert "abc/defghij" not in redact_text("redis://default:" + "abc/defghij" + "@host:6379")
     assert redact_text("see https://example.com:8080/path for docs") == "see https://example.com:8080/path for docs"
+
+
+def test_round3_redaction_cases() -> None:
+    pw = "p@ss@" + "word123"
+    assert pw not in redact_text(f"postgresql://u:{pw}@host:5432/db more")
+    assert "@ss@" not in redact_text(f"postgresql://u:{pw}@host:5432/db more")
+    phrase = "multi word secret " + "pass phrase"
+    assert "pass phrase" not in redact_text('{"password": "' + phrase + '", "user": "a"}')
+    for text, secret in (
+        ("PGPASSWORD=abc123xyz psql", "abc123xyz"),
+        ("REDISCLI_AUTH=zz99yy valkey-cli", "zz99yy"),
+        ("pass=hunter2", "hunter2"),
+        ("token: abcdef", "abcdef"),
+        ("Cookie: sessionid=abc123; csrftoken=x", "abc123"),
+        ("Set-Cookie: sessionid=q1w2e3", "q1w2e3"),
+    ):
+        assert secret not in redact_text(text), text
+    assert redact_text("contact a@b.com or https://x.io/a") == "contact a@b.com or https://x.io/a"
+    assert redact_text("max_tokens=5 tokens: 7") == "max_tokens=5 tokens: 7"
+
+
+def test_numbers_and_booleans_under_sensitive_keys_are_kept() -> None:
+    data = {
+        "token_count": 5,
+        "pass_rate": 0.9,
+        "compliance_pass": True,
+        "password_reset_requested": False,
+        "secret_count": 3,
+        "auth": "Basic abc",
+        "password": "x",
+    }
+    out = redact(data)
+    assert out["token_count"] == 5
+    assert out["pass_rate"] == 0.9
+    assert out["compliance_pass"] is True
+    assert out["password_reset_requested"] is False
+    assert out["secret_count"] == 3
+    assert out["auth"] == REDACTED
+    assert out["password"] == REDACTED

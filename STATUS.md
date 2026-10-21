@@ -4,7 +4,7 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — review rounds 1 and 2 returned ONE MORE PASS; all findings addressed; round 3 review pending.** P1 does not start until the P0 reviewer returns PASS
+**P0 Foundations — review rounds 1–3 returned ONE MORE PASS; all findings addressed; round 4 review pending.** P1 does not start until the P0 reviewer returns PASS
 (`CRITIC_LEDGER.md`).
 
 ## Done (P0), with evidence
@@ -46,7 +46,7 @@ _Last updated: 2026-10-21_
 | H3 | Legal review of FRED terms (generative-AI clause) | FRED adapter off by default (D-010) | docs/vendor-notes/fred.md |
 | H4 | Merchant-of-record confirmation that a Pakistan-incorporated company can onboard and receive payouts (Paddle; Lemon Squeezy fallback) | Not confirmed in official docs | docs/vendor-notes/billing.md |
 | H5 | Commercial data contracts (Twelve Data, Databento, others) and each crypto exchange's display terms | Licences | docs/vendor-notes/commercial-data.md, crypto-exchanges.md |
-| H6 | Pricing confirmation (tiers are proposed, pending P11 cost-model measurement) | Commercial | config/product.yaml `pricing_status: proposed` |
+| H6 | Pricing confirmation (proposed: Starter $49, Pro $179, Desk $719 per month; licence $1,999; pending P11 cost-model measurement) | Commercial | config/product.yaml `pricing_status: proposed`, DECISIONS D-023 |
 | H7 | Sanctions/jurisdiction list review by counsel | Legal | config/jurisdiction_rules.yaml |
 
 ## Environment notes for reviewers

@@ -1,11 +1,15 @@
 import asyncio
+import json
+import subprocess
+import sys
 import uuid
 from datetime import timedelta
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from rd_core.settings import Settings
 from rd_db.health import check_database, head_revision
 from rd_db.heartbeat import beat, heartbeat_age, is_fresh, is_fresh_for_host, leader_of
 from rd_db.migrate import upgrade_to_head
@@ -53,3 +57,39 @@ async def test_heartbeats(engine: AsyncEngine) -> None:
     assert await leader_of(engine, service, timedelta(seconds=30)) is None
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM service_heartbeats WHERE service = :s"), {"s": service})
+
+
+async def test_health_reports_unmigrated_database(settings: Settings) -> None:
+    """A database without Alembic history is reported not ready (never ok by accident)."""
+    name = f"rd_probe_{uuid.uuid4().hex[:8]}"
+    admin = create_async_engine(str(settings.database_url), isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'CREATE DATABASE "{name}"'))
+        probe = create_async_engine(str(settings.database_url).rsplit("/", 1)[0] + f"/{name}")
+        try:
+            health = await check_database(probe)
+            assert not health.ok
+            assert health.current_revision is None
+            assert "revision=None" in health.detail
+        finally:
+            await probe.dispose()
+    finally:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+        await admin.dispose()
+
+
+def test_migrate_cli_exits_cleanly() -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "rd_db.migrate"], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    events = [json.loads(line)["event"] for line in proc.stdout.splitlines() if line.startswith("{")]
+    assert "migrate.done" in events
+
+
+async def test_sessions_carry_timeouts_and_keepalives(engine: AsyncEngine) -> None:
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SHOW statement_timeout"))).scalar_one() == "1min"
+        assert (await conn.execute(text("SHOW tcp_keepalives_idle"))).scalar_one() == "30"

@@ -1,7 +1,7 @@
 """Per-package coverage gate (PROMPT §15.2). Reads ``coverage.json`` written by ``make coverage``.
 
-Line+branch coverage per top-level ``rd_*`` package must reach its floor: 90% for the packages §15.2 names,
-80% for everything else.
+Line coverage and branch coverage, each on its own, per top-level ``rd_*`` package must reach the floor: 90% for the
+packages §15.2 names, 80% for everything else. Every workspace package must appear in the report.
 """
 
 from __future__ import annotations
@@ -20,32 +20,53 @@ STRICT_FLOOR = 90.0
 _PKG = re.compile(r"/src/(rd_[a-z_]+)/")
 
 
-def package_coverage(report: dict[str, Any]) -> dict[str, float]:
+def workspace_packages() -> set[str]:
+    """Every rd_* package in the workspace; each must appear in the coverage report."""
+    return {p.name for p in REPO.glob("*/*/src/rd_*") if p.is_dir()}
+
+
+def package_coverage(report: dict[str, Any]) -> dict[str, tuple[float, float]]:
+    """Per package: (line %, branch %). A package with no branches counts as 100% branch coverage."""
     files: dict[str, Any] = report["files"]
-    hit: dict[str, int] = defaultdict(int)
-    total: dict[str, int] = defaultdict(int)
+    lines_hit: dict[str, int] = defaultdict(int)
+    lines_total: dict[str, int] = defaultdict(int)
+    br_hit: dict[str, int] = defaultdict(int)
+    br_total: dict[str, int] = defaultdict(int)
     for path, data in files.items():
         m = _PKG.search("/" + path.replace("\\", "/"))
         if m is None:
             continue
         summary = data["summary"]
         pkg = m.group(1)
-        hit[pkg] += summary["covered_lines"] + summary.get("covered_branches", 0)
-        total[pkg] += summary["num_statements"] + summary.get("num_branches", 0)
-    return {pkg: (100.0 * hit[pkg] / total[pkg]) if total[pkg] else 100.0 for pkg in total}
+        lines_hit[pkg] += summary["covered_lines"]
+        lines_total[pkg] += summary["num_statements"]
+        br_hit[pkg] += summary.get("covered_branches", 0)
+        br_total[pkg] += summary.get("num_branches", 0)
+
+    def pct(hit: int, total: int) -> float:
+        return 100.0 * hit / total if total else 100.0
+
+    return {pkg: (pct(lines_hit[pkg], lines_total[pkg]), pct(br_hit[pkg], br_total[pkg])) for pkg in lines_total}
 
 
 def main(path: str = "coverage.json") -> int:
     report = json.loads((REPO / path).read_text())
-    failures = []
-    for pkg, pct in sorted(package_coverage(report).items()):
+    measured = package_coverage(report)
+    failures = [
+        f"{pkg}: not measured (add it to [tool.coverage.run] source_pkgs)"
+        for pkg in sorted(workspace_packages() - set(measured))
+    ]
+    for pkg, (line_pct, branch_pct) in sorted(measured.items()):
         floor = STRICT_FLOOR if pkg in STRICT else DEFAULT_FLOOR
-        status = "ok" if pct >= floor else "FAIL"
-        sys.stdout.write(f"{pkg:<16} {pct:6.2f}%  (floor {floor:.0f}%)  {status}\n")
-        if pct < floor:
-            failures.append(pkg)
+        ok = line_pct >= floor and branch_pct >= floor
+        sys.stdout.write(
+            f"{pkg:<16} lines {line_pct:6.2f}%  branches {branch_pct:6.2f}%  (floor {floor:.0f}%)  "
+            f"{'ok' if ok else 'FAIL'}\n"
+        )
+        if not ok:
+            failures.append(f"{pkg}: lines {line_pct:.2f}% / branches {branch_pct:.2f}% < {floor:.0f}%")
     if failures:
-        sys.stdout.write(f"per-package coverage gate FAILED: {', '.join(failures)}\n")
+        sys.stdout.write("per-package coverage gate FAILED:\n  " + "\n  ".join(failures) + "\n")
         return 1
     return 0
 
