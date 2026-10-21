@@ -210,8 +210,8 @@ class EiaAdapter(BaseAdapter):
                 quality.record_count,
             )
         wanted = int(request.params.get("length", 260))
-        window = usable[-wanted:]
         first = obs[-wanted:][0].ts if obs else raw.retrieved_at  # the weeks asked for, held ones included
+        window = [o for o in usable if o.ts >= first]  # held weeks leave a hole; the window never reaches further back
         held = tuple(o for o in obs if o not in usable and o.ts >= first)
         usable = window
         reported = [o for o in usable if o.value is not None]

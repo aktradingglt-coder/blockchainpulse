@@ -1221,10 +1221,15 @@ async def test_short_kraken_windows_are_still_checked_for_bad_prints(ctx_factory
     ctx, _ = ctx_factory(recording, now=hour + timedelta(minutes=5), cache=False)
     adapter = KrakenFuturesAdapter(ctx)
     params = {"symbol": "BTC/USD:USD", "timeframe": "1h", "limit": limit}
+    if limit == 1:  # the one bar asked for is a bad print: refused, never replaced by an older bar
+        with pytest.raises(DataQualityError, match="every record was quarantined"):
+            await adapter.fetch(DataRequest(kind=RequestKind.BARS, params=params))
+        await adapter.aclose()
+        return
     resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params=params))
     await adapter.aclose()
     bars = [b for b in resp.records if isinstance(b, Bar)]
-    assert len(bars) == limit
+    assert len(bars) == limit - 1  # the held bar leaves a hole in the window asked for
     assert max(b.close for b in bars) < 200  # the x50 latest bar is held, never shown
     assert len(resp.quarantined) == 1
     charts = next(r for r in sent if "/charts/" in r.url.path)
@@ -1254,7 +1259,7 @@ async def test_short_twelvedata_and_eia_windows_are_still_checked(ctx_factory: A
     resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "EUR/USD", "outputsize": 5}))
     await adapter.aclose()
     assert int(rec.requests[0].url.params["outputsize"]) >= 30
-    assert len(resp.records) == 5
+    assert len(resp.records) == 4  # 5 asked for, the held latest bar leaves a hole
     assert all(isinstance(b, Bar) and b.close < 2 for b in resp.records)
 
     crude = _crude()
@@ -1264,7 +1269,7 @@ async def test_short_twelvedata_and_eia_windows_are_still_checked(ctx_factory: A
     resp = await eia.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1", "length": 4}))
     await eia.aclose()
     assert int(rec.requests[0].url.params["length"]) >= 30
-    assert len(resp.records) == 4
+    assert len(resp.records) == 3  # 4 asked for, the held latest week leaves a hole
     assert len(resp.quarantined) == 1
 
 
@@ -1283,7 +1288,7 @@ async def test_short_cot_window_is_still_checked(ctx_factory: Any) -> None:
     resp = await adapter.fetch(DataRequest(kind=RequestKind.COT, params=params))
     await adapter.aclose()
     assert int(rec.requests[0].url.params["$limit"]) >= 30
-    assert len(resp.records) == 4
+    assert len(resp.records) == 3  # 4 asked for, the held latest week leaves a hole
     assert len(resp.quarantined) == 1
 
 
@@ -2134,3 +2139,87 @@ async def test_twelvedata_bad_print_at_the_start_of_the_window_is_reported(ctx_f
     resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "EUR/USD", "outputsize": 5}))
     await adapter.aclose()
     assert [b.ts for b in resp.quarantined if isinstance(b, Bar)] == [days[-5]]
+
+
+# ------------------------------------------------------------------------------------- review round 9 (P1)
+
+
+@pytest.mark.parametrize(
+    ("accession", "concept", "end"),
+    [
+        (NEWEST_10K, "FederalIncomeTaxExpenseBenefitContinuingOperations", "2025-12-31"),  # volatile annual-only line
+        (NEWEST_10Q, "DerivativeAssets", "2026-06-30"),  # first reported in this filing: no history at all
+    ],
+)
+async def test_values_beyond_the_companys_total_assets_are_held(accession: str, concept: str, end: str) -> None:
+    """x1e6 lands at 10^4-10^5 times total assets in the same response: impossible for any line item."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _scale_filing(accession, 1e6, concept=concept, end=end)})
+    assert not [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact)
+        and f.concept == concept
+        and f.accession == accession
+        and f.period_end.isoformat() == end
+    ]
+    assert any("scale_consistency" in w for w in resp.quality.warnings)
+
+
+def test_off_balance_sheet_amounts_may_exceed_total_assets() -> None:
+    def fact(concept: str, value: float, taxonomy: str = "us-gaap") -> FundamentalFact:
+        return FundamentalFact(
+            cik="0000000001", concept=concept, taxonomy=taxonomy, unit="USD", value=value,
+            period_end=date(2025, 12, 31), form="10-K", filed=date(2026, 2, 1), accession="a",
+        )  # fmt: skip
+
+    records = [
+        fact("Assets", 1e9),
+        fact("DerivativeNotionalAmount", 5e11),  # 500x: a dealer's notional is not on its balance sheet
+        fact("EntityPublicFloat", 3e11, taxonomy="dei"),  # a market value, not a line item
+        fact("Liabilities", 5e11),  # 500x: impossible
+    ]
+    logs: list[float | None] = [math.log10(f.value) for f in records]
+    assert sec_edgar._beyond_assets(records, logs) == {3}
+
+
+async def test_a_balance_that_jumps_by_orders_of_magnitude_is_flagged() -> None:
+    """PP&E moves smoothly (largest clean step 10^0.4); /1000 in the newest 10-K is at least flagged."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    concept = "PropertyPlantAndEquipmentNet"
+
+    def flagged(resp: DataResponse) -> int:
+        check = next(c for c in resp.quality.checks if c.name == "scale_outliers")
+        return len(check.indices)
+
+    clean = await _replay(SecEdgarAdapter, request)
+    seeded = await _replay(
+        SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10K, 0.001, concept=concept, end="2025-12-31")}
+    )
+    assert flagged(seeded) == flagged(clean) + 1
+
+
+async def test_sec_ticker_map_with_no_usable_rows_is_an_outage() -> None:
+    request = _plan(SecEdgarAdapter, RequestKind.INSTRUMENTS)
+    with pytest.raises(ProviderDown, match="no usable rows"):
+        await _replay(SecEdgarAdapter, request, {0: lambda _b: json.dumps({"0": {"ticker": "X"}, "1": [1]})})
+
+
+async def test_a_held_bar_leaves_a_hole_and_never_shifts_the_window(ctx_factory: Any) -> None:
+    days = sorted(
+        d for d in (datetime(2026, 10, 20, tzinfo=UTC) - timedelta(days=k) for k in range(60)) if d.weekday() < 5
+    )
+    values = [
+        {"datetime": d.strftime("%Y-%m-%d"), "open": "1.1", "high": "1.2", "low": "1.0",
+         "close": f"{1.1 + 0.002 * math.sin(i)}"}
+        for i, d in enumerate(days)
+    ]  # fmt: skip
+    for k in ("open", "high", "low", "close"):
+        values[-2][k] = f"{float(values[-2][k]) * 100:.4f}"
+    body = {"meta": {"symbol": "EUR/USD", "type": "Physical Currency"}, "values": values, "status": "ok"}
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=body), flags={"provider_twelvedata": True}, **SETTINGS)
+    adapter = TwelveDataAdapter(ctx)
+    resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "EUR/USD", "outputsize": 3}))
+    await adapter.aclose()
+    assert [b.ts for b in resp.records if isinstance(b, Bar)] == [days[-3], days[-1]]
+    assert [b.ts for b in resp.quarantined if isinstance(b, Bar)] == [days[-2]]

@@ -207,7 +207,12 @@ class CftcAdapter(BaseAdapter):
         weeks = int(request.params.get("weeks", 156))
         held = [r for i, r in enumerate(records) if i in set(oi_outliers.indices)]
         first = records[-weeks:][0].as_of if records else None  # the weeks asked for, held ones included
-        records = [r for i, r in enumerate(records) if i not in set(oi_outliers.indices)][-weeks:]
+        # held weeks leave a hole; the window never reaches further back than the weeks asked for
+        records = [
+            r
+            for i, r in enumerate(records)
+            if i not in set(oi_outliers.indices) and (first is None or r.as_of >= first)
+        ]
         quarantined = tuple(r for r in held if first is None or r.as_of >= first)
         as_of = records[-1].as_of if records else None
         released = release_time(as_of) if as_of else None

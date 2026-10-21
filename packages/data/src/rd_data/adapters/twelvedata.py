@@ -164,8 +164,8 @@ class TwelveDataAdapter(BaseAdapter):
         )
         report = DataQualityReport(report.subject, (order, *report.checks), report.quarantined, report.record_count)
         wanted = int(request.params.get("outputsize", 200))
-        window = usable[-wanted:]
         first = bars[-wanted:][0].ts if bars else fetched  # the bars asked for, held ones included
+        window = [b for b in usable if b.ts >= first]  # held bars leave a hole; the window never reaches further back
         quarantined = tuple(b for b in bars if b not in usable and b.ts >= first)
         usable = window
         as_of = usable[-1].ts if usable else None

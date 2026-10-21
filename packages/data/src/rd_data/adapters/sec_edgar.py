@@ -135,8 +135,10 @@ class SecEdgarAdapter(BaseAdapter):
                         provider_symbol=cik10(row["cik_str"]),
                     )
                 )
-            except (KeyError, ValueError, InvalidArgs):
+            except (KeyError, ValueError, InvalidArgs, TypeError):
                 rejected += 1
+        if not records:
+            raise ProviderDown(f"sec: ticker map with no usable rows ({rejected} malformed)", provider=self.name)
         quality = with_schema_rejections(DataQualityReport("sec:company_tickers", (), (), len(records)), rejected)
         return ParseResult(tuple(records), quality, None, None)
 
@@ -294,7 +296,7 @@ class SecEdgarAdapter(BaseAdapter):
                 "scale_outliers",
                 passed=not flagged,
                 blocking=False,
-                detail=f"{len(flagged)} recent fact(s) over 300x from their neighbouring periods, kept for review"
+                detail=f"{len(flagged)} recent fact(s) unusually far from their neighbouring periods, kept for review"
                 if flagged
                 else "ok",
                 indices=tuple(sorted(flagged)),
@@ -347,6 +349,15 @@ ADDITIVITY_TOLERANCE = 0.01
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 #: Held facts needed (with FILING_SCALE_SHARE of the column) before a filing's whole column for one date is held.
 COLUMN_MIN_HELD = 3
+#: A currency fact larger than this multiple of the company's own total assets is impossible. On the recorded AMZN
+#: facts the largest ratio is 4.3 (public float); derivative notionals at the largest dealer banks stay below ~30x.
+MAX_ASSETS_MULTIPLE = 100.0
+#: Amounts that are not the company's own and legitimately exceed its balance sheet (derivative notionals, client
+#: assets under management or custody) are exempt, as is the dei taxonomy (public float is a market value).
+_OFF_BALANCE_SHEET = re.compile(r"Notional|UnderManagement|UnderCustody|Custod|Fiduciary")
+#: A balance (instant fact) in a recent filing that moved more than 10^INSTANT_FLAG_STEP from the previous period end
+#: is flagged: balances move smoothly (3 genuine moves that large in 17 years of AMZN balances).
+INSTANT_FLAG_STEP = 2.0
 #: Year-to-date ratio checks need this many other years, whose ratios sit within 10^PREFIX_SPREAD of their median.
 PREFIX_HISTORY = 3
 PREFIX_SPREAD = 0.3
@@ -399,6 +410,12 @@ def _scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     held |= _filing_disagreements(records, logs, by_period, neighbours)
     held |= _additivity_errors(records, neighbours)
     held |= _prefix_errors(records, logs, neighbours)
+    held |= _beyond_assets(records, logs)
+    recent = _recent_accessions(records)
+    for i, f in enumerate(records):
+        step = neighbours.previous_step(i) if f.period_start is None and f.accession in recent else None
+        if step is not None and step > INSTANT_FLAG_STEP:
+            flagged.add(i)
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
     # A filing's column (its facts for one period end) that is mostly held is held whole: the scale was set for the
@@ -453,9 +470,58 @@ class _Neighbours:
             return None
         return abs(value - statistics.median(levels))
 
+    def previous_step(self, i: int) -> float | None:
+        """Orders of magnitude between a fact and the previous period end of its series, as other filings report it."""
+        f = self.records[i]
+        value = self.logs[i]
+        periods = self.series.get((f.concept, f.unit, _duration(f)), {})
+        earlier = sorted((e for e in periods if e < f.period_end), reverse=True)
+        for e in earlier:
+            values = [v for acc, v in periods[e] if acc != f.accession]
+            if values and value is not None:
+                return abs(value - statistics.median(values))
+        return None
+
     def mean_distance(self, part: Sequence[int], exclude: frozenset[str]) -> float | None:
         found = [d for i in part if (d := self.distance(i, exclude)) is not None]
         return statistics.mean(found) if len(found) == len(part) else None
+
+
+def _recent_accessions(records: list[FundamentalFact]) -> set[str]:
+    """The FLAG_FILINGS most recently filed accessions: the filings reports actually use."""
+    filed_on: dict[str, date] = {}
+    for f in records:
+        filed_on[f.accession] = max(filed_on.get(f.accession, f.filed), f.filed)
+    return set(sorted(filed_on, key=filed_on.__getitem__)[-FLAG_FILINGS:])
+
+
+def _beyond_assets(records: list[FundamentalFact], logs: list[float | None]) -> set[int]:
+    """Currency facts more than MAX_ASSETS_MULTIPLE times the company's total assets (same currency) at the nearest
+    period end, as reported by other filings where there are any: no line item can be that large."""
+    assets: dict[tuple[str, date], list[tuple[str, float]]] = {}
+    for i, f in enumerate(records):
+        if f.concept == "Assets" and f.period_start is None and (v := logs[i]) is not None:
+            assets.setdefault((f.unit, f.period_end), []).append((f.accession, v))
+    if not assets:
+        return set()
+    limit = math.log10(MAX_ASSETS_MULTIPLE)
+    ends: dict[str, list[date]] = {}
+    for unit, end in assets:
+        ends.setdefault(unit, []).append(end)
+    held: set[int] = set()
+    for i, f in enumerate(records):
+        value = logs[i]
+        if value is None or f.unit not in ends or f.taxonomy == "dei" or _OFF_BALANCE_SHEET.search(f.concept):
+            continue
+        nearest = sorted(ends[f.unit], key=lambda e: abs((e - f.period_end).days))
+        others = next(
+            ([v for acc, v in assets[(f.unit, e)] if acc != f.accession] for e in nearest
+             if any(acc != f.accession for acc, _ in assets[(f.unit, e)])),
+            [v for _, v in assets[(f.unit, nearest[0])]],
+        )  # fmt: skip
+        if value - statistics.median(others) > limit:
+            held.add(i)
+    return held
 
 
 def _fact_holds(records: list[FundamentalFact], distance: dict[int, float]) -> tuple[set[int], set[int]]:
@@ -465,10 +531,7 @@ def _fact_holds(records: list[FundamentalFact], distance: dict[int, float]) -> t
         f = records[i]
         spread.setdefault((f.concept, f.unit, _duration(f)), []).append(d)
     typical = {k: statistics.median(v) for k, v in spread.items()}
-    filed_on: dict[str, date] = {}
-    for f in records:
-        filed_on[f.accession] = max(filed_on.get(f.accession, f.filed), f.filed)
-    recent = set(sorted(filed_on, key=filed_on.__getitem__)[-FLAG_FILINGS:])
+    recent = _recent_accessions(records)
     held: set[int] = set()
     flagged: set[int] = set()
     for i, d in distance.items():

@@ -267,12 +267,9 @@ class KrakenFuturesAdapter(BaseAdapter):
             gap_window=limit,
             gap_from=start,
         )
-        if start is not None:
-            window = [b for b in usable if b.ts >= start][:limit]
-            requested = [b for b in bars if b.ts >= start][:limit]
-        else:
-            window = usable[-limit:]
-            requested = bars[-limit:]
+        requested = [b for b in bars if b.ts >= start][:limit] if start is not None else bars[-limit:]
+        asked = {b.ts for b in requested}
+        window = [b for b in usable if b.ts in asked]  # held bars leave a hole; the window never shifts
         # Everything held inside the requested window is reported, including bars at its very start.
         first = requested[0].ts if requested else (bars[-1].ts if bars else now)
         quarantined = tuple(b for b in bars if b not in usable and b.ts >= first)

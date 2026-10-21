@@ -209,7 +209,7 @@ class HttpFetcher:
             return NotFound(f"{self.provider}: not found ({shown})", provider=self.provider)
         if status in (401, 403):
             return ProviderDown(
-                f"{self.provider}: authorization rejected (HTTP {status}); check the API key or plan",
+                f"{self.provider}: authorization refused (HTTP {status}); check credentials, plan or access rules",
                 provider=self.provider,
             )
         return InvalidArgs(f"{self.provider}: request rejected (HTTP {status}) {shown}", provider=self.provider)
