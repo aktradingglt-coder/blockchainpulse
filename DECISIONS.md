@@ -282,8 +282,14 @@ ways, each judged per concept, unit and duration (`sec_edgar._scale_errors`):
    it add up (within 1%), those facts are held. The scaled sum must need all three terms, because shrinking a term
    into insignificance proves nothing. The side far from its neighbours is the wrong one; if that is unclear, every
    candidate is held.
-4. *Same table.* A held fact's siblings (same filing, concept and period end, such as the trailing-twelve-month
-   figure beside a mis-scaled quarter) are held with it.
+4. *Same year.* A year-to-date fact is compared with the same year's shorter year-to-date from other filings (the
+   year against its nine months, nine months against the half). The ratio is checked against the ratio the concept
+   shows in other years. This needs at least 3 other years with a steady ratio (spread under 10^0.3), so concepts
+   whose ratio swings, like financing flows, are skipped. A ratio about a power of 1000 off (more than 10^2.5, within
+   10^0.5 of the power) is held, unless the neighbours clearly blame the shorter period.
+5. *Same table and column.* A held fact's siblings (same filing, concept and period end, such as the
+   trailing-twelve-month figure beside a mis-scaled quarter) are held with it. If at least 3 facts of a filing's
+   column for one period end are held and they make up at least half of it, the whole column is held.
 
 Whenever two filings are weighed against each other, neighbours reported by either of them are left out, so a
 mis-scaled filing never vouches for itself. Facts that are undated, filed in the future or filed before their period
@@ -302,20 +308,24 @@ round-6 rule).
 
 Results on the clean facts: **0 held**, and 4 recent genuine one-offs flagged.
 
-The newest 10-Q (accession 0001018724-26-000026) has 159 USD concepts with current-period facts. Seeding each
-concept's current-period facts:
+Seeding each USD concept's current-period facts in the newest filings (one concept at a time):
 
-| Seed | Held | Flagged (kept, warned) | Missed |
-| --- | --- | --- | --- |
-| ÷1000 | 141 | 7 | 11 |
-| ×1000 | 145 | 7 | 7 |
-| ×1e6 | 152 | 0 | 7 |
+| Filing | Seed | Held | Flagged (kept, warned) | Missed |
+| --- | --- | --- | --- | --- |
+| 10-Q 0001018724-26-000026 (159 concepts) | ÷1000 | 142 | 7 | 10 |
+| | ×1000 | 145 | 7 | 7 |
+| | ×1e6 | 152 | 0 | 7 |
+| 10-K 0001018724-26-000004 (245 concepts) | ÷1000 | 184 | 29 | 32 |
+| | ×1000 | 197 | 30 | 18 |
+| | ×1e6 | 232 | 0 | 13 |
 
-Every fact of the newest 10-Q at ×1000 is held, and the response is refused as stale rather than served at the
-wrong scale. The round-6 rule left 158 of 158 newest-quarter seeds undetected, and the round-7 version (neighbours
-only) left 36 of 159 ÷1000 seeds undetected.
+Every fact of either filing at ×1000 is held, as is a mis-scaled current-period column alone. With the 10-Q held
+whole, the response is refused as stale rather than served at the wrong scale. Earlier versions measured:
+- the round-6 rule: 158 of 158 newest-quarter seeds undetected;
+- the round-7 version: 36 of 159 10-Q ÷1000 seeds undetected;
+- the round-8 version: 39 of 245 10-K ÷1000 seeds undetected.
 
-**Limit (stated, not hidden).** What the misses are:
+**Limit (stated, not hidden).** What the 10-Q misses are:
 - Under ×1000 and ×1e6, all 7 are of two kinds:
   - Six concepts that first appear in the newest filing (derivative assets and liabilities, AFS gains and losses,
     derivative OCI). There is no earlier period to judge them against, and nothing else in one EDGAR response can show
@@ -326,4 +336,14 @@ only) left 36 of 159 ÷1000 seeds undetected.
     a readily determinable fair value). Instants form no sums.
   - Two volatile equity-revaluation gains (one is flagged for its half-year fact).
 
-These are not caught from this one source. (P1 review rounds 6–7.)
+The 10-K misses are mostly annual-only footnote lines with volatile history: current and deferred federal, state and
+foreign tax, rate-reconciliation items, taxes paid. There are also concepts whose history has multi-year gaps (PP&E
+gross and net: 2019, then 2024) and sign-swinging items (equity-method income, OCI on securities). These have no
+quarterly parts, so neither the sum nor the same-year check applies.
+
+A rule on the step from the previous year was measured and rejected. The clean recorded facts already contain 10
+genuine moves of 10^2–10^3 in the 4 newest filings, in concepts of the same kind (unrealized-gain OCI, equity
+revaluations, FY2025 non-operating income). Any threshold that catches a ÷1000 on these lines would hold or flag
+real data.
+
+None of these are caught from this one source. (P1 review rounds 6–8.)
