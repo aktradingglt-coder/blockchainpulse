@@ -267,14 +267,55 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
 ### D-036 · 2026-10-21 · SEC company facts: scale errors, not restatements
-**Decision.** Within one concept, unit and period, a filing whose value is almost exactly a power of 1000 away
-(10^±3, 10^±6, within 0.02 in log10) from the filing closest to the concept's usual size is quarantined: the classic
-XBRL "thousands entered as units" error. A lone fact a power of 1000 from its concept's median is flagged, not held.
-Facts filed in the future or before their period ended are set aside with a warning instead of blocking the whole
-company. A provider whose responses fail QA (e.g. schema drift) shows its last quality failure on the status page and
-counts as degraded, without opening the circuit.
-**Alternatives.** Quarantine any cross-filing disagreement; MAD per concept.
-**Reason.** Measured on the recorded AMZN facts (9,052 multi-filing periods): legitimate restatements reach ratios of
-41 (a 20:1 split restates share counts), so "any disagreement" would hide real data; the power-of-1000 rule trips on
-none of them, while a ×1000 revenue fact in one filing is caught. Lone power-of-1000 outliers do occur genuinely
-(a $50.5B one-off revaluation), so they are only flagged (P1 review round 6).
+**Decision.** XBRL scale errors (thousands entered as units and the like) are found from EDGAR's own data in four
+ways, each judged per concept, unit and duration (`sec_edgar._scale_errors`):
+1. *Neighbouring periods.* Each fact is compared with the median of its nearest 4 periods, as reported by other
+   filings. A fact more than 10^3.5 away is held. On a stable concept (typical distance under 10^0.15), a fact more
+   than 10^2.5 away and within 10^0.5 of a power of 1000 is held. Anything else more than 10^2.5 away in the 4 newest
+   filings is flagged and kept.
+2. *The same period in several filings.* Facts are grouped by scale. The group clearly nearest its neighbours
+   (by ≥ 10^1) is kept, and every group a power of 1000 from it is held. When the neighbours do not decide, both
+   filings' facts of that concept are held: a guess could serve the wrong scale. A filing whose comparatives are
+   mostly a power of 1000 off (at least 3) is held whole.
+3. *Sums.* Currency flows add up across periods: year to date = earlier year to date + latest quarter. The parts
+   usually come from different filings. If a sum fails, and scaling one filing's facts in it by a power of 1000 makes
+   it add up (within 1%), those facts are held. The scaled sum must need all three terms, because shrinking a term
+   into insignificance proves nothing. The side far from its neighbours is the wrong one; if that is unclear, every
+   candidate is held.
+4. *Same table.* A held fact's siblings (same filing, concept and period end, such as the trailing-twelve-month
+   figure beside a mis-scaled quarter) are held with it.
+
+Whenever two filings are weighed against each other, neighbours reported by either of them are left out, so a
+mis-scaled filing never vouches for itself. Facts that are undated, filed in the future or filed before their period
+ended are set aside with a warning, without blocking the company. A provider whose responses fail QA shows its last
+failing check on the status page and counts as degraded, without opening the circuit.
+
+**Alternatives.** Quarantine any cross-filing disagreement; MAD per concept; compare only within one period (the
+round-6 rule).
+
+**Reason.** Measured on the recorded AMZN company facts (28,891 facts; 9,052 periods filed more than once):
+- Legitimate restatements reach a cross-filing ratio of 41 (a 20:1 split), so quarantining every disagreement would
+  hide real data.
+- Genuine one-offs sit up to about 10^3 from their neighbours (a $62.8B equity revaluation).
+- Sums fail on real data only through rounding (2 ≠ 1 + 2 at $1M precision) or reclassification (2020 debt proceeds),
+  and the every-term rule rejects both.
+
+Results on the clean facts: **0 held**, and 4 recent genuine one-offs flagged.
+
+The newest 10-Q (accession 0001018724-26-000026) has 159 USD concepts with current-period facts. Seeding each
+concept's current-period facts:
+
+| Seed | Held | Flagged (kept, warned) | Missed |
+| --- | --- | --- | --- |
+| ÷1000 | 141 | 7 | 11 |
+| ×1000 | 145 | 7 | 7 |
+| ×1e6 | 152 | 0 | 7 |
+
+Every fact of the newest 10-Q at ×1000 is held, and the response is refused as stale rather than served at the
+wrong scale. The round-6 rule left 158 of 158 newest-quarter seeds undetected, and the round-7 version (neighbours
+only) left 36 of 159 ÷1000 seeds undetected.
+
+**Limit (stated, not hidden).** A concept that first appears in the newest filing has no earlier period to be judged
+against, and nothing else in one EDGAR response can show its scale is wrong: such facts are not caught (see the
+misses above). A concept whose current-period facts are all near zero, or swing in sign, is weakly constrained for
+the same reason. (P1 review rounds 6–7.)
