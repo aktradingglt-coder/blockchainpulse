@@ -1,0 +1,23 @@
+# gitleaks configuration: the full default rule set plus project-specific rules.
+title = "research-desk"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "anthropic-key-any-length"
+description = "Anthropic API key (any length, stricter than the default rule)"
+regex = '''sk-ant-[A-Za-z0-9_\-]{20,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "url-embedded-password"
+description = "Credentials embedded in a connection URL"
+regex = '''[a-z][a-z0-9+.\-]*://[^:/@\s]+:([^@/\s$]{8,})@[^\s]+'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["://"]
+
+[allowlist]
+description = "Lockfiles hold integrity hashes, not secrets"
+paths = ['''(^|/)uv\.lock$''', '''(^|/)pnpm-lock\.yaml$''']

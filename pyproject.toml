@@ -1,0 +1,110 @@
+[project]
+name = "research-desk-workspace"
+version = "0.1.0"
+description = "Workspace root for Research Desk (working name). Not a distributable package."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "rd-core",
+    "rd-db",
+    "rd-api",
+    "rd-worker",
+    "rd-scheduler",
+]
+
+[dependency-groups]
+dev = [
+    "ruff==0.17.1",
+    "mypy==2.4.0",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "hypothesis==6.170.5",
+    "pre-commit==4.7.0",
+    "pip-audit==2.10.1",
+    "types-pyyaml==6.0.12.20260906",
+    "respx==0.23.1",
+    "httpx2==2.15.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/api", "apps/worker", "apps/scheduler"]
+
+[tool.uv.sources]
+rd-core = { workspace = true }
+rd-db = { workspace = true }
+rd-api = { workspace = true }
+rd-worker = { workspace = true }
+rd-scheduler = { workspace = true }
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["apps/web", "**/alembic/versions/*.py.tmpl"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "UP", "S", "BLE", "A", "C4", "DTZ", "T20", "PT", "RET", "SIM",
+    "ARG", "PTH", "ERA", "PL", "TRY", "RUF", "ASYNC", "N", "ANN", "TID", "FBT",
+]
+ignore = [
+    "PLR0913",  # analytics functions legitimately take many keyword parameters
+    "TRY003",   # descriptive exception messages are preferred
+    "PLR2004",  # magic values in tests and thresholds are named where they matter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "ANN", "PLR2004", "ARG", "FBT", "S105", "S106"]
+"scripts/**" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rd_core", "rd_db", "rd_data", "rd_quant", "rd_agents", "rd_reports", "rd_compliance",
+                     "rd_billing", "rd_licensing", "rd_api", "rd_worker", "rd_scheduler", "rd_mcp"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+plugins = ["pydantic.mypy"]
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = [
+    "packages/core/src", "packages/db/src", "packages/data/src", "packages/quant/src",
+    "packages/agents/src", "packages/reports/src", "packages/compliance/src",
+    "packages/billing/src", "packages/licensing/src",
+    "apps/api/src", "apps/worker/src", "apps/scheduler/src",
+]
+
+# dramatiq ships py.typed but leaves RedisBroker.__init__ unannotated; the call site is one line in this module.
+[[tool.mypy.overrides]]
+module = ["rd_worker.broker"]
+disallow_untyped_calls = false
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+minversion = "9.0"
+addopts = "-ra --strict-markers --strict-config -p no:cacheprovider"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: needs Postgres/Timescale and Valkey (run via `make test-integration`)",
+]
+filterwarnings = ["error"]
+consider_namespace_packages = true
+
+[tool.coverage.run]
+branch = true
+source_pkgs = ["rd_core", "rd_db", "rd_api", "rd_worker", "rd_scheduler"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "@overload"]

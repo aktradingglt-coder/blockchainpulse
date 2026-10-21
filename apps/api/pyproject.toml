@@ -1,0 +1,25 @@
+[project]
+name = "rd-api"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "rd-core",
+    "rd-db",
+    "fastapi==0.156.4",
+    "uvicorn[standard]==0.54.0",
+    "prometheus-client==0.26.0",
+    "redis==8.1.0",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "dramatiq[redis]==2.2.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "rd_api"
+
+[tool.uv.sources]
+rd-core = { workspace = true }
+rd-db = { workspace = true }

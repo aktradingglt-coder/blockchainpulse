@@ -1,0 +1,20 @@
+# P0 evidence — captured 2026-10-21T06:22:40Z in the build sandbox
+
+$ make dev  (tail)
+make[1]: Entering directory '/home/user/blockchainpulse'
+./scripts/smoke.sh
+api readyz: {"status":"ready","checks":{"database":{"ok":true,"revision":"0001_foundations","head":"0001_foundations","timescaledb":"2.22.1"},"redis":{"ok":true}}}
+warning: The `UV_NATIVE_TLS` environment variable is deprecated and will be removed in a future release. Use `UV_SYSTEM_CERTS` instead.
+worker pipeline: ok
+pipeline status: {"components":{"rd-worker":{"ok":true,"last_heartbeat_age_s":6.6},"rd-scheduler":{"ok":true,"last_heartbeat_age_s":1.6,"leader_elected":true}},"ok":true}
+SMOKE OK
+make[1]: Leaving directory '/home/user/blockchainpulse'
+
+$ docker compose ps
+SERVICE     STATUS
+api         Up 8 seconds (healthy)
+db          Up 7 minutes (healthy)
+scheduler   Up 8 seconds (healthy)
+valkey      Up 7 minutes (healthy)
+web         Up 7 minutes (healthy)
+worker      Up 8 seconds (healthy)

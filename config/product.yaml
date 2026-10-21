@@ -1,0 +1,97 @@
+# Single source of truth for product identity, commercial terms and UI copy values (PROMPT §2).
+# Every value marked `working: true` or `status: proposed` needs owner confirmation (STATUS.md → Blocked on humans).
+schema_version: 1
+
+identity:
+  product_name: "Research Desk (working name)"
+  product_short_name: "Research Desk"
+  working: true
+  legal_entity_name: "Research Desk (Private) Limited — working name, not yet incorporated"
+  country_of_incorporation: "PK"
+  primary_domain: "example.com"
+  support_email: "support@example.com"
+  logo_path: "apps/web/public/brand/wordmark.svg"
+
+brand:
+  # Design tokens live in config/design_tokens.yaml; fonts are SIL OFL licensed.
+  fonts:
+    sans: "Inter"
+    mono: "JetBrains Mono"
+  tokens_file: "config/design_tokens.yaml"
+
+audience:
+  target_users:
+    - active retail traders
+    - prop-firm traders
+    - independent analysts
+    - small funds and family offices
+    - finance content creators
+
+markets:
+  sales_countries: "worldwide"          # narrowed by config/jurisdiction_rules.yaml
+  jurisdiction_rules_file: "config/jurisdiction_rules.yaml"
+  excluded_coverage:
+    - id: "pk_listed_securities"
+      description: "Pakistan-listed securities"
+      until: "owner records a legal opinion in docs/legal/"
+
+defaults:
+  display_currency: "USD"
+  server_timezone: "UTC"
+  user_timezone_source: "user profile (browser timezone on sign-up)"
+
+commercial:
+  trial_days: 7
+  min_gross_margin: 0.70
+  billing_provider: "paddle"
+  billing_fallback_provider: "lemonsqueezy"
+  pricing_status: "proposed"   # derived from scripts/cost_model.py at P11; owner confirms
+  credits:
+    deep_dive: {quick: 3, standard: 5, extended: 10}
+    ask_the_desk_answer: 1
+    screener_run: 1
+  tiers:
+    - id: "trial"
+      name: "Free trial"
+      price_usd_month: 0
+      price_usd_year: 0
+      credits_month: 3
+      seats: 1
+      house_report_delay_hours: 24
+      features: ["house_reports_delayed", "track_record"]
+    - id: "starter"
+      name: "Starter"
+      price_usd_month: 39
+      price_usd_year: 390
+      credits_month: 20
+      seats: 1
+      house_report_delay_hours: 0
+      features: ["house_reports", "email_delivery", "telegram_delivery", "track_record"]
+    - id: "pro"
+      name: "Pro"
+      price_usd_month: 149
+      price_usd_year: 1490
+      credits_month: 100
+      seats: 1
+      house_report_delay_hours: 0
+      alert_rules: 25
+      features: ["house_reports", "email_delivery", "telegram_delivery", "discord_delivery", "crypto_pulse",
+                 "screener", "alerts", "ask_the_desk", "pdf_export", "track_record"]
+    - id: "desk"
+      name: "Desk / Team"
+      price_usd_month: 599
+      price_usd_year: 5990
+      credits_month: 400
+      seats: 5
+      credits_pooled: true
+      house_report_delay_hours: 0
+      alert_rules: 100
+      priority_queue: true
+      features: ["house_reports", "email_delivery", "telegram_delivery", "discord_delivery", "crypto_pulse",
+                 "screener", "alerts", "ask_the_desk", "pdf_export", "track_record", "shared_watchlists",
+                 "api_access", "mcp_server"]
+  self_hosted_licence:
+    price_usd_once: 1999
+    updates_months: 12
+    renewal_price_usd_year: 599
+    offline_grace_days: 14

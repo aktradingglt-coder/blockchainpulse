@@ -1,0 +1,119 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.32"
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22.22.0"
+
+jobs:
+  python:
+    name: python · lint, types, unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --all-packages
+      - run: make tools
+      - name: ruff
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: mypy --strict
+        run: uv run mypy packages apps/api apps/worker apps/scheduler tests
+      - name: unit tests (with coverage)
+        run: uv run pytest -m "not integration" --cov --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: coverage-python
+          path: coverage.xml
+
+  web:
+    name: web · lint, types, tests, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: pnpm --dir apps/web install --frozen-lockfile
+      - run: pnpm --dir apps/web lint
+      - run: pnpm --dir apps/web typecheck
+      - run: pnpm --dir apps/web test
+      - run: pnpm --dir apps/web build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  stack:
+    name: stack · make dev boots all services, smoke, integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --all-packages
+      - name: make dev (build images, boot, wait for health, smoke)
+        run: make dev
+      - name: integration tests against the running stack
+        run: make test-integration
+      - name: service status on failure
+        if: failure()
+        run: |
+          docker compose --project-directory . --env-file .env -f infra/compose/compose.yaml ps
+          docker compose --project-directory . --env-file .env -f infra/compose/compose.yaml logs --no-color --tail=200
+      - name: tear down
+        if: always()
+        run: make clean-dev
+
+  secrets:
+    name: secrets · gitleaks over full history
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+      - run: make tools
+      - run: .tools/bin/gitleaks git --config .gitleaks.toml --redact --no-banner --verbose .
+
+  audit:
+    name: supply chain · dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: uv sync --frozen --all-packages
+      - run: mkdir -p .tools && make audit

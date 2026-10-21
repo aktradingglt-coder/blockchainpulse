@@ -1,0 +1,5 @@
+node_modules/
+.next/
+src/generated/
+next-env.d.ts
+*.tsbuildinfo

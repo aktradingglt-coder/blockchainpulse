@@ -1,0 +1,126 @@
+# Local development stack. Paths are relative to the repo root: always run via `make dev`
+# (which passes --project-directory . and generates .env with random local credentials).
+# Images pinned by digest (D-009). Ports bind to 127.0.0.1 only.
+name: rdesk
+
+x-python-service: &python-service
+  image: rdesk-python:dev
+  build:
+    context: .
+    dockerfile: infra/docker/python.Dockerfile
+    secrets: [build_ca]
+  environment: &python-env
+    APP_ENV: dev
+    DEPLOYMENT_MODE: hosted
+    LOG_FORMAT: json
+    DATABASE_URL: postgresql+asyncpg://rdesk:${POSTGRES_PASSWORD:?run make dev to generate .env}@db:5432/rdesk
+    REDIS_URL: redis://:${VALKEY_PASSWORD:?run make dev to generate .env}@valkey:6379/0
+    CORS_ALLOWED_ORIGINS: http://localhost:3000
+    FEATURE_FLAGS: ${FEATURE_FLAGS:-}
+  restart: unless-stopped
+
+services:
+  db:
+    image: mirror.gcr.io/timescale/timescaledb:2.22.1-pg16@sha256:de6e2326b4a3f5f6774e2629b60791d3ccf3f58a58e551414e6730e17e43f17e
+    environment:
+      POSTGRES_USER: rdesk
+      POSTGRES_DB: rdesk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run make dev to generate .env}
+      TIMESCALEDB_TELEMETRY: "off"
+    ports: ["127.0.0.1:${DB_PORT:-5432}:5432"]
+    volumes: [db-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rdesk -d rdesk"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  valkey:
+    image: mirror.gcr.io/valkey/valkey:8.1.4-alpine@sha256:e706d1213aaba6896c162bb6a3a9e1894e1a435f28f8f856d14fab2e10aa098b
+    command: ["valkey-server", "--requirepass", "${VALKEY_PASSWORD:?run make dev to generate .env}", "--appendonly", "yes"]
+    ports: ["127.0.0.1:${VALKEY_PORT:-6379}:6379"]
+    volumes: [valkey-data:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD}
+    restart: unless-stopped
+
+  migrate:
+    <<: *python-service
+    command: ["python", "-m", "rd_db.migrate"]
+    restart: "no"
+    depends_on:
+      db: {condition: service_healthy}
+
+  api:
+    <<: *python-service
+    environment:
+      <<: *python-env
+      SERVICE_NAME: rd-api
+    command: ["uvicorn", "rd_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-server-header"]
+    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      valkey: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3).status == 200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  worker:
+    <<: *python-service
+    environment:
+      <<: *python-env
+      SERVICE_NAME: rd-worker
+    command: ["dramatiq", "rd_worker.actors", "--processes", "1", "--threads", "4", "--skip-logging"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      valkey: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-m", "rd_db.healthcheck", "rd-worker"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+
+  scheduler:
+    <<: *python-service
+    environment:
+      <<: *python-env
+      SERVICE_NAME: rd-scheduler
+    command: ["python", "-m", "rd_scheduler.main"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      valkey: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-m", "rd_db.healthcheck", "rd-scheduler"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+
+  web:
+    image: rdesk-web:dev
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      secrets: [build_ca]
+    ports: ["127.0.0.1:${WEB_PORT:-3000}:3000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    restart: unless-stopped
+
+secrets:
+  build_ca:
+    file: .tools/build_ca.crt   # staged by `make`; empty unless EXTRA_CA_BUNDLE is set
+
+volumes:
+  db-data:
+  valkey-data:

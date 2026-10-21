@@ -1,0 +1,53 @@
+# STATUS.md
+
+_Last updated: 2026-10-21_
+
+## Current phase
+
+**P0 Foundations — built, awaiting independent review.** P1 does not start until the P0 reviewer returns PASS
+(`CRITIC_LEDGER.md`).
+
+## Done (P0), with evidence
+
+| Item | Evidence |
+| --- | --- |
+| Planning docs: ARCHITECTURE, BUILD_PLAN, DECISIONS, CRITIC_LEDGER, STATUS | repo root |
+| Vendor notes (what was checked, when, what is unverified) | `docs/vendor-notes/` |
+| Single config surface (`config/*.yaml`) validated at start-up | `packages/core/tests/test_config.py` |
+| Design tokens, every text pair ≥ 4.5:1 in light and dark | `packages/core/tests/test_design.py` |
+| uv workspace, exact pins, one lockfile; pnpm lockfile; images by digest; actions by SHA | `tests/test_repo_hygiene.py` |
+| Settings from env, secrets as `SecretStr` | `packages/core/tests/test_settings.py` |
+| JSON logging with secret redaction + trace IDs; OTel tracing; optional Sentry with scrubbing | `packages/core/tests/test_redaction.py`, `test_logging_tracing.py` |
+| FastAPI `/healthz` `/readyz` `/metrics` `/v1/status` `/v1/meta`, security headers, CORS allow-list | `apps/api/tests/test_app_unit.py`, `tests/integration/test_services.py` |
+| Postgres 16 + TimescaleDB, Alembic migration, heartbeats | `tests/integration/test_database.py` |
+| Dramatiq worker (retries, dead-letter, async actors) with end-to-end probe | `tests/integration/test_services.py`, `scripts/smoke.sh` |
+| Scheduler with Postgres advisory-lock leader election and fail-over | `tests/integration/test_leader_lock.py`, `test_processes.py` |
+| Next.js app (TS strict, Tailwind, ESLint), tokens generated from YAML | `apps/web` lint/typecheck/test/build |
+| `make dev` boots db, valkey, migrate, api, worker, scheduler, web — all healthy — then smoke | `docs/evidence/p0/make-dev.txt` |
+| Secret scanning active (pre-commit + CI full history); planted keys detected | `tests/test_secret_scanning.py`, CI `secrets` job |
+| CI: python, web, stack (compose + integration), secrets, audit | `.github/workflows/ci.yml` |
+| Threat model draft (STRIDE) | `docs/security/threat-model.md` |
+
+## Next
+
+1. P0 independent review → fix → PASS.
+2. P1 data layer: adapter protocol, canonical schemas, rate limiting, cache, circuit breakers, QA checks, freshness,
+   licence gate; adapters CFTC, EDGAR, FRED (flag off), EIA, one CCXT exchange, Twelve Data (flag off);
+   CI workflow to record cassettes from live sources (D-011).
+
+## Blocked on humans
+
+| # | Item | Why | Where it is tracked |
+| --- | --- | --- | --- |
+| H1 | Product name, legal entity, domain, support email, logo | Working values only (D-001) | config/product.yaml |
+| H2 | Legal opinion per sales country; Pakistan SECP Research Analyst Regulations question | Regulatory | docs/legal/ (to be filed) |
+| H3 | Legal review of FRED terms (generative-AI clause) | FRED adapter off by default (D-010) | docs/vendor-notes/fred.md |
+| H4 | Merchant-of-record confirmation that a Pakistan-incorporated company can onboard and receive payouts (Paddle; Lemon Squeezy fallback) | Not confirmed in official docs | docs/vendor-notes/billing.md |
+| H5 | Commercial data contracts (Twelve Data, Databento, others) and each crypto exchange's display terms | Licences | docs/vendor-notes/commercial-data.md, crypto-exchanges.md |
+| H6 | Pricing confirmation (tiers are proposed, pending P11 cost-model measurement) | Commercial | config/product.yaml `pricing_status: proposed` |
+| H7 | Sanctions/jurisdiction list review by counsel | Legal | config/jurisdiction_rules.yaml |
+
+## Environment notes for reviewers
+
+- The build sandbox cannot reach most data-vendor hosts; cassettes will be recorded in CI (D-011).
+- Docker Hub is rate-limited from the sandbox; images come from `mirror.gcr.io` pinned by digest (D-009).
