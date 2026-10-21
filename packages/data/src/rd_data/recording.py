@@ -22,6 +22,7 @@ from typing import Any
 from rd_core.clock import isoformat_z
 from rd_core.config import load_config
 from rd_core.logging import configure_logging
+from rd_core.redaction import redact_text
 from rd_core.settings import Settings
 from rd_data.adapters.base import AdapterContext, BaseAdapter, DataRequest
 from rd_data.cassette import Cassette, RecordingTransport, shape_drift
@@ -76,6 +77,8 @@ async def _run_one(
         )
     except DataError as exc:
         summary.update(ok=False, error=type(exc).__name__, detail=str(exc)[:500])
+    except Exception as exc:  # noqa: BLE001 - one failing request must not abort the whole recording run
+        summary.update(ok=False, error=type(exc).__name__, detail=redact_text(str(exc))[:500], unexpected=True)
     finally:
         await adapter.aclose()
     summary["http"] = [f"{i.status} {i.url}" for i in transport.interactions]

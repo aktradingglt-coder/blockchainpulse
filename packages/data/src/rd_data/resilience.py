@@ -70,8 +70,8 @@ for i = 1, n do
   local ts = tonumber(v[2]) or now
   tokens = math.min(cap, tokens + math.max(0, now - ts) * rate)
   state[i] = tokens
-  if tokens < 1 then
-    local w = (1 - tokens) / rate
+  if tokens < 0.999999 then
+    local w = math.max(0.001, (1 - tokens) / rate)
     if w > wait then wait = w end
   end
 end
@@ -120,6 +120,10 @@ class RedisRateLimiter:
             await asyncio.sleep(wait)
 
 
+_EPSILON = 1e-6
+_MIN_WAIT_S = 0.001
+
+
 class LocalRateLimiter:
     """Single-process token buckets with an injectable clock (same maths as the Lua script)."""
 
@@ -139,10 +143,10 @@ class LocalRateLimiter:
             tokens, ts = self._state.get(key, (cap, now))
             tokens = min(cap, tokens + max(0.0, now - ts) * rate)
             refreshed[key] = tokens
-            if tokens < 1:
-                wait = max(wait, (1 - tokens) / rate)
+            if tokens < 1 - _EPSILON:  # epsilon: float refill must not stall just below one token
+                wait = max(wait, _MIN_WAIT_S, (1 - tokens) / rate)
         for key, tokens in refreshed.items():
-            self._state[key] = ((tokens - 1) if wait == 0 else tokens, now)
+            self._state[key] = (max(0.0, tokens - 1) if wait == 0 else tokens, now)
         return wait
 
     async def acquire(self, provider: str, limit: RateLimit, *, timeout_s: float = 30.0) -> None:

@@ -197,7 +197,13 @@ class RecordingTransport(httpx.AsyncBaseTransport):
             except json.JSONDecodeError:
                 shape = None
         self.interactions.append(Interaction(method, url, params, response.status_code, content_type, text, shape))
-        return httpx.Response(response.status_code, content=body, headers=response.headers, request=request)
+        # ``body`` is already decoded: drop transfer/encoding headers so httpx does not decode it a second time.
+        headers = [
+            (k, v)
+            for k, v in response.headers.multi_items()
+            if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")
+        ]
+        return httpx.Response(response.status_code, content=body, headers=headers, request=request)
 
     def to_cassette(self, provider: str, source: str) -> Cassette:
         now = datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
