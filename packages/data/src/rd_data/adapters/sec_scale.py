@@ -41,6 +41,9 @@ DECISIVE_MARGIN = 1.0
 FILING_SCALE_SHARE = 0.5
 #: Relative tolerance for "January-June = January-March + April-June" (each value is rounded where it was reported).
 ADDITIVITY_TOLERANCE = 0.01
+#: Share of a relation's largest term that leaving one side of a repair out must exceed (beyond twice the repaired
+#: residual) for that side to count as needed: rounding to the reported unit stays far below it.
+NEEDED_SHARE = 1e-4
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 #: Held facts needed (with FILING_SCALE_SHARE of the column) before a filing's whole column for one date is held.
 COLUMN_MIN_HELD = 3
@@ -762,18 +765,17 @@ def _fixed(
 
 
 def _closes_with_both_sides(contributions: Sequence[float], rescaled: Sequence[bool]) -> bool:
-    """The relation closes after the rescale, and needs both the rescaled terms and the others to do so: a rescale
-    that only shrinks its terms into insignificance (or dwarfs the rest) proves nothing. Small genuine lines of a long
-    relation may sit below the tolerance; they do not veto a repair."""
-    without_group = [0.0 if r else v for v, r in zip(contributions, rescaled, strict=True)]
-    without_rest = [v if r else 0.0 for v, r in zip(contributions, rescaled, strict=True)]
-    return (
-        _balances(contributions)
-        and any(rescaled)
-        and not all(rescaled)
-        and not _balances(without_group)
-        and not _balances(without_rest)
-    )
+    """The relation closes after the rescale, and needs both the rescaled terms and the others to do so: leaving either
+    side out must leave a residual well beyond the repaired one (a rescale that only shrinks its terms into
+    insignificance, or dwarfs the rest, proves nothing). A genuine line far smaller than the relation's largest term
+    still counts when the repaired relation closes much more exactly with it than without it."""
+    if not (_balances(contributions) and any(rescaled) and not all(rescaled)):
+        return False
+    residual = abs(sum(contributions))
+    floor = 2 * residual + NEEDED_SHARE * max(abs(v) for v in contributions)
+    without_group = abs(sum(0.0 if r else v for v, r in zip(contributions, rescaled, strict=True)))
+    without_rest = abs(sum(v if r else 0.0 for v, r in zip(contributions, rescaled, strict=True)))
+    return without_group > floor and without_rest > floor
 
 
 def _blame(neighbours: _Neighbours, one: list[int], other: list[int], own: frozenset[str]) -> list[int] | None:

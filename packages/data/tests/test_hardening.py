@@ -2793,3 +2793,28 @@ def test_learned_signs_prefer_the_assignment_that_closes_exactly() -> None:
     records = [*filing((2022, 2023, 2024), "earlier"), *filing((2023, 2024, 2025), "a", seed=0.001)]
     held, _ = sec_scale.scale_errors(records)
     assert (settle, 2025, "a") in {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held}
+
+
+def test_a_small_genuine_line_still_pins_a_mis_scaled_cell() -> None:
+    """Apple's FY2025 UTB rollforward: the prior-period decreases line (71M) is 0.3% of the 23.2B balance, so the
+    relation closes within the 1% tolerance without it; x1000 it breaks the rollforward, and only rescaling it
+    closes it exactly."""
+    balance = "UnrecognizedTaxBenefits"
+    rows = {
+        "UnrecognizedTaxBenefitsIncreasesResultingFromCurrentPeriodTaxPositions": (2628e6, 2542e6, 3795e6),
+        "UnrecognizedTaxBenefitsIncreasesResultingFromPriorPeriodTaxPositions": (2044e6, 1727e6, 1971e6),
+        "UnrecognizedTaxBenefitsDecreasesResultingFromPriorPeriodTaxPositions": (1463e6, 386e6, 71e6 * 1000),
+        "UnrecognizedTaxBenefitsDecreasesResultingFromSettlementsWithTaxingAuthorities": (19e6, 1070e6, 2939e6),
+        "UnrecognizedTaxBenefitsReductionsResultingFromLapseOfApplicableStatuteOfLimitations": (494e6, 229e6, 1552e6),
+    }
+    years = (2023, 2024, 2025)
+    balances = {2022: 16758e6, 2023: 19454e6, 2024: 22038e6, 2025: 23242e6}
+    facts = [(balance, -y, v) for y, v in balances.items()]
+    facts += [(c, y, v) for c, vs in rows.items() for y, v in zip(years, vs, strict=True)]
+    earlier = [(balance, -y, v) for y, v in balances.items() if y < 2025] + [(balance, -2021, 15e9)]
+    earlier += [(c, y, v) for c, vs in rows.items() for y, v in zip((2023, 2024), vs[:2], strict=True)]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("UnrecognizedTaxBenefitsDecreasesResultingFromPriorPeriodTaxPositions", 2025, "a")
+    }
