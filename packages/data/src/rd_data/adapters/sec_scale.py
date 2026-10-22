@@ -13,6 +13,7 @@ import math
 import re
 import statistics
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from datetime import date, timedelta
 
 from rd_data.schemas import FundamentalFact
@@ -110,7 +111,35 @@ IDENTITIES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign",
         ),
     ),
+    (
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        (
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign",
+        ),
+    ),
+    ("SellingGeneralAndAdministrativeExpense", ("SellingAndMarketingExpense", "GeneralAndAdministrativeExpense")),
     ("LiabilitiesAndStockholdersEquity", ("Assets",)),
+)
+#: A filing's comparatives for a line (at least MIN_COMPARATIVES of them, e.g. a 10-K's two prior years) must agree
+#: within this many orders of magnitude to vouch for its scale. One comparative (a 10-Q's prior-year quarter) proves
+#: nothing about a line that moves a lot.
+MIN_COMPARATIVES = 2
+COMPARATIVE_SPREAD = 0.5
+#: Statutory tax in the rate reconciliation = statutory rate x pre-tax income (whichever pre-tax total is reported).
+STATUTORY_RATE = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate"
+STATUTORY_AMOUNT = "IncomeTaxReconciliationIncomeTaxExpenseBenefitAtFederalStatutoryIncomeTaxRate"
+PRETAX_TOTALS = (
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+)
+#: (change over a period, balance): the change equals the closing minus the opening balance, from the same filing.
+CHANGES: tuple[tuple[str, str], ...] = (
+    ("GoodwillPeriodIncreaseDecrease", "Goodwill"),
+    (
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    ),
 )
 #: A balance (instant fact) in a recent filing that moved more than 10^INSTANT_FLAG_STEP from the previous period end
 #: is flagged: balances move smoothly (3 genuine moves that large in 17 years of AMZN balances).
@@ -167,13 +196,15 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     held |= _filing_disagreements(records, logs, by_period, neighbours)
     held |= _additivity_errors(records, neighbours)
     held |= _prefix_errors(records, logs, neighbours)
+    held |= _comparative_errors(records, logs)
     held |= _identity_errors(records, held, neighbours)
     recent = _recent_accessions(records)
     for i, f in enumerate(records):
         step = neighbours.previous_step(i) if f.period_start is None and f.accession in recent else None
         if step is not None and step > INSTANT_FLAG_STEP:
             flagged.add(i)
-    held |= _beyond_assets(records, logs, held, flagged)
+    # Facts with no history in other filings get the tighter bound too: nothing else vouches for their size.
+    held |= _beyond_assets(records, logs, held, flagged | (set(range(len(records))) - set(distance)))
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
     # A filing's column (its facts for one period end) that is mostly held is held whole: the scale was set for the
@@ -229,6 +260,21 @@ class _Neighbours:
             return None
         return abs(value - statistics.median(levels))
 
+    def own_distance(self, i: int) -> float | None:
+        """Orders of magnitude between a fact and the other periods its own filing reports for the same line (the
+        comparatives beside it): the fallback evidence for a line that no other filing reports."""
+        f = self.records[i]
+        value = self.logs[i]
+        periods = self.series.get((f.concept, f.unit, _duration(f)), {})
+        levels = [
+            statistics.median(own)
+            for e, reported in periods.items()
+            if e != f.period_end and (own := [v for acc, v in reported if acc == f.accession])
+        ]
+        if len(levels) < MIN_COMPARATIVES or max(levels) - min(levels) > COMPARATIVE_SPREAD or value is None:
+            return None  # too few, or disagreeing, comparatives say nothing about this cell's scale
+        return abs(value - statistics.median(levels))
+
     def previous_step(self, i: int) -> float | None:
         """Orders of magnitude between a fact and the previous period end of its series, as other filings report it."""
         f = self.records[i]
@@ -252,6 +298,35 @@ def _recent_accessions(records: list[FundamentalFact]) -> set[str]:
     for f in records:
         filed_on[f.accession] = max(filed_on.get(f.accession, f.filed), f.filed)
     return set(sorted(filed_on, key=filed_on.__getitem__)[-FLAG_FILINGS:])
+
+
+def _comparative_errors(records: list[FundamentalFact], logs: list[float | None]) -> set[int]:
+    """A filing's newest period of a concept against the comparatives the same filing reports (the prior years beside
+    it in the same table, same unit and duration). When those comparatives agree with each other (within
+    10^COMPARATIVE_SPREAD) and the newest cell is about a power of 1000 away from them, the cell is held: the filing
+    itself shows the scale it uses for that line. This needs no other filing, so it covers lines first reported in a
+    new table, whose history is only their own comparatives."""
+    series: dict[tuple[str, str, str, int | None], dict[date, list[float]]] = {}
+    members: dict[tuple[str, str, str, int | None, date], list[int]] = {}
+    for i, f in enumerate(records):
+        if (v := logs[i]) is not None:
+            key = (f.accession, f.concept, f.unit, _duration(f))
+            series.setdefault(key, {}).setdefault(f.period_end, []).append(v)
+            members.setdefault((*key, f.period_end), []).append(i)
+    held: set[int] = set()
+    for key, periods in series.items():
+        if len(periods) < 1 + MIN_COMPARATIVES:
+            continue
+        newest = max(periods)
+        levels = [statistics.median(v) for e, v in periods.items() if e != newest]
+        if max(levels) - min(levels) > COMPARATIVE_SPREAD:
+            continue  # the line itself swings between years: no scale to read off its comparatives
+        reference = statistics.median(levels)
+        for i in members[(*key, newest)]:
+            off = (logs[i] or 0.0) - reference
+            if abs(off) > FLAG_DISTANCE and _scale_like(off, NEAR_POWER):
+                held.add(i)
+    return held
 
 
 def _beyond_assets(
@@ -289,34 +364,32 @@ def _beyond_assets(
     return out
 
 
+_Instance = tuple[tuple[int, float], ...]
+
+
 def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours: _Neighbours) -> set[int]:
-    """IDENTITIES within one filing and period, solved together: identities that share terms form one system. A broken
-    system is repaired by rescaling a group of its terms by a power of 1000 so that every identity holds again (each
-    repaired identity needing every term). Scaling a group up is the same as scaling the rest down, so the two sides
-    are weighed against their own earlier periods (_blame); when that does not decide, the whole system is held.
-    An identity that holds as reported but has a held term is held whole: its terms were tabled, and mis-scaled,
-    together."""
-    wanted = {c for total, parts in IDENTITIES for c in (total, *parts)}
-    index: dict[tuple[str, str, date | None, date], dict[str, int]] = {}
-    for i, f in enumerate(records):
-        if f.concept in wanted and _CURRENCY.match(f.unit):
-            index.setdefault((f.accession, f.unit, f.period_start, f.period_end), {})[f.concept] = i
+    """Exact relations within one filing (IDENTITIES, statutory tax = rate x pre-tax income, CHANGES), solved together:
+    relations that share facts form one system. A broken system is repaired by rescaling a group of its facts by a
+    power of 1000 so that every relation holds again (each repaired relation needing every term). Scaling a group up is
+    the same as scaling the rest down, so the two sides are weighed against their own earlier periods (_blame); when
+    that does not decide, the whole system is held. A relation that holds as reported around a held fact is held with
+    it when its other facts are off their own history too (the table was mis-scaled together); when they sit on their
+    history, the relation holding is evidence that the held fact is right, not a reason to hold more."""
+    instances = _instances(records)
+    broken = [inst for inst in instances if not _balances(_contributions(records, inst))]
+    consistent = [inst for inst in instances if inst not in broken]
     out: set[int] = set()
-    consistent: list[list[int]] = []
-    for terms in index.values():
-        present = [
-            [terms[total], *(terms[p] for p in parts)]
-            for total, parts in IDENTITIES
-            if total in terms and all(p in terms for p in parts)
-        ]
-        broken = [idx for idx in present if not _balances([records[k].value for k in idx])]
-        consistent += [idx for idx in present if idx not in broken]
-        for system in _systems(present):
-            if any(idx in broken for idx in system):
-                out |= _repair(records, system, [idx for idx in system if idx in broken], neighbours)
+    for system in _systems(instances):
+        if any(inst in broken for inst in system):
+            out |= _repair(records, system, [inst for inst in system if inst in broken], neighbours)
     known = held | out
     for _ in range(len(IDENTITIES)):  # spread through nested identities (total -> current -> current federal)
-        spread = {k for idx in consistent if any(k2 in known for k2 in idx) for k in idx} - known
+        spread: set[int] = set()
+        for inst in consistent:
+            terms = {k for k, _ in inst}
+            rest = terms - known
+            if rest and terms & known and _off_history(neighbours, records, rest):
+                spread |= rest
         if not spread:
             break
         known |= spread
@@ -324,20 +397,63 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     return out
 
 
-def _systems(identities: list[list[int]]) -> list[list[list[int]]]:
-    """Group identities that share terms."""
-    systems: list[list[list[int]]] = []
-    for idx in identities:
-        joined = [s for s in systems if any(set(idx) & set(other) for other in s)]
-        merged = [idx, *(other for s in joined for other in s)]
+def _instances(records: list[FundamentalFact]) -> list[_Instance]:
+    """Every exact relation the response lets us check, as signed terms that sum to zero."""
+    wanted = {c for total, parts in IDENTITIES for c in (total, *parts)} | {STATUTORY_AMOUNT, *PRETAX_TOTALS}
+    wanted |= {c for pair in CHANGES for c in pair}
+    index: dict[tuple[str, str, date | None, date], dict[str, int]] = {}
+    rates: dict[tuple[str, date | None, date], float] = {}
+    for i, f in enumerate(records):
+        if f.concept in wanted and _CURRENCY.match(f.unit):
+            index.setdefault((f.accession, f.unit, f.period_start, f.period_end), {})[f.concept] = i
+        elif f.concept == STATUTORY_RATE and f.unit == "pure":
+            rates[(f.accession, f.period_start, f.period_end)] = f.value
+    out: list[_Instance] = []
+    for (accession, unit, start, end), terms in index.items():
+        for total, parts in IDENTITIES:
+            if total in terms and all(p in terms for p in parts):
+                out.append(((terms[total], 1.0), *((terms[p], -1.0) for p in parts)))
+        rate = rates.get((accession, start, end))
+        pretax = next((terms[c] for c in PRETAX_TOTALS if c in terms), None)
+        if rate and STATUTORY_AMOUNT in terms and pretax is not None:
+            out.append(((terms[STATUTORY_AMOUNT], 1.0), (pretax, -rate)))
+        if start is None:
+            continue
+        for change, balance in CHANGES:
+            closing = index.get((accession, unit, None, end), {}).get(balance)
+            opening = index.get((accession, unit, None, start - timedelta(days=1)), {}).get(balance)
+            if change in terms and closing is not None and opening is not None:
+                out.append(((terms[change], 1.0), (closing, -1.0), (opening, 1.0)))
+    return out
+
+
+def _contributions(
+    records: list[FundamentalFact], inst: _Instance, group: AbstractSet[int] = frozenset(), factor: float = 1.0
+) -> list[float]:
+    return [coef * records[k].value * (factor if k in group else 1.0) for k, coef in inst]
+
+
+def _off_history(neighbours: _Neighbours, records: list[FundamentalFact], facts: set[int]) -> bool:
+    """Whether these facts sit away from their own history (or have none to sit on)."""
+    found = [d for i in facts if (d := neighbours.distance(i, frozenset({records[i].accession}))) is not None]
+    return not found or statistics.median(found) > CONSISTENT_DISTANCE
+
+
+def _systems(instances: list[_Instance]) -> list[list[_Instance]]:
+    """Group relations that share facts."""
+    systems: list[list[_Instance]] = []
+    for inst in instances:
+        facts = {k for k, _ in inst}
+        joined = [s for s in systems if any(facts & {k for k, _ in other} for other in s)]
+        merged = [inst, *(other for s in joined for other in s)]
         systems = [s for s in systems if s not in joined] + [merged]
     return systems
 
 
 def _repair(
-    records: list[FundamentalFact], system: list[list[int]], broken: list[list[int]], neighbours: _Neighbours
+    records: list[FundamentalFact], system: list[_Instance], broken: list[_Instance], neighbours: _Neighbours
 ) -> set[int]:
-    terms = sorted({k for idx in system for k in idx})
+    terms = sorted({k for inst in system for k, _ in inst})
     if len(terms) > MAX_IDENTITY_TERMS:
         return set(terms)  # too large to solve here: hold rather than guess
     wrong: set[int] = set()
@@ -360,12 +476,12 @@ def _repair(
 
 
 def _repaired(
-    records: list[FundamentalFact], system: list[list[int]], broken: list[list[int]], group: set[int], factor: float
+    records: list[FundamentalFact], system: list[_Instance], broken: list[_Instance], group: set[int], factor: float
 ) -> bool:
-    def value(k: int) -> float:
-        return records[k].value * factor if k in group else records[k].value
-
-    return all((_balances_with_every_term if idx in broken else _balances)([value(k) for k in idx]) for idx in system)
+    return all(
+        (_balances_with_every_term if inst in broken else _balances)(_contributions(records, inst, group, factor))
+        for inst in system
+    )
 
 
 def _blame(neighbours: _Neighbours, one: list[int], other: list[int], own: frozenset[str]) -> list[int] | None:
@@ -389,19 +505,29 @@ def _blame(neighbours: _Neighbours, one: list[int], other: list[int], own: froze
 
 
 def _known_mean(neighbours: _Neighbours, group: list[int], own: frozenset[str]) -> float | None:
-    found = [d for i in group if (d := neighbours.distance(i, own)) is not None]
+    """Mean distance of a group from its history: other filings' neighbouring periods where they exist. A line no
+    other filing reports falls back on its own filing's comparatives, but only as evidence against it (far from them):
+    a row mis-scaled in every year agrees with itself, so agreement there vouches for nothing."""
+    found: list[float] = []
+    for i in group:
+        d = neighbours.distance(i, own)
+        if d is None and (d := neighbours.own_distance(i)) is not None and d <= FLAG_DISTANCE:
+            d = None
+        if d is not None:
+            found.append(d)
     return statistics.mean(found) if found else None
 
 
-def _balances(values: Sequence[float]) -> bool:
-    total, *parts = values
-    return abs(total - sum(parts)) <= ADDITIVITY_TOLERANCE * max(abs(v) for v in values)
+def _balances(contributions: Sequence[float]) -> bool:
+    """Signed terms that should sum to zero do, within ADDITIVITY_TOLERANCE of the largest term."""
+    largest = max(abs(v) for v in contributions)
+    return largest == 0 or abs(sum(contributions)) <= ADDITIVITY_TOLERANCE * largest
 
 
-def _balances_with_every_term(values: Sequence[float]) -> bool:
-    """The identity holds and needs every term: rescaling one term into insignificance proves nothing."""
-    return _balances(values) and not any(
-        _balances([0.0 if j == k else v for j, v in enumerate(values)]) for k in range(len(values))
+def _balances_with_every_term(contributions: Sequence[float]) -> bool:
+    """The relation holds and needs every term: rescaling one term into insignificance proves nothing."""
+    return _balances(contributions) and not any(
+        _balances([0.0 if j == k else v for j, v in enumerate(contributions)]) for k in range(len(contributions))
     )
 
 
@@ -448,8 +574,8 @@ def _filing_disagreements(
 ) -> set[int]:
     """Periods filed more than once: filings a power of 1000 from the reference filing (the one closest to its
     independent neighbours) are held. When the neighbours do not clearly side with one filing, the disagreeing
-    filings' facts of that concept are all held (a guess could pick the wrong scale). A filing whose comparatives
-    mostly disagree by a power of 1000 is held whole."""
+    filings' facts of that concept are all held (a guess could pick the wrong scale). A filing is held whole when
+    most of everything it shares with other filings (not only the disputed periods) is a power of 1000 off."""
     held: set[int] = set()
     off_by_accession: dict[str, list[bool]] = {}
     ambiguous: set[tuple[str, str, str]] = set()
@@ -459,7 +585,9 @@ def _filing_disagreements(
             continue
         values = [v for i in idx if (v := logs[i]) is not None]
         if not any(_scale_like(a - b) for a in values for b in values):
-            continue  # filings agree up to restatements: nothing to decide
+            for i in idx:  # filings agree up to restatements: this period counts for every filing as "on scale"
+                off_by_accession.setdefault(records[i].accession, []).append(False)
+            continue
         # Group the facts by scale; the group clearly nearest the neighbouring periods is kept.
         groups: list[list[int]] = []
         for i in idx:

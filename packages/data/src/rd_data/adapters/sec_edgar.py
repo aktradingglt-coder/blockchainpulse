@@ -122,30 +122,28 @@ class SecEdgarAdapter(BaseAdapter):
         records: list[Instrument] = []
         rejected = 0
         for row in data.values():
-            try:
-                records.append(
-                    Instrument(
-                        symbol=str(row["ticker"]).upper(),
-                        asset_class=AssetClass.EQUITY,
-                        name=str(row["title"]),
-                        exchange=None,
-                        currency="USD",
-                        provider_symbol=cik10(row["cik_str"]),
-                    )
-                )
-            except (KeyError, ValueError, InvalidArgs, TypeError):
+            instrument = _instrument(row)
+            if instrument is None:
                 rejected += 1
+            else:
+                records.append(instrument)
         if not records:
             raise ProviderDown(f"sec: ticker map with no usable rows ({rejected} malformed)", provider=self.name)
-        if rejected and rejected <= len(records) * TICKER_REJECT_SHARE:
-            # A few bad rows in a map of 10,000+ registrants: drop them and warn, never block every lookup.
-            skipped = CheckResult(
-                "schema", passed=False, blocking=False, detail=f"{rejected} malformed row(s) left out"
-            )
-            quality = DataQualityReport("sec:company_tickers", (skipped,), (), len(records))
-        else:
+        if rejected > len(records) * TICKER_REJECT_SHARE:
             quality = with_schema_rejections(DataQualityReport("sec:company_tickers", (), (), len(records)), rejected)
-        return ParseResult(tuple(records), quality, None, None)
+            return ParseResult(tuple(records), quality, None, None)  # blocked by the schema check
+        if len(records) < MIN_TICKER_ROWS:
+            # A cut-off download: serving (and caching) it would make most companies "not found" for a day.
+            raise ProviderDown(f"sec: ticker map truncated ({len(records)} rows)", provider=self.name)
+        # A few bad rows in a map of 10,000+ registrants are left out with a warning, never blocking every lookup.
+        checks = (
+            (CheckResult("schema", passed=False, blocking=False, detail=f"{rejected} malformed row(s) left out"),)
+            if rejected
+            else ()
+        )
+        return ParseResult(
+            tuple(records), DataQualityReport("sec:company_tickers", checks, (), len(records)), None, None
+        )
 
     # ------------------------------------------------------------------------------------------ filings
 
@@ -333,6 +331,26 @@ class SecEdgarAdapter(BaseAdapter):
 
 #: Share of malformed rows the ticker map tolerates (left out with a warning) before the whole map is refused.
 TICKER_REJECT_SHARE = 0.01
+#: The SEC map lists every registrant with a ticker (10,443 rows when recorded); far fewer means a cut-off download.
+MIN_TICKER_ROWS = 5000
+
+
+def _instrument(row: Any) -> Instrument | None:  # noqa: ANN401 - provider rows are untyped
+    """One ticker-map row, or None when it is malformed (a missing or empty ticker never becomes "NONE")."""
+    try:
+        ticker, title = row["ticker"], row["title"]
+        if not isinstance(ticker, str) or not ticker.strip() or not isinstance(title, str):
+            return None
+        return Instrument(
+            symbol=ticker.strip().upper(),
+            asset_class=AssetClass.EQUITY,
+            name=title,
+            exchange=None,
+            currency="USD",
+            provider_symbol=cik10(row["cik_str"]),
+        )
+    except (KeyError, ValueError, InvalidArgs, TypeError):
+        return None
 
 
 def _date_or_none(values: Any, i: int) -> date | None:  # noqa: ANN401 - provider arrays are untyped

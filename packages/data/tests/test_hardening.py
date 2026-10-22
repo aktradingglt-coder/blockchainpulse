@@ -44,7 +44,14 @@ from rd_data.resilience import (
     RateLimit,
     ResponseCache,
 )
-from rd_data.schemas import Bar, CryptoDerivativeMetric, FundamentalFact, MacroObservation, TreasuryYieldPoint
+from rd_data.schemas import (
+    Bar,
+    CryptoDerivativeMetric,
+    FundamentalFact,
+    Instrument,
+    MacroObservation,
+    TreasuryYieldPoint,
+)
 
 CASSETTES = Path(__file__).parent / "cassettes"
 SETTINGS: dict[str, Any] = {
@@ -2349,3 +2356,110 @@ async def test_a_few_malformed_ticker_rows_are_left_out_with_a_warning() -> None
     resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(one_bad)})
     assert len(resp.records) > 1000
     assert any("malformed row" in w for w in resp.quality.warnings)
+
+
+# ------------------------------------------------------------------------------------- review round 11 (P1)
+
+
+async def test_ticker_rows_without_a_ticker_and_truncated_maps_are_refused() -> None:
+    request = _plan(SecEdgarAdapter, RequestKind.INSTRUMENTS)
+
+    def null_ticker(data: dict[str, Any]) -> None:
+        data["broken"] = {"cik_str": 1018724, "ticker": None, "title": "X"}
+
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(null_ticker)})
+    assert not any(isinstance(i, Instrument) and i.symbol == "NONE" for i in resp.records)
+
+    def truncate(data: dict[str, Any]) -> None:
+        for k in list(data)[100:]:
+            del data[k]
+
+    with pytest.raises(ProviderDown, match="truncated"):
+        await _replay(SecEdgarAdapter, request, {0: _json_edit(truncate)})
+
+
+@pytest.mark.parametrize("factor", [1000.0, 0.001])
+async def test_a_newest_10k_line_off_its_own_comparatives_is_held(factor: float) -> None:
+    """The research-credit line of the rate reconciliation has no other filing to compare with, but the same 10-K
+    reports 2023 and 2024 beside it (2.196B, 2.644B): a 2025 cell a power of 1000 away is held."""
+    concept = "IncomeTaxReconciliationTaxCreditsResearch"
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(
+        SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10K, factor, concept=concept, end="2025-12-31")}
+    )
+    shown = [
+        f.period_end.year
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept == concept and f.accession == NEWEST_10K
+    ]
+    assert sorted(shown) == [2023, 2024]  # the comparatives stay; the mis-scaled 2025 cell does not
+
+
+def _filing(facts: list[tuple[str, int, float]], *, accession: str = "a", unit: str = "USD") -> list[FundamentalFact]:
+    """Annual facts of one 10-K: (concept, fiscal year, value); "<concept>@<year>" instants are written as year < 0."""
+    out = []
+    for concept, year, value in facts:
+        instant = year < 0
+        y = abs(year)
+        out.append(
+            FundamentalFact(
+                cik="0000000001",
+                concept=concept,
+                taxonomy="us-gaap",
+                unit="pure" if concept.startswith("Effective") else unit,
+                value=value,
+                period_start=None if instant else date(y, 1, 1),
+                period_end=date(y, 12, 31),
+                form="10-K",
+                filed=date(2026, 2, 1),
+                accession=accession,
+            )
+        )
+    return out
+
+
+def test_sga_statutory_tax_and_goodwill_change_relations_find_a_lone_scale_error() -> None:
+    years = (2023, 2024, 2025)
+    sga = [("SellingAndMarketingExpense", y, v) for y, v in zip(years, (18.26e9, 18.639e9, 19.524e12), strict=True)]
+    sga += [("GeneralAndAdministrativeExpense", y, v) for y, v in zip(years, (6.672e9, 7.458e9, 8.077e9), strict=True)]
+    sga += [
+        ("SellingGeneralAndAdministrativeExpense", y, v)
+        for y, v in zip(years, (24.932e9, 26.097e9, 27.601e9), strict=True)
+    ]
+    records = _filing(sga)
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year) for i in held} == {("SellingAndMarketingExpense", 2025)}
+
+    pretax = "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"
+    statutory = "IncomeTaxReconciliationIncomeTaxExpenseBenefitAtFederalStatutoryIncomeTaxRate"
+    tax = [(pretax, y, v) for y, v in zip(years, (100e9, 120e9, 165.934e9), strict=True)]
+    tax += [("EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate", y, 0.21) for y in years]
+    tax += [(statutory, y, v) for y, v in zip(years, (21e9, 25.2e9, 34.846e12), strict=True)]
+    records = _filing(tax)
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year) for i in held} == {(statutory, 2025)}
+
+    goodwill = [("Goodwill", -y, v) for y, v in ((2023, 4.0e9), (2024, 4.4e9), (2025, 5.0e9))]
+    goodwill += [("GoodwillPeriodIncreaseDecrease", y, v) for y, v in ((2024, 0.4e9), (2025, 0.6e12))]
+    # last year's 10-K, as any filer has: the balances and changes before 2025, on scale
+    earlier = [("Goodwill", -y, v) for y, v in ((2022, 3.7e9), (2023, 4.0e9), (2024, 4.4e9))]
+    earlier += [("GoodwillPeriodIncreaseDecrease", y, v) for y, v in ((2023, 0.3e9), (2024, 0.4e9))]
+    records = [*_filing(earlier, accession="earlier"), *_filing(goodwill)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year) for i in held} == {
+        ("GoodwillPeriodIncreaseDecrease", 2025)
+    }
+
+
+def test_a_few_disputed_facts_never_hold_a_whole_filing() -> None:
+    """Four mis-scaled debt-table cells in a filing that agrees with its peers on everything else (Tesla's FY2016
+    10-K): the four are held, the other 40 shared facts are served."""
+    concepts = [f"Line{k}" for k in range(11)]
+    older = _filing([(c, y, 1e9 * (k + 1)) for k, c in enumerate(concepts) for y in (2014, 2015)], accession="old")
+    newer = _filing([(c, y, 1e9 * (k + 1)) for k, c in enumerate(concepts) for y in (2014, 2015)], accession="new")
+    for f in newer[:4]:
+        object.__setattr__(f, "value", f.value * 1000)
+    third = _filing([(c, y, 1e9 * (k + 1)) for k, c in enumerate(concepts) for y in (2013, 2016)], accession="third")
+    records = [*older, *newer, *third]
+    held, _ = sec_scale.scale_errors(records)
+    assert {i for i in held if records[i].accession == "new"} == {len(older) + k for k in range(4)}
