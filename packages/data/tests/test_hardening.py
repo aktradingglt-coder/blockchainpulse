@@ -2463,3 +2463,16 @@ def test_a_few_disputed_facts_never_hold_a_whole_filing() -> None:
     records = [*older, *newer, *third]
     held, _ = sec_scale.scale_errors(records)
     assert {i for i in held if records[i].accession == "new"} == {len(older) + k for k in range(4)}
+
+
+async def test_figures_superseded_by_a_held_filing_turn_stale_a_week_after_it() -> None:
+    """The newest 10-Q (filed 2026-07-31) is held whole: on 2026-08-09 the April figures are not "fresh" just because
+    a filing was not yet due; the next filing arrived and could not be used."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(
+        SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10Q, 1000.0)}, now=datetime(2026, 8, 9, 12, tzinfo=UTC)
+    )
+    assert str(resp.as_of)[:10] == "2026-04-30"
+    assert resp.freshness is not None
+    assert resp.freshness.status is Freshness.STALE
+    assert any("newest filing (filed 2026-07-31) is held" in n for n in resp.notes)

@@ -93,6 +93,12 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   warning.
 - P2 (from P1 review round 9, minor): SEC facts held as likely scale errors must be treated as missing in backtests and
   point-in-time panels (9 of 59 historical snapshots hold 1–4 genuine facts; D-036).
+- P11 (from P1 review round 11, minor): a single malformed Kraken candle blocks the whole fetch (schema check);
+  drop and report such rows when they are few, as the SEC ticker map does. Clean SEC responses carry a failing
+  non-blocking `scale_outliers` check (genuine one-offs flagged for review); the status page should not count
+  non-blocking flags as quality failures.
+- Before micro-cap coverage (from P1 review round 11, minor): the total-assets bound is skipped below $10M of assets,
+  so x1e6 errors in a micro-cap's newly reported lines are not bounded; a market-value or revenue yardstick would.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after
   holds; the ledger must store record identities (concept/period/accession, bar time), not positions.
 - P11 (from P1 review round 7, minor): keep status-page quality notes per request subject (one passing fetch of another

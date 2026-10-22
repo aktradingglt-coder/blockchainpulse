@@ -115,6 +115,9 @@ class FreshnessSpec:
     next_release_at: datetime | None = None
     delay_minutes: int = 0
     bar_width: timedelta | None = None
+    #: Fundamentals: when the next filing actually arrived, if it did but could not be used (e.g. held whole for scale
+    #: errors). The figures shown are then superseded from that moment, not from when a filing would be expected.
+    next_filing_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -358,6 +361,7 @@ class BaseAdapter(ABC):
                 release_frequency=spec.release_frequency,
                 next_release_at=spec.next_release_at,
                 bar_width=spec.bar_width,
+                next_filing_expected_at=spec.next_filing_at,
             )
             freshness.require_usable(provider=self.name)
         terms = parsed.licence_override or self.licence

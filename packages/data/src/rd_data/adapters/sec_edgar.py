@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, ClassVar
 
 import orjson
@@ -310,14 +310,24 @@ class SecEdgarAdapter(BaseAdapter):
         )
         usable = [f for i, f in enumerate(records) if i not in held]
         as_of = usable[-1].filed if usable else None
+        notes = ["Point-in-time by filing date: a fact is usable only on or after its 'filed' date."]
+        superseded_at = None
+        newest = records[-1].filed if records else None
+        if as_of is not None and newest is not None and newest > as_of:
+            # A newer filing arrived but every fact in it is held: what is shown is superseded since that filing.
+            superseded_at = datetime.combine(newest, datetime.min.time(), tzinfo=UTC)
+            notes.append(
+                f"The newest filing (filed {newest.isoformat()}) is held for scale errors; figures shown are from the "
+                f"filing of {as_of.isoformat()} and are judged stale a week after the newer filing arrived."
+            )
         return ParseResult(
             tuple(usable),
             quality,
             as_of,
-            FreshnessSpec(DataType.FUNDAMENTALS),
+            FreshnessSpec(DataType.FUNDAMENTALS, next_filing_at=superseded_at),
             source_tz="America/New_York",
             quarantined=tuple(f for i, f in enumerate(records) if i in held),
-            notes=("Point-in-time by filing date: a fact is usable only on or after its 'filed' date.",),
+            notes=tuple(notes),
         )
 
     @staticmethod
