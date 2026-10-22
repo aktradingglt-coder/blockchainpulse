@@ -20,8 +20,10 @@ from rd_data.schemas import FundamentalFact
 
 #: How close (in log10) two filings' values must be to a ratio of 10^3, 10^6, ... to count as a scale error.
 SCALE_TOLERANCE = 0.02
-#: Neighbouring periods (same concept, unit and duration) a fact is compared with.
+#: Neighbouring periods (same concept, unit and duration) a fact is compared with, within NEIGHBOUR_WINDOW_DAYS: a
+#: line last reported a decade ago says nothing about this year's scale.
 NEIGHBOURS = 4
+NEIGHBOUR_WINDOW_DAYS = 5 * 366
 #: Orders of magnitude from the neighbours beyond which a fact is flagged (genuine one-offs reach ~3 on real data).
 FLAG_DISTANCE = 2.5
 #: Flags (not holds) are raised only on the most recent filings, so years-old one-offs do not clutter every response.
@@ -41,21 +43,31 @@ ADDITIVITY_TOLERANCE = 0.01
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 #: Held facts needed (with FILING_SCALE_SHARE of the column) before a filing's whole column for one date is held.
 COLUMN_MIN_HELD = 3
-#: A currency fact larger than this multiple of the company's own total assets is impossible. On the recorded AMZN
-#: facts the largest ratio is 5.2 (public float, dei) and 2.3 for us-gaap facts; derivative notionals at the largest
-#: dealer banks stay below ~30x and are exempt anyway.
-MAX_ASSETS_MULTIPLE = 100.0
+#: A currency fact larger than this multiple of the company's own total assets is held. Across about 400,000 clean
+#: us-gaap facts of 15 large filers the largest ratio is 2.3 (AMZN 2011 revenue); the highest revenue-to-assets ratios
+#: among US registrants (drug distributors) are about 4.6. Derivative notionals and client assets are exempt.
+MAX_ASSETS_MULTIPLE = 5.0
 #: Amounts that are not the company's own and legitimately exceed its balance sheet (derivative notionals, client
 #: assets under management or custody), cumulative equity accounts (a long-loss-making company's accumulated deficit
 #: and paid-in capital can dwarf what it has left) and the dei taxonomy (public float is a market value) are exempt.
-_NOT_BOUNDED_BY_ASSETS = re.compile(
-    r"Notional|UnderManagement|UnderCustody|Custod|Fiduciary|PaidInCapital|RetainedEarnings|AccumulatedDeficit"
-    r"|StockholdersEquity|TreasuryStock|AccumulatedOtherComprehensive"
+_NOT_BOUNDED_BY_ASSETS = re.compile(r"Notional|UnderManagement|UnderCustody|Custod|Fiduciary")
+#: Cumulative equity balances (instants only: their flows are bounded like any other line).
+_CUMULATIVE_EQUITY = re.compile(
+    r"PaidInCapital|RetainedEarnings|AccumulatedDeficit|StockholdersEquity|TreasuryStockValue"
 )
 #: Below this total (in the reporting currency) a company's assets say little about the size of its line items.
 MIN_ASSETS_FOR_BOUND = 1e7
-#: A fact already flagged as unusual against its own history is held from this multiple of total assets.
-FLAGGED_ASSETS_MULTIPLE = 10.0
+#: A fact flagged as unusual against its own history, or with no history in other filings, is held from this multiple
+#: of total assets: no flagged fact in 15 large filers' clean company facts exceeds 0.34x.
+FLAGGED_ASSETS_MULTIPLE = 3.0
+#: Tax amounts (expense and its parts, reconciliation lines, taxes paid, deferred-tax and uncertain-tax balances) are
+#: held from this multiple of total assets: the largest of about 18,000 clean tax facts in 15 large filers is 0.2x.
+TAX_ASSETS_MULTIPLE = 1.0
+_TAX_AMOUNT = re.compile(
+    r"IncomeTax|TaxExpenseBenefit|TaxReconciliation|IncomeTaxesPaid|TaxPaid|UnrecognizedTaxBenefits|DeferredTax"
+    r"|ValuationAllowance|TaxCredit"
+)
+_NOT_A_TAX_AMOUNT = re.compile(r"BeforeIncomeTax|NetOfTax|AfterTax|BeforeTax|NetOfIncomeTax")
 #: Largest identity system (terms sharing identities, e.g. the 12-line income-tax table) solved by search.
 MAX_IDENTITY_TERMS = 14
 #: A group of facts this close to its own history (orders of magnitude) is taken as correctly scaled.
@@ -305,6 +317,21 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     return held, flagged - held
 
 
+def superseded_filings(records: list[FundamentalFact], held: set[int]) -> set[str]:
+    """Filings whose current-period column (their currency facts for their latest period end) is held entirely: their
+    comparatives may still be shown, but they no longer provide the figures they were filed to report."""
+    column: dict[str, list[int]] = {}
+    latest: dict[str, date] = {}
+    money = [i for i, f in enumerate(records) if _CURRENCY.match(f.unit)]  # a cover-page share count is dated later
+    for i in money:
+        f = records[i]
+        latest[f.accession] = max(latest.get(f.accession, f.period_end), f.period_end)
+    for i in money:
+        if records[i].period_end == latest[records[i].accession]:
+            column.setdefault(records[i].accession, []).append(i)
+    return {acc for acc, idx in column.items() if all(i in held for i in idx)}
+
+
 _SeriesKey = tuple[str, str, int | None]
 _PeriodKey = tuple[str, str, int | None, date]
 
@@ -332,7 +359,8 @@ class _Neighbours:
         periods = self.series.get(key, {})
         nearest = self._nearest.get((key, f.period_end))
         if nearest is None:
-            nearest = sorted((e for e in periods if e != f.period_end), key=lambda e: abs((e - f.period_end).days))
+            window = [e for e in periods if e != f.period_end and abs((e - f.period_end).days) <= NEIGHBOUR_WINDOW_DAYS]
+            nearest = sorted(window, key=lambda e: abs((e - f.period_end).days))
             self._nearest[(key, f.period_end)] = nearest
         levels: list[float] = []
         for e in nearest:
@@ -418,7 +446,8 @@ def _beyond_assets(
     records: list[FundamentalFact], logs: list[float | None], held: set[int], flagged: set[int]
 ) -> set[int]:
     """Currency facts too large for the company: more than MAX_ASSETS_MULTIPLE times its total assets (same currency),
-    or FLAGGED_ASSETS_MULTIPLE times when the fact is also unusual against its own history. Total assets is the median
+    FLAGGED_ASSETS_MULTIPLE times when the fact is unusual against (or has no) history, TAX_ASSETS_MULTIPLE times for a
+    tax amount. Total assets is the median
     of the NEIGHBOURS nearest period ends, each as reported by other filings where there are any, leaving out facts
     already held: one mis-scaled filing cannot shrink the yardstick and hold the newest genuine figures."""
     assets: dict[tuple[str, date], list[tuple[str, float]]] = {}
@@ -434,6 +463,8 @@ def _beyond_assets(
         value = logs[i]
         if value is None or f.unit not in ends or f.taxonomy == "dei" or _NOT_BOUNDED_BY_ASSETS.search(f.concept):
             continue
+        if f.period_start is None and _CUMULATIVE_EQUITY.search(f.concept):
+            continue
         nearest = sorted(ends[f.unit], key=lambda e: abs((e - f.period_end).days))[:NEIGHBOURS]
         levels = []
         for e in nearest:
@@ -443,8 +474,13 @@ def _beyond_assets(
         reference = statistics.median(levels)
         if reference < floor:
             continue
-        limit = math.log10(FLAGGED_ASSETS_MULTIPLE if i in flagged else MAX_ASSETS_MULTIPLE)
-        if value - reference > limit:
+        if _TAX_AMOUNT.search(f.concept) and not _NOT_A_TAX_AMOUNT.search(f.concept):
+            multiple = TAX_ASSETS_MULTIPLE
+        elif i in flagged:
+            multiple = FLAGGED_ASSETS_MULTIPLE
+        else:
+            multiple = MAX_ASSETS_MULTIPLE
+        if value - reference > math.log10(multiple):
             out.add(i)
     return out
 

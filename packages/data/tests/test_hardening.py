@@ -2083,9 +2083,15 @@ async def test_newest_10k_scale_error_is_held_against_the_same_years_nine_months
 @pytest.mark.parametrize("factor", [1000.0, 0.001])
 async def test_a_mis_scaled_column_is_held_whole(factor: float) -> None:
     """Only the current-period column of the newest 10-Q is mis-scaled (comparatives intact): once most of it is
-    held, the rest of it (cash, new concepts) is held too rather than served at the wrong scale."""
+    held, the rest of it (cash, new concepts) is held too rather than served at the wrong scale. Read just after the
+    filing: the April figures, now the latest shown, are blocked 120 days after their own filing date."""
     request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
-    resp = await _replay(SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10Q, factor, end="2026-06-30")})
+    resp = await _replay(
+        SecEdgarAdapter,
+        request,
+        {0: _scale_filing(NEWEST_10Q, factor, end="2026-06-30")},
+        now=datetime(2026, 8, 3, 12, tzinfo=UTC),
+    )
     shown = [
         f
         for f in resp.records
@@ -2475,7 +2481,7 @@ async def test_figures_superseded_by_a_held_filing_turn_stale_a_week_after_it() 
     assert str(resp.as_of)[:10] == "2026-04-30"
     assert resp.freshness is not None
     assert resp.freshness.status is Freshness.STALE
-    assert any("newest filing (filed 2026-07-31) is held" in n for n in resp.notes)
+    assert any("filing of 2026-07-31 are held" in n for n in resp.notes)
 
 
 def test_a_proven_rate_reconciliation_pins_a_lone_mis_scaled_line() -> None:
@@ -2562,3 +2568,97 @@ def test_a_rollforward_with_filer_specific_signs_is_learned_from_its_other_years
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
         ("UnrecognizedTaxBenefitsDecreasesResultingFromSettlementsWithTaxingAuthorities", 2025, "a")
     }
+
+
+# ------------------------------------------------------------------------------------- review round 12 (P1)
+
+
+async def test_a_newest_filing_whose_current_column_is_held_does_not_make_old_figures_current() -> None:
+    """Only the June-quarter column of the newest 10-Q is mis-scaled; its comparatives are fine and may be served,
+    but the latest figures shown are April's, so on 2026-08-09 they are stale."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(
+        SecEdgarAdapter,
+        request,
+        {0: _scale_filing(NEWEST_10Q, 1000.0, end="2026-06-30")},
+        now=datetime(2026, 8, 9, 12, tzinfo=UTC),
+    )
+    assert str(resp.as_of)[:10] == "2026-04-30"
+    assert resp.freshness is not None
+    assert resp.freshness.status is Freshness.STALE
+    assert any("filing of 2026-07-31 are held" in n for n in resp.notes)
+    shown = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.accession == NEWEST_10Q and f.taxonomy == "us-gaap"
+    ]
+    assert shown
+    assert all(f.period_end < date(2026, 6, 30) for f in shown)
+
+
+def _sized(concept: str, values: tuple[float, ...], *, earlier: tuple[float, ...] | None) -> list[FundamentalFact]:
+    """Two 10-Ks of a company with 10B of assets, reporting `concept` for 2023-2025 (and 2022-2024 a year earlier)."""
+    assets = [("Assets", -y, 10e9) for y in (2022, 2023, 2024, 2025)]
+    newest = _filing([*assets[1:], *((concept, y, v) for y, v in zip((2023, 2024, 2025), values, strict=True))])
+    rows = [*assets[:3]]
+    if earlier is not None:
+        rows += [(concept, y, v) for y, v in zip((2022, 2023, 2024), earlier, strict=True)]
+    return [*_filing(rows, accession="earlier"), *newest]
+
+
+def _held_concepts(records: list[FundamentalFact]) -> set[tuple[str, int]]:
+    held, _ = sec_scale.scale_errors(records)
+    return {(records[i].concept, records[i].period_end.year) for i in held}
+
+
+def test_size_bounds_are_tiered_by_kind_and_history() -> None:
+    # a drug distributor's revenue runs at about 4.6x its assets, year after year: served
+    steady = (44e9, 45e9, 46e9)
+    assert not _held_concepts(_sized("Revenues", steady, earlier=(43e9, 44e9, 45e9)))
+    # the same size with nothing to compare against is held (no history: 3x)
+    assert ("OtherCostAndExpenseOperating", 2025) in _held_concepts(
+        _sized("OtherCostAndExpenseOperating", steady, earlier=None)
+    )
+    # anything beyond 5x assets is held, history or not
+    big = (60e9, 61e9, 62e9)
+    assert ("Revenues", 2025) in _held_concepts(_sized("Revenues", big, earlier=(59e9, 60e9, 61e9)))
+    # a tax amount beyond 1x assets is held even with matching history; a pre-tax total is not a tax amount
+    assert ("IncomeTaxesPaid", 2025) in _held_concepts(
+        _sized("IncomeTaxesPaid", (15e9, 15e9, 15e9), earlier=(15e9, 15e9, 15e9))
+    )
+    pretax = "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"
+    assert not _held_concepts(_sized(pretax, (15e9, 15e9, 15e9), earlier=(15e9, 15e9, 15e9)))
+
+
+def test_off_balance_and_cumulative_equity_figures_are_not_bounded_by_assets() -> None:
+    assert not _held_concepts(_sized("NotionalAmountOfDerivatives", (80e9, 81e9, 82e9), earlier=(79e9, 80e9, 81e9)))
+    deficit = [("Assets", -y, 1e9) for y in (2023, 2024, 2025)]
+    deficit += [("RetainedEarningsAccumulatedDeficit", -y, -v) for y, v in ((2023, 8e9), (2024, 8.5e9), (2025, 9e9))]
+    older = [("Assets", -y, 1e9) for y in (2022, 2023, 2024)]
+    older += [("RetainedEarningsAccumulatedDeficit", -y, -v) for y, v in ((2022, 7.5e9), (2023, 8e9), (2024, 8.5e9))]
+    assert not _held_concepts([*_filing(older, accession="earlier"), *_filing(deficit)])
+
+
+def test_neighbouring_periods_are_drawn_from_five_years_around_a_fact() -> None:
+    """A filer's figures from decades ago (a hundredth of today's) never make a recent figure look mis-scaled."""
+    old = _filing([("Revenues", y, 1e8) for y in (1995, 1996, 1997)], accession="old")
+    for f in old:
+        object.__setattr__(f, "filed", date(1998, 2, 1))
+    recent = [
+        *_filing([("Revenues", y, v) for y, v in ((2022, 9e9), (2023, 10e9), (2024, 11e9))], accession="earlier"),
+        *_filing([("Revenues", y, v) for y, v in ((2023, 10e9), (2024, 11e9), (2025, 12e9))]),
+    ]
+    assert not _held_concepts([*old, *recent])
+
+
+def test_a_ticker_mapped_to_two_registrants_is_left_out_with_a_warning() -> None:
+    adapter = SecEdgarAdapter.__new__(SecEdgarAdapter)
+    rows = {str(k): {"cik_str": 1000 + k, "ticker": f"T{k}", "title": f"Co {k}"} for k in range(6000)}
+    rows["dup"] = {"cik_str": 99, "ticker": "t1", "title": "Other Co"}
+    rows["same"] = {"cik_str": 1002, "ticker": "T2", "title": "Co 2"}
+    result = adapter._parse_tickers(rows)
+    symbols = [i.symbol for i in result.records if isinstance(i, Instrument)]
+    assert "T1" not in symbols
+    assert symbols.count("T2") == 1
+    assert any("several CIKs" in w for w in result.quality.warnings)
+    assert result.quality.passed

@@ -24,7 +24,7 @@ from rd_data.adapters.base import (
     RequestKind,
     require_param,
 )
-from rd_data.adapters.sec_scale import scale_errors
+from rd_data.adapters.sec_scale import scale_errors, superseded_filings
 from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
 from rd_data.quality import (
@@ -135,14 +135,34 @@ class SecEdgarAdapter(BaseAdapter):
         if len(records) < MIN_TICKER_ROWS:
             # A cut-off download: serving (and caching) it would make most companies "not found" for a day.
             raise ProviderDown(f"sec: ticker map truncated ({len(records)} rows)", provider=self.name)
+        # A ticker listed for two registrants would resolve to whichever row came first; neither is served.
+        ciks: dict[str, set[str | None]] = {}
+        for r in records:
+            ciks.setdefault(r.symbol, set()).add(r.provider_symbol)
+        ambiguous = sorted(t for t, c in ciks.items() if len(c) > 1)
+        seen: set[str] = set()
+        unique = []
+        for r in records:
+            if r.symbol not in seen and r.symbol not in ambiguous:
+                seen.add(r.symbol)
+                unique.append(r)
         # A few bad rows in a map of 10,000+ registrants are left out with a warning, never blocking every lookup.
-        checks = (
-            (CheckResult("schema", passed=False, blocking=False, detail=f"{rejected} malformed row(s) left out"),)
-            if rejected
-            else ()
-        )
+        checks: list[CheckResult] = []
+        if rejected:
+            checks.append(
+                CheckResult("schema", passed=False, blocking=False, detail=f"{rejected} malformed row(s) left out")
+            )
+        if ambiguous:
+            checks.append(
+                CheckResult(
+                    "unique_ticker",
+                    passed=False,
+                    blocking=False,
+                    detail=f"{len(ambiguous)} ticker(s) on several CIKs left out: {', '.join(ambiguous[:5])}",
+                )
+            )
         return ParseResult(
-            tuple(records), DataQualityReport("sec:company_tickers", checks, (), len(records)), None, None
+            tuple(unique), DataQualityReport("sec:company_tickers", tuple(checks), (), len(unique)), None, None
         )
 
     # ------------------------------------------------------------------------------------------ filings
@@ -309,16 +329,20 @@ class SecEdgarAdapter(BaseAdapter):
             DataQualityReport(f"sec:facts:{cik}", checks, tuple(sorted(held)), len(records)), rejected
         )
         usable = [f for i, f in enumerate(records) if i not in held]
-        as_of = usable[-1].filed if usable else None
+        # The response is as fresh as the newest filing whose own figures (its current-period column) are shown; a
+        # filing whose current column is held only contributes comparatives and does not make old figures current.
+        superseded = superseded_filings(records, held)
+        current = [f for f in usable if f.accession not in superseded]
+        as_of = current[-1].filed if current else (usable[-1].filed if usable else None)
         notes = ["Point-in-time by filing date: a fact is usable only on or after its 'filed' date."]
         superseded_at = None
-        newest = records[-1].filed if records else None
-        if as_of is not None and newest is not None and newest > as_of:
-            # A newer filing arrived but every fact in it is held: what is shown is superseded since that filing.
-            superseded_at = datetime.combine(newest, datetime.min.time(), tzinfo=UTC)
+        later = sorted({f.filed for f in records if as_of is not None and f.filed > as_of})
+        if later and as_of is not None:
+            superseded_at = datetime.combine(later[0], datetime.min.time(), tzinfo=UTC)
             notes.append(
-                f"The newest filing (filed {newest.isoformat()}) is held for scale errors; figures shown are from the "
-                f"filing of {as_of.isoformat()} and are judged stale a week after the newer filing arrived."
+                f"The current-period figures of the filing of {later[0].isoformat()} are held for scale errors; the "
+                f"latest figures shown are from the filing of {as_of.isoformat()} and are judged stale a week after "
+                "the newer filing arrived."
             )
         return ParseResult(
             tuple(usable),
