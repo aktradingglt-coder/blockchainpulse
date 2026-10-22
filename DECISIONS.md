@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-10-22, round 13) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-10-22, round 14) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -277,8 +277,9 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      of 1000 is held.
    - Anything else more than 10^2.5 away in the 4 newest filings is flagged.
 2. *The same period in several filings.* Facts are grouped by scale. The group clearly nearest its neighbours (by
-   ≥ 10^1, judged without the disputing filings' own values) is kept; groups a power of 1000 from it are held. If
-   undecided, both filings' facts of that concept are held. A filing is held whole when most of what it shares with
+   ≥ 10^1, judged without the disputing filings' own values) is kept; groups a power of 1000 from it are held. When
+   the neighbours do not decide, a group two or more filings report beats a single filing's value; otherwise both
+   filings' facts of that concept are held. A filing is held whole when most of what it shares with
    other filings is a power of 1000 off.
 3. *Sums across periods.* Year to date = earlier year to date + latest quarter, the parts usually from different
    filings.
@@ -315,7 +316,7 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    | Tax amounts (expense and parts, reconciliation, taxes paid, deferred and uncertain tax) | 1× | 0.43× (about 30,000 facts) |
    | Changes in balances (working capital, period increases) and OCI | 1× | 0.34×, 0.61× and 0.14× |
    | Cash-flow lines (gross proceeds, payments, repayments; net cash by activity) | 2× | 0.96× (AAPL purchases of securities) and 0.72× |
-   | Revenue, cost and purchase lines | 20× | 2.34× (AMZN 2011 revenue) |
+   | Revenue, cost and purchase lines | 20× | 2.34× (AMZN 2011 pro-forma revenue; 2.33× reported revenue) |
    | Everything else | 3× | 1.51× (XOM gross PP&E) |
 
    The only clean values above 3× outside revenue and cost lines are option intrinsic values that were themselves
@@ -331,10 +332,23 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
 9. *Balance jumps.* A balance in a recent filing that moved more than 10^2 from the previous period end is flagged.
 10. *Impossible signs.* A negative value of a balance or total that cannot be negative is held: assets, liabilities,
     their current parts, liabilities and equity, cash, PP&E, goodwill, intangibles, inventory, receivables, payables,
-    long-term debt, revenue and share counts (22 concepts; none of about 32,000 clean facts is negative).
+    long-term debt, contract revenue and share counts (21 concepts; none of about 28,000 clean facts is negative;
+    total `Revenues` is left out, as asset managers can report it negative). For headline totals (net, operating and
+    pre-tax income, tax expense, net cash flows, revenue, cost of revenue, operating expenses, comprehensive income),
+    filings that report the same amount with opposite signs, and half-year or year-to-date sums that one filing's
+    flip closes, are held on the side that one filing alone reports or that opposes most of its neighbouring periods'
+    signs; undecided cases are left alone. Other lines are not sign-checked across filings: their sign conventions
+    flip between filings so often (OCI, hedges, allowances) that checking them held 1,900 clean facts.
+11. *Shifted columns.* A filing's column for one date is held whole when at least 10 of its currency facts can be
+    compared with the same periods in other filings, their neighbouring periods, or (a line no other filing reports)
+    the filing's own other periods within 400 days, and the column sits a power of 1000 from them (median within
+    10^0.5, 60% of facts within 10^1). For a young filer this is often the only evidence; it adds no clean holds.
 
-A filing's current-period column is its us-gaap currency facts for the period end it reports most facts for (a cover
-public float, a footnote amount dated after the quarter or a cover-only amendment does not move it). When that column
+All checks run on every concept the company reports; a `concepts` filter narrows only what is returned.
+
+A filing's current-period column is its us-gaap currency facts for its latest period end reported with at least half as
+many facts as its busiest one (a cover public float, a footnote amount dated after the quarter or a cover-only
+amendment does not move it; a 10-K's prior-year end with more facts does not either). When that column
 is held entirely, whether the whole filing or only the column is wrong, the filing no longer makes older figures
 current: the response's as-of date is the newest filing whose own column is shown, the figures are judged stale a week
 after the held filing arrived (blocked 120 days after their own filing), and a note names both filings. Its
@@ -359,7 +373,9 @@ facts of 14 more large filers: AAPL, MSFT, NVDA, JPM, C, WFC, BAC, BRK, XOM, GE,
 from a public EDGAR cache; they were used for measurement only and are not committed.
 
 On clean data:
-- AMZN: 0 facts held, and 4 genuine one-offs flagged.
+- AMZN: 10 facts held, all in its FY2014 10-K, which reports the 2013–14 quarterly and annual income-tax expense with
+  the opposite sign to every other filing of those periods (a real error in the recorded data); 4 genuine one-offs
+  flagged.
 - The 15 filers together: 333 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
   classified, of real errors in old filings (share counts; NVDA's and MMM's option intrinsic values; sign
   inconsistencies such as TSLA's positive 2010–11 domestic pre-tax income beside a pre-tax loss, or goodwill
@@ -383,10 +399,12 @@ scaling) are counted separately in every row.
 | JPM 10-K FY2025 (387) | 351 / 16 / 10 | 357 / 13 / 7 | 10 |
 
 Every ×1000 miss lands below its tier's size bound (for example MSFT's FDII line at 0.8× total assets, JPM's tax
-contingencies at 0.1×), so size alone cannot tell it apart. Whole filings and mis-scaled current columns are held
-entirely (all 15 filers, both factors, round 12).
+contingencies at 0.1×), so size alone cannot tell it apart. Mis-scaled current columns are held entirely in
+the newest filing of all 15 filers (both factors, rounds 12–13) and, through rule 11, in young filers' early filings
+(reviewer round 14 found them served for filers with 1–7 earlier filings before it). A whole filing mis-scaled in a
+company's very first filing has nothing in the response to be compared with, beyond the size bounds.
 
-**Limit (stated, not hidden).** The remaining misses are of two kinds:
+**Limit (stated, not hidden).** The remaining misses are of three kinds:
 - *Rate reconciliations the filing's own years cannot vouch for.* NVDA FY2026 does not close as tagged (15% off with
   the learned signs) and AAPL's does not either (the $10.2B EU state-aid charge uses Apple's own tag). AMZN's and JPM's
   have 13 lines, beyond the 12 whose signs are learned (the round-13 reviewer found one assignment closing 2 of 3
@@ -396,6 +414,10 @@ entirely (all 15 filers, both factors, round 12).
   changes, gross investing and financing flows), footnote rollforwards with filer-specific lines, and new single-year
   tables. The company-facts API P1 uses does not carry which lines make up each section or their weights, and guessing
   them from element names could hold real data.
+
+- *Sign errors outside headline totals and the identities of rule 6.* Filers flip sign conventions between filings
+  for many lines (OCI, hedges, allowances) in clean data, so a flipped sign there cannot be told from a convention
+  change within this source.
 
 Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
 fundamentals into reports (STATUS). (P1 review rounds 6–12.)

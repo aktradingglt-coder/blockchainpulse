@@ -59,9 +59,9 @@ PREVIOUS_WINDOW_DAYS = 400
 #: us-gaap facts of 15 large filers, outside revenue and cost lines, the largest ratio is 1.5 (XOM gross PP&E); the only
 #: larger ones are option intrinsic values entered at the wrong scale (NVDA FY2012-13, MMM Q1-2022: 4.1x to 14.9x).
 MAX_ASSETS_MULTIPLE = 3.0
-#: Revenue, cost and purchase lines scale with asset turnover (2.3x at most in the clean data, AMZN 2011), which is
-#: higher for low-margin distributors and traders not among the calibration filers: they are held only from this
-#: multiple, still far below where a x1000 error lands.
+#: Revenue, cost and purchase lines scale with asset turnover (2.3x at most in the clean data, AMZN 2011 revenue),
+#: which is higher for low-margin distributors and traders not among the calibration filers: they are held only from
+#: this multiple, still far below where a x1000 error lands.
 TURNOVER_ASSETS_MULTIPLE = 20.0
 _TURNOVER = re.compile(r"Revenue|CostOf|CostsAndExpenses|OperatingExpenses|Purchases|SalesOf")
 #: Amounts that are not the company's own and legitimately exceed its balance sheet (derivative notionals, client
@@ -113,7 +113,7 @@ SIGN_CHECKED = frozenset(
 )
 #: When the sign history does not single out one side of a sign error, hold every candidate (True) or none (False).
 SIGN_UNDECIDED_HOLDS = False
-#: Balances and totals that cannot be negative: none of about 32,000 clean facts of these concepts is. A negative one
+#: Balances and totals that cannot be negative: none of about 28,000 clean facts of these concepts is. A negative one
 #: is a sign error and is held.
 NEVER_NEGATIVE = frozenset(
     {
