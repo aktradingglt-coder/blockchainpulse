@@ -4,8 +4,8 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–11 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–15); awaiting review round 12.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–12 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–16); awaiting review round 13.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -102,6 +102,14 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   non-blocking flags as quality failures.
 - Before micro-cap coverage (from P1 review round 11, minor): the total-assets bound is skipped below $10M of assets,
   so x1e6 errors in a micro-cap's newly reported lines are not bounded; a market-value or revenue yardstick would.
+- P2 (from P1 review round 12, minor): rate-reconciliation lines in tables that do not close as tagged (AMZN's
+  cross-border line among them) are missed both ways; a "no line exceeds the rest of the table" check fails on 30 of
+  405 clean tables today, so it needs its own calibration. The poison case (previous 10-Q column ÷1000) still
+  withholds some genuine newest facts. SEC parsing took up to 7.6 s of CPU per company in review (Citi), and an
+  exception inside the scale checks would count as a provider failure; P2 ingestion should run it off the request
+  path. A ticker map with over 1% malformed rows fails QA (blocked) rather than counting as an outage.
+- Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
+  20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after
   holds; the ledger must store record identities (concept/period/accession, bar time), not positions.
 - P11 (from P1 review round 7, minor): keep status-page quality notes per request subject (one passing fetch of another

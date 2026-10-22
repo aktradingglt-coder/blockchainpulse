@@ -266,12 +266,12 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-10-22) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-10-22, round 12) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
 1. *Neighbouring periods.* The median of the 4 nearest periods of the same concept, unit and duration, as reported by
-   other filings.
+   other filings, within 5 years of the fact (a filer's figures from decades ago say little about today's scale).
    - A fact more than 10^3.5 away is held.
    - On a stable concept (typical distance under 10^0.15), a fact more than 10^2.5 away and within 10^0.5 of a power
      of 1000 is held.
@@ -302,26 +302,42 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    and only if the rescaled facts and the rest are both needed for it to close. That group is held if its own history
    (other filings, or failing that its own comparatives as evidence against it) blames it. Otherwise the facts of the
    relations it closes are held.
-7. *Impossible size.* A currency fact over 100× the company's total assets is held (10× if it is flagged, or has no
-   history in other filings). Total assets is the median of the 4 nearest period ends, from other filings, held facts
-   left out. Exempt:
+7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
+   is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
+   the 15 filers below with the bound itself switched off:
+
+   | Lines | Held above | Largest clean value |
+   | --- | --- | --- |
+   | Tax amounts (expense and parts, reconciliation, taxes paid, deferred and uncertain tax) | 1× | 0.43× (about 30,000 facts) |
+   | Revenue, cost and purchase lines | 20× | 2.34× (AMZN 2011 revenue) |
+   | Everything else | 3× | 1.51× (XOM gross PP&E), about 350,000 facts |
+
+   The only clean values above 3× outside revenue and cost lines are option intrinsic values that were themselves
+   entered at the wrong scale (NVDA FY2012–13, up to 14.9×; MMM Q1-2022, 4.1×): they
+   are now held. Revenue and cost lines get a wide bound because asset turnover is higher for low-margin distributors
+   and traders than for any calibration filer; a ×1000 error still lands far above it. Exempt:
    - companies under $10M of assets;
-   - derivative notionals and client assets under management or custody;
-   - cumulative equity accounts;
+   - derivative notionals and client assets under management, custody or fiduciary care;
+   - cumulative equity balances (paid-in capital, retained earnings or deficit, total equity, treasury stock), as
+     instants only: their flows and AOCI are bounded;
    - dei market values.
 8. *Spreading.* A held fact's siblings in the same table, a filing's column once mostly held, and relations that
    close around a held fact whose other facts are off their own history too.
 9. *Balance jumps.* A balance in a recent filing that moved more than 10^2 from the previous period end is flagged.
 
-When the newest filing is held whole, the figures shown come from the filing before. They are judged stale a week after
-the newer filing arrived, and a note names both filings. Facts that are undated, filed in the future or filed before
+A filing whose current-period column (its currency facts for its latest period end) is held entirely, whether the
+whole filing or only that column is mis-scaled, no longer makes older figures current: the response's as-of date is the
+newest filing whose own column is shown, the figures are judged stale a week after the held filing arrived (blocked
+120 days after their own filing), and a note names both filings. Its comparatives may still be served. Facts that are undated, filed in the future or filed before
 their period ended are set aside with a warning.
 
 **Alternatives.**
 - Quarantine every cross-filing disagreement: rejected, it hides restatements.
 - MAD per concept: rejected, genuine one-offs sit up to 10^3 from their neighbours.
-- A size bound on tax lines: measured and rejected. A genuine Meta tax line is 39× its yardstick, while Microsoft's
-  GILTI ×1000 lands at 30×.
+- A size bound on tax lines against the line's own history: measured and rejected (a genuine Meta tax line is 39× that
+  yardstick, while Microsoft's GILTI ×1000 lands at 30×). Against total assets the same lines separate cleanly (rule 7).
+- One size bound for every line (100×, 10× when flagged): too loose; ×1000 tax and cash-flow lines landed at 1.4–8.2×
+  total assets and were served (round 12).
 - A step-from-last-year rule for flows: measured and rejected (10 genuine 10^2–10^3 moves in the newest AMZN filings).
 - A "part ≤ total" bound: measured and rejected. Genuine parts reach 815× their total when the other parts offset (GE,
   Citi).
