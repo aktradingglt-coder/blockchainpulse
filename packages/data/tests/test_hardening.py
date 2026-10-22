@@ -2476,3 +2476,34 @@ async def test_figures_superseded_by_a_held_filing_turn_stale_a_week_after_it() 
     assert resp.freshness is not None
     assert resp.freshness.status is Freshness.STALE
     assert any("newest filing (filed 2026-07-31) is held" in n for n in resp.notes)
+
+
+def test_a_proven_rate_reconciliation_pins_a_lone_mis_scaled_line() -> None:
+    """total tax = statutory + state + other - credits, closing in 2023 and 2024 of the same 10-K. The 2025 "other"
+    line swings too much between years for its comparatives to judge, but x1000 it breaks the reconciliation, which one
+    rescale of that line alone repairs; a 4M line below the 1% tolerance does not veto the repair."""
+    statutory = "IncomeTaxReconciliationIncomeTaxExpenseBenefitAtFederalStatutoryIncomeTaxRate"
+    rows = {
+        "IncomeTaxExpenseBenefit": (7_120e6, 9_265e6, 19_087e6),
+        statutory: (7_500e6, 10_000e6, 18_000e6),
+        "IncomeTaxReconciliationStateAndLocalIncomeTaxes": (400e6, 500e6, 900e6),
+        "IncomeTaxReconciliationOtherAdjustments": (-82e6, 1_165e6, 2_587e6 * 1000),
+        "IncomeTaxReconciliationTaxCreditsResearch": (698e6, 2_400e6, 2_404e6),
+        "IncomeTaxReconciliationTaxCreditsOther": (0.0, 0.0, 4e6),
+    }
+    records = _filing([(c, y, v) for c, vs in rows.items() for y, v in zip((2023, 2024, 2025), vs, strict=True)])
+    # last year's 10-K, as any filer has: 2022-2024 on scale
+    earlier = {
+        c: (vs[0] * 0.9, vs[0], vs[1]) for c, vs in rows.items() if c != "IncomeTaxReconciliationOtherAdjustments"
+    }
+    records = [
+        *_filing(
+            [(c, y, v) for c, vs in earlier.items() for y, v in zip((2022, 2023, 2024), vs, strict=True)],
+            accession="earlier",
+        ),
+        *records,
+    ]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("IncomeTaxReconciliationOtherAdjustments", 2025, "a")
+    }

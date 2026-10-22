@@ -133,6 +133,10 @@ PRETAX_TOTALS = (
     "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
     "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
 )
+#: Rate-reconciliation line items (currency amounts), checked against total tax = statutory + items.
+_RECONCILING = ("IncomeTaxReconciliation", "EffectiveIncomeTaxRateReconciliation")
+#: Largest group of facts tried as the mis-scaled side of a system larger than MAX_IDENTITY_TERMS.
+MAX_GROUP_IN_LARGE_SYSTEM = 3
 #: (change over a period, balance): the change equals the closing minus the opening balance, from the same filing.
 CHANGES: tuple[tuple[str, str], ...] = (
     ("GoodwillPeriodIncreaseDecrease", "Goodwill"),
@@ -404,7 +408,7 @@ def _instances(records: list[FundamentalFact]) -> list[_Instance]:
     index: dict[tuple[str, str, date | None, date], dict[str, int]] = {}
     rates: dict[tuple[str, date | None, date], float] = {}
     for i, f in enumerate(records):
-        if f.concept in wanted and _CURRENCY.match(f.unit):
+        if (f.concept in wanted or f.concept.startswith(_RECONCILING)) and _CURRENCY.match(f.unit):
             index.setdefault((f.accession, f.unit, f.period_start, f.period_end), {})[f.concept] = i
         elif f.concept == STATUTORY_RATE and f.unit == "pure":
             rates[(f.accession, f.period_start, f.period_end)] = f.value
@@ -424,7 +428,45 @@ def _instances(records: list[FundamentalFact]) -> list[_Instance]:
             opening = index.get((accession, unit, None, start - timedelta(days=1)), {}).get(balance)
             if change in terms and closing is not None and opening is not None:
                 out.append(((terms[change], 1.0), (closing, -1.0), (opening, 1.0)))
-    return out
+    return out + _proven_reconciliations(records, index)
+
+
+def _proven_reconciliations(
+    records: list[FundamentalFact], index: dict[tuple[str, str, date | None, date], dict[str, int]]
+) -> list[_Instance]:
+    """Rate reconciliations, each used only where the filing's tagging is shown to close: in some other year of the
+    same table. Filers tag reconciling items differently (signs, custom elements), and an unproven relation could be
+    "repaired" by chance."""
+    by_filing: dict[str, list[_Instance]] = {}
+    for (accession, _, _, _), terms in index.items():
+        if (inst := _rate_reconciliation(terms)) is not None:
+            by_filing.setdefault(accession, []).append(inst)
+    return [
+        inst
+        for tables in by_filing.values()
+        for inst in tables
+        if any(other is not inst and _balances(_contributions(records, other)) for other in tables)
+    ]
+
+
+def _rate_reconciliation(terms: dict[str, int]) -> _Instance | None:
+    """Total tax = statutory tax + the reconciling items (credits and the FDII deduction lower it, other items carry
+    their own sign). Where a filer reports total credits, its breakdown is not counted again. Filers differ in which
+    items they tag, so many reconciliations do not close as tagged; that is harmless: a relation only ever holds a fact
+    when one power-of-1000 rescale makes it close."""
+    if "IncomeTaxExpenseBenefit" not in terms or STATUTORY_AMOUNT not in terms:
+        return None
+    items = [c for c in terms if c.startswith(_RECONCILING) and c != STATUTORY_AMOUNT]
+    if "IncomeTaxReconciliationTaxCredits" in items:
+        items = [
+            c
+            for c in items
+            if not c.startswith("IncomeTaxReconciliationTaxCredits") or c == "IncomeTaxReconciliationTaxCredits"
+        ]
+    if not items:
+        return None
+    signed = [(terms[c], 1.0 if ("TaxCredits" in c or "Fdii" in c) else -1.0) for c in sorted(items)]
+    return ((terms["IncomeTaxExpenseBenefit"], 1.0), (terms[STATUTORY_AMOUNT], -1.0), *signed)
 
 
 def _contributions(
@@ -453,34 +495,60 @@ def _systems(instances: list[_Instance]) -> list[list[_Instance]]:
 def _repair(
     records: list[FundamentalFact], system: list[_Instance], broken: list[_Instance], neighbours: _Neighbours
 ) -> set[int]:
+    """Find groups of facts whose power-of-1000 rescale makes broken relations close without breaking any that closed;
+    blame one side of each (_blame). Relations that no rescale closes (a filer's own tagging) are left alone. When the
+    history cannot decide, the facts of the relations that rescale would close are held."""
     terms = sorted({k for inst in system for k, _ in inst})
-    if len(terms) > MAX_IDENTITY_TERMS:
-        return set(terms)  # too large to solve here: hold rather than guess
-    wrong: set[int] = set()
-    undecided = False
-    for size in range(1, len(terms) // 2 + 1):
+    largest = len(terms) // 2 if len(terms) <= MAX_IDENTITY_TERMS else MAX_GROUP_IN_LARGE_SYSTEM
+    own = frozenset({records[terms[0]].accession})
+    held: set[int] = set()
+    repairs: list[set[int]] = []
+    for size in range(1, largest + 1):
         for group in itertools.combinations(terms, size):
             rest = [k for k in terms if k not in group]
             if size * 2 == len(terms) and rest < list(group):
                 continue  # an even split is the same pair seen from the other side
-            if not any(_repaired(records, system, broken, set(group), 1000.0**k) for k in (-2, -1, 1, 2)):
+            if any(found <= set(group) for found in repairs):
+                continue  # only minimal repairs: adding a line too small to matter repairs nothing new
+            fixed = next(
+                (f for k in (-2, -1, 1, 2) if (f := _fixed(records, system, broken, set(group), 1000.0**k))), []
+            )
+            if not fixed:
                 continue
-            blamed = _blame(neighbours, list(group), rest, frozenset({records[terms[0]].accession}))
-            if blamed is None:
-                undecided = True
-            else:
-                wrong |= set(blamed)
-    if undecided:
-        return set(terms)
-    return wrong
+            repairs.append(set(group))
+            involved = {k for inst in fixed for k, _ in inst}
+            blamed = _blame(neighbours, list(group), [k for k in rest if k in involved], own)
+            held |= set(blamed) & involved if blamed is not None else involved
+    return held
 
 
-def _repaired(
+def _fixed(
     records: list[FundamentalFact], system: list[_Instance], broken: list[_Instance], group: set[int], factor: float
-) -> bool:
-    return all(
-        (_balances_with_every_term if inst in broken else _balances)(_contributions(records, inst, group, factor))
-        for inst in system
+) -> list[_Instance]:
+    """The broken relations this rescale closes (each needing every term), or none if it breaks a closed one."""
+    closed = []
+    for inst in system:
+        contributions = _contributions(records, inst, group, factor)
+        if inst not in broken:
+            if not _balances(contributions):
+                return []
+        elif _closes_with_both_sides(contributions, [k in group for k, _ in inst]):
+            closed.append(inst)
+    return closed
+
+
+def _closes_with_both_sides(contributions: Sequence[float], rescaled: Sequence[bool]) -> bool:
+    """The relation closes after the rescale, and needs both the rescaled terms and the others to do so: a rescale
+    that only shrinks its terms into insignificance (or dwarfs the rest) proves nothing. Small genuine lines of a long
+    relation may sit below the tolerance; they do not veto a repair."""
+    without_group = [0.0 if r else v for v, r in zip(contributions, rescaled, strict=True)]
+    without_rest = [v if r else 0.0 for v, r in zip(contributions, rescaled, strict=True)]
+    return (
+        _balances(contributions)
+        and any(rescaled)
+        and not all(rescaled)
+        and not _balances(without_group)
+        and not _balances(without_rest)
     )
 
 
@@ -522,13 +590,6 @@ def _balances(contributions: Sequence[float]) -> bool:
     """Signed terms that should sum to zero do, within ADDITIVITY_TOLERANCE of the largest term."""
     largest = max(abs(v) for v in contributions)
     return largest == 0 or abs(sum(contributions)) <= ADDITIVITY_TOLERANCE * largest
-
-
-def _balances_with_every_term(contributions: Sequence[float]) -> bool:
-    """The relation holds and needs every term: rescaling one term into insignificance proves nothing."""
-    return _balances(contributions) and not any(
-        _balances([0.0 if j == k else v for j, v in enumerate(contributions)]) for k in range(len(contributions))
-    )
 
 
 def _fact_holds(records: list[FundamentalFact], distance: dict[int, float]) -> tuple[set[int], set[int]]:
