@@ -351,29 +351,33 @@ from a public EDGAR cache; they were used for measurement only and are not commi
 On clean data:
 - AMZN: 0 facts held, and 4 genuine one-offs flagged.
 - The 15 filers together: 314 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
-  classified, of real scale errors in old filings (the round-11 reviewer found some in share counts) and genuine
+  classified, of real scale errors in old filings (share counts; NVDA's and MMM's option intrinsic values) and genuine
   values withheld. Before the round-11 changes the same data held 3,789.
-- 59 past AMZN as-of dates: 9 snapshots hold 1–4 genuine facts in 3 concepts. No wrong value is served at any date.
+- 59 past AMZN as-of dates: 10 snapshots hold 1–4 genuine facts in 3 concepts. No wrong value is served at any date.
   The cost is withholding, which is the side these rules err on (P2 backtests must treat held facts as missing).
 
-Each USD concept's current-period facts in a newest filing were seeded one at a time. Missed counts exclude zero
-values, which scaling leaves unchanged.
+Each USD concept's current-period facts in one filing were seeded one at a time, in the full company facts as recorded
+(later 10-Qs are present for AAPL, NVDA and JPM; the round-12 reviewer found re-running as of each 10-K's own filing
+date changes the counts by at most 4). Counts are held / flagged / missed; seeds whose value is zero (unchanged by any
+scaling) are counted separately in every row.
 
-| Filing | ÷1000 held / flagged / missed | ×1000 held / flagged / missed |
-| --- | --- | --- |
-| AMZN 10-Q 26-000026 (159) | 142 / 11 / 6 | 149 / 6 / 4 |
-| AMZN 10-K 26-000004 (245) | 213 / 24 / 8 | 222 / 16 / 7 |
-| AAPL 10-K FY2025 (174) | 159 / 13 / 2 | 165 / 4 / 5 |
-| MSFT 10-K FY2026 (232) | 198 / 18 / 11 | 208 / 8 / 11 |
-| NVDA 10-K FY2026 (196) | 156 / 19 / 16 | 184 / 4 / 3 |
-| JPM 10-K FY2025 (387) | 351 / 16 / 10 | 352 / 17 / 8 |
+| Filing (USD concepts) | ÷1000 | ×1000 | Zero values |
+| --- | --- | --- | --- |
+| AMZN 10-Q 26-000026 (159) | 141 / 12 / 5 | 150 / 5 / 3 | 1 |
+| AMZN 10-K 26-000004 (245) | 213 / 24 / 7 | 232 / 7 / 5 | 1 |
+| AAPL 10-K FY2025 (174) | 159 / 13 / 2 | 169 / 2 / 3 | 0 |
+| MSFT 10-K FY2026 (232) | 198 / 18 / 11 | 217 / 7 / 3 | 5 |
+| NVDA 10-K FY2026 (196) | 156 / 19 / 16 | 186 / 3 / 2 | 5 |
+| JPM 10-K FY2025 (387) | 351 / 16 / 10 | 356 / 13 / 8 | 10 |
 
-At ×1e6, AMZN misses only the zero value (10-K 244 / 0 / 1, 10-Q 157 / 1 / 1). Whole filings, mis-scaled current
-columns and whole tax tables are held entirely.
+Every ×1000 miss lands below its tier's size bound (for example MSFT's FDII line at 0.8× total assets, JPM's tax
+contingencies at 0.1×), so size alone cannot tell it apart. Whole filings and mis-scaled current columns are held
+entirely (all 15 filers, both factors, round 12).
 
 **Limit (stated, not hidden).** The remaining misses are of two kinds:
 - *Tables that do not close as tagged, even on clean data.* These are the rate reconciliations of MSFT FY2026 (0.75%
-  off), NVDA FY2026 (2.4% off), AAPL (the $10.2B EU state-aid charge uses Apple's own tag) and JPM. When the genuine
+  off), NVDA FY2026 (2.4% off), AAPL (the $10.2B EU state-aid charge uses Apple's own tag), JPM and AMZN (no
+  consistent sign assignment closes it in two years). When the genuine
   table does not close, a wrong line in it cannot be told apart.
 - *Lines whose relation is defined only in the filing's XBRL calculation linkbase*: cash-flow details (working-capital
   changes, gross investing and financing flows), footnote rollforwards with filer-specific lines, and new single-year
@@ -381,4 +385,4 @@ columns and whole tax tables are held entirely.
   them from element names could hold real data.
 
 Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
-fundamentals into reports (STATUS). (P1 review rounds 6–11.)
+fundamentals into reports (STATUS). (P1 review rounds 6–12.)

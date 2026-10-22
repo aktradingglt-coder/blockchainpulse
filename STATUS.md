@@ -95,7 +95,7 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   linkbase and check every calculation relationship with its declared weights. That covers the scale-error misses the
   company-facts API cannot show: cash-flow detail lines, footnote rollforwards and single-year tables.
 - P2 (from P1 review round 9, minor): SEC facts held as likely scale errors must be treated as missing in backtests and
-  point-in-time panels (9 of 59 historical snapshots hold 1–4 genuine facts; D-036).
+  point-in-time panels (10 of 59 historical AMZN snapshots hold 1–4 genuine facts; D-036).
 - P11 (from P1 review round 11, minor): a single malformed Kraken candle blocks the whole fetch (schema check);
   drop and report such rows when they are few, as the SEC ticker map does. Clean SEC responses carry a failing
   non-blocking `scale_outliers` check (genuine one-offs flagged for review); the status page should not count
