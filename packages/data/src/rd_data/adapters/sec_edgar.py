@@ -24,7 +24,7 @@ from rd_data.adapters.base import (
     RequestKind,
     require_param,
 )
-from rd_data.adapters.sec_scale import scale_errors, superseded_filings
+from rd_data.adapters.sec_scale import current_columns, scale_errors
 from rd_data.errors import InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
 from rd_data.quality import (
@@ -331,18 +331,20 @@ class SecEdgarAdapter(BaseAdapter):
         usable = [f for i, f in enumerate(records) if i not in held]
         # The response is as fresh as the newest filing whose own figures (its current-period column) are shown; a
         # filing whose current column is held only contributes comparatives and does not make old figures current.
-        superseded = superseded_filings(records, held)
-        current = [f for f in usable if f.accession not in superseded]
-        as_of = current[-1].filed if current else (usable[-1].filed if usable else None)
+        columns = current_columns(records)
+        shown = {acc for acc, idx in columns.items() if any(i not in held for i in idx)}
+        superseded = set(columns) - shown
+        filed_on = {f.accession: f.filed for f in records}
+        as_of = max((filed_on[acc] for acc in shown), default=usable[-1].filed if usable else None)
         notes = ["Point-in-time by filing date: a fact is usable only on or after its 'filed' date."]
         superseded_at = None
-        later = sorted({f.filed for f in records if as_of is not None and f.filed > as_of})
+        later = sorted({filed_on[acc] for acc in superseded if as_of is not None and filed_on[acc] > as_of})
         if later and as_of is not None:
             superseded_at = datetime.combine(later[0], datetime.min.time(), tzinfo=UTC)
             notes.append(
-                f"The current-period figures of the filing of {later[0].isoformat()} are held for scale errors; the "
-                f"latest figures shown are from the filing of {as_of.isoformat()} and are judged stale a week after "
-                "the newer filing arrived."
+                f"The current-period figures of the filing of {later[0].isoformat()} are held as likely scale or "
+                f"sign errors; the latest figures shown are from the filing of {as_of.isoformat()} and are judged "
+                "stale a week after the newer filing arrived."
             )
         return ParseResult(
             tuple(usable),
@@ -365,8 +367,8 @@ class SecEdgarAdapter(BaseAdapter):
 
 #: Share of malformed rows the ticker map tolerates (left out with a warning) before the whole map is refused.
 TICKER_REJECT_SHARE = 0.01
-#: The SEC map lists every registrant with a ticker (10,443 rows when recorded); far fewer means a cut-off download.
-MIN_TICKER_ROWS = 5000
+#: The SEC map lists every registrant with a ticker (10,443 rows when recorded); under 8,000 means a cut-off download.
+MIN_TICKER_ROWS = 8000
 
 
 def _instrument(row: Any) -> Instrument | None:  # noqa: ANN401 - provider rows are untyped

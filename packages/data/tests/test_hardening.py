@@ -2651,7 +2651,7 @@ def test_neighbouring_periods_are_drawn_from_five_years_around_a_fact() -> None:
 
 def test_a_ticker_mapped_to_two_registrants_is_left_out_with_a_warning() -> None:
     adapter = SecEdgarAdapter.__new__(SecEdgarAdapter)
-    rows = {str(k): {"cik_str": 1000 + k, "ticker": f"T{k}", "title": f"Co {k}"} for k in range(6000)}
+    rows = {str(k): {"cik_str": 1000 + k, "ticker": f"T{k}", "title": f"Co {k}"} for k in range(9000)}
     rows["dup"] = {"cik_str": 99, "ticker": "t1", "title": "Other Co"}
     rows["same"] = {"cik_str": 1002, "ticker": "T2", "title": "Co 2"}
     result = adapter._parse_tickers(rows)
@@ -2660,3 +2660,136 @@ def test_a_ticker_mapped_to_two_registrants_is_left_out_with_a_warning() -> None
     assert symbols.count("T2") == 1
     assert any("several CIKs" in w for w in result.quality.warnings)
     assert result.quality.passed
+
+
+# ------------------------------------------------------------------------------------- review round 13 (P1)
+
+
+def _fact_row(
+    accn: str, end: str, val: float, *, filed: str, form: str = "10-Q", start: str | None = None
+) -> dict[str, Any]:
+    row: dict[str, Any] = {"end": end, "val": val, "accn": accn, "fy": 2026, "fp": "Q2", "form": form, "filed": filed}
+    if start is not None:
+        row["start"] = start
+    return row
+
+
+async def test_a_later_dated_footnote_fact_or_a_cover_only_amendment_does_not_hide_a_held_column() -> None:
+    """The June column of the newest 10-Q is mis-scaled. The same 10-Q also tags one footnote amount dated after the
+    quarter, and a cover-only 10-K/A follows a few days later: neither makes the April figures current."""
+
+    def edit(data: dict[str, Any]) -> None:
+        for body in data["facts"]["us-gaap"].values():
+            for facts in body["units"].values():
+                for f in facts:
+                    if f["accn"] == NEWEST_10Q and f["end"] == "2026-06-30":
+                        f["val"] = f["val"] * 1000
+        data["facts"]["us-gaap"]["LossContingencyDamagesAwardedValue"] = {
+            "units": {"USD": [_fact_row(NEWEST_10Q, "2026-07-20", 5e8, filed="2026-07-31")]}
+        }
+        data["facts"]["dei"]["EntityPublicFloat"]["units"]["USD"].append(
+            _fact_row("0001018724-26-000030", "2026-06-30", 2.1e12, filed="2026-08-04", form="10-K/A")
+        )
+
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(edit)}, now=datetime(2026, 8, 9, 12, tzinfo=UTC))
+    assert str(resp.as_of)[:10] == "2026-04-30"
+    assert resp.freshness is not None
+    assert resp.freshness.status is Freshness.STALE
+    assert any("filing of 2026-07-31 are held" in n for n in resp.notes)
+
+
+def test_the_current_column_is_the_period_a_filing_reports_most() -> None:
+    records = [
+        *_filing(
+            [("Revenues", 2025, 1e9), ("NetIncomeLoss", 2025, 1e8), ("LossContingencyDamagesAwardedValue", 2026, 5e6)]
+        ),
+        *_filing([("EntityPublicFloat", 2026, 3e9)], accession="cover"),
+    ]
+    object.__setattr__(records[-1], "taxonomy", "dei")
+    columns = sec_scale.current_columns(records)
+    assert {records[i].concept for i in columns["a"]} == {"Revenues", "NetIncomeLoss"}
+    assert "cover" not in columns
+
+
+def test_changes_oci_and_cash_flow_lines_have_tighter_size_bounds() -> None:
+    # clean changes reach 0.34x assets, OCI 0.14x, cash-flow lines 0.96x: a x1000 cell at 1-3x is held
+    for concept, values in (
+        ("IncreaseDecreaseInAccountsPayable", (1e9, 1.2e9, 15e9)),
+        ("OtherComprehensiveIncomeLossNetOfTax", (0.3e9, -0.2e9, 12e9)),
+        ("ProceedsFromPaymentsForOtherFinancingActivities", (0.5e9, 0.4e9, 25e9)),
+    ):
+        earlier = (values[0] * 0.9, values[0], values[1])
+        assert (concept, 2025) in _held_concepts(_sized(concept, values, earlier=earlier))
+    # a genuine purchase of securities near total assets is served
+    purchases = "PaymentsToAcquireAvailableForSaleSecurities"
+    assert not _held_concepts(_sized(purchases, (9e9, 9.5e9, 9.6e9), earlier=(8.5e9, 9e9, 9.5e9)))
+
+
+async def test_impossible_negatives_in_the_newest_filing_are_held() -> None:
+    def negate(data: dict[str, Any]) -> None:
+        for concept in ("Assets", "CashAndCashEquivalentsAtCarryingValue"):
+            for f in data["facts"]["us-gaap"][concept]["units"]["USD"]:
+                if f["accn"] == NEWEST_10Q and f["end"] == "2026-06-30":
+                    f["val"] = -f["val"]
+
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(negate)})
+    served = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept in ("Assets", "CashAndCashEquivalentsAtCarryingValue")
+    ]
+    assert served
+    assert all(f.value > 0 for f in served)
+
+
+def test_a_sign_error_that_breaks_an_identity_is_held_against_its_history() -> None:
+    """Income tax = current + deferred. The 2025 deferred line is entered with the wrong sign; it has been an expense
+    in every earlier year, and flipping it alone closes the identity."""
+    rows = {
+        "IncomeTaxExpenseBenefit": (9e9, 10e9, 12e9),
+        "CurrentIncomeTaxExpenseBenefit": (7e9, 8e9, 9e9),
+        "DeferredIncomeTaxExpenseBenefit": (2e9, 2e9, -3e9),
+    }
+    newest = _filing([(c, y, v) for c, vs in rows.items() for y, v in zip((2023, 2024, 2025), vs, strict=True)])
+    earlier = _filing(
+        [(c, y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)],
+        accession="earlier",
+    )
+    records = [*earlier, *newest]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("DeferredIncomeTaxExpenseBenefit", 2025, "a")
+    }
+
+
+def test_learned_signs_prefer_the_assignment_that_closes_exactly() -> None:
+    """An unrecognized-tax-benefit rollforward whose settlements line is tiny next to the balance in 2023 and 2024
+    closes those years with either sign; only the true sign leaves no residual. Its 2025 cell /1000 is then held."""
+    balance = "UnrecognizedTaxBenefits"
+    lines = {
+        "UnrecognizedTaxBenefitsIncreasesResultingFromCurrentPeriodTaxPositions": (2.0e9, 2.5e9, 3.0e9),
+        "UnrecognizedTaxBenefitsIncreasesResultingFromPriorPeriodTaxPositions": (1.0e9, 0.8e9, 1.2e9),
+        "UnrecognizedTaxBenefitsDecreasesResultingFromPriorPeriodTaxPositions": (0.5e9, 0.6e9, 0.4e9),
+        "UnrecognizedTaxBenefitsDecreasesResultingFromSettlementsWithTaxingAuthorities": (0.05e9, 0.08e9, 2.939e9),
+        "UnrecognizedTaxBenefitsReductionsResultingFromLapseOfApplicableStatuteOfLimitations": (0.1e9, 0.12e9, 0.15e9),
+    }
+    sign = {c: (1.0 if "Increases" in c else -1.0) for c in lines}
+    closing = {2022: 16.0e9}
+    for k, y in enumerate((2023, 2024, 2025)):
+        closing[y] = closing[y - 1] + sum(sign[c] * vs[k] for c, vs in lines.items())
+    settle = "UnrecognizedTaxBenefitsDecreasesResultingFromSettlementsWithTaxingAuthorities"
+
+    def filing(years: tuple[int, ...], accession: str, seed: float = 1.0) -> list[FundamentalFact]:
+        rows = [(balance, -y, closing[y]) for y in (years[0] - 1, *years)]
+        for c, vs in lines.items():
+            for y in years:
+                v = vs[y - 2023] if y >= 2023 else vs[0] * 0.9
+                rows.append((c, y, v * (seed if (c == settle and y == 2025) else 1.0)))
+        return _filing(rows, accession=accession)
+
+    closing[2021] = closing[2022] - sum(sign[c] * vs[0] * 0.9 for c, vs in lines.items())
+    records = [*filing((2022, 2023, 2024), "earlier"), *filing((2023, 2024, 2025), "a", seed=0.001)]
+    held, _ = sec_scale.scale_errors(records)
+    assert (settle, 2025, "a") in {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held}

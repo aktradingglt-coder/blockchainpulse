@@ -12,6 +12,7 @@ import itertools
 import math
 import re
 import statistics
+from collections import Counter
 from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 from datetime import date, timedelta
@@ -70,6 +71,42 @@ _TAX_AMOUNT = re.compile(
     r"|ValuationAllowance|TaxCredit"
 )
 _NOT_A_TAX_AMOUNT = re.compile(r"BeforeIncomeTax|NetOfTax|AfterTax|BeforeTax|NetOfIncomeTax")
+#: Changes in a balance (working-capital changes, period increases) and other comprehensive income are held from this
+#: multiple of total assets: clean maxima 0.34x, 0.61x and 0.14x respectively.
+CHANGE_ASSETS_MULTIPLE = 1.0
+_CHANGE = re.compile(r"^IncreaseDecreaseIn|PeriodIncreaseDecrease|^OtherComprehensiveIncome")
+#: Cash-flow lines (gross proceeds, payments and repayments; net cash by activity) are held from this multiple: clean
+#: maxima 0.96x (AAPL purchases of securities) and 0.72x.
+FLOW_ASSETS_MULTIPLE = 2.0
+_FLOW = re.compile(r"^(Proceeds|Payments|Repayments)|^NetCashProvidedByUsedIn")
+#: Balances and totals that cannot be negative: none of about 32,000 clean facts of these concepts is. A negative one
+#: is a sign error and is held.
+NEVER_NEGATIVE = frozenset(
+    {
+        "Assets",
+        "AssetsCurrent",
+        "AssetsNoncurrent",
+        "Liabilities",
+        "LiabilitiesCurrent",
+        "LiabilitiesAndStockholdersEquity",
+        "CashAndCashEquivalentsAtCarryingValue",
+        "Cash",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        "PropertyPlantAndEquipmentNet",
+        "PropertyPlantAndEquipmentGross",
+        "Goodwill",
+        "IntangibleAssetsNetExcludingGoodwill",
+        "InventoryNet",
+        "AccountsReceivableNetCurrent",
+        "AccountsPayableCurrent",
+        "LongTermDebt",
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "SalesRevenueNet",
+        "CommonStockSharesOutstanding",
+        "WeightedAverageNumberOfSharesOutstandingBasic",
+    }
+)
 #: Largest identity system (terms sharing identities, e.g. the 12-line income-tax table) solved by search.
 MAX_IDENTITY_TERMS = 14
 #: A group of facts this close to its own history (orders of magnitude) is taken as correctly scaled.
@@ -292,6 +329,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
         if (d := neighbours.distance(i, frozenset({records[i].accession}))) is not None
     }
     held, flagged = _fact_holds(records, distance)
+    held |= {i for i, f in enumerate(records) if f.value < 0 and f.concept in NEVER_NEGATIVE}
     held |= _filing_disagreements(records, logs, by_period, neighbours)
     held |= _additivity_errors(records, neighbours)
     held |= _prefix_errors(records, logs, neighbours)
@@ -318,19 +356,20 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     return held, flagged - held
 
 
-def superseded_filings(records: list[FundamentalFact], held: set[int]) -> set[str]:
-    """Filings whose current-period column (their currency facts for their latest period end) is held entirely: their
-    comparatives may still be shown, but they no longer provide the figures they were filed to report."""
-    column: dict[str, list[int]] = {}
-    latest: dict[str, date] = {}
-    money = [i for i, f in enumerate(records) if _CURRENCY.match(f.unit)]  # a cover-page share count is dated later
+def current_columns(records: list[FundamentalFact]) -> dict[str, list[int]]:
+    """Each filing's current-period column: its us-gaap currency facts for the period end it reports most facts for
+    (the latest on a tie). A cover-page public float or a single later-dated footnote fact does not move it, and a
+    filing with no such facts (a cover-only amendment) has none."""
+    ends: dict[str, Counter[date]] = {}
+    money = [i for i, f in enumerate(records) if _CURRENCY.match(f.unit) and f.taxonomy != "dei"]
     for i in money:
-        f = records[i]
-        latest[f.accession] = max(latest.get(f.accession, f.period_end), f.period_end)
+        ends.setdefault(records[i].accession, Counter())[records[i].period_end] += 1
+    main = {acc: max(c, key=lambda e: (c[e], e)) for acc, c in ends.items()}
+    columns: dict[str, list[int]] = {}
     for i in money:
-        if records[i].period_end == latest[records[i].accession]:
-            column.setdefault(records[i].accession, []).append(i)
-    return {acc for acc, idx in column.items() if all(i in held for i in idx)}
+        if records[i].period_end == main[records[i].accession]:
+            columns.setdefault(records[i].accession, []).append(i)
+    return columns
 
 
 _SeriesKey = tuple[str, str, int | None]
@@ -351,6 +390,11 @@ class _Neighbours:
             self.series.setdefault((concept, unit, dur), {})[end] = [
                 (records[i].accession, v) for i in idx if (v := logs[i]) is not None
             ]
+        self.signed: dict[_SeriesKey, dict[date, dict[str, float]]] = {}
+        for (concept, unit, dur, end), idx in by_period.items():
+            self.signed.setdefault((concept, unit, dur), {})[end] = {
+                records[i].accession: records[i].value for i in idx
+            }
         self._nearest: dict[tuple[_SeriesKey, date], list[date]] = {}
 
     def distance(self, i: int, exclude: frozenset[str]) -> float | None:
@@ -373,6 +417,26 @@ class _Neighbours:
         if len(levels) < 2 or value is None:
             return None
         return abs(value - statistics.median(levels))
+
+    def sign_against_history(self, i: int, exclude: frozenset[str]) -> bool:
+        """Whether a fact's sign is the opposite of every one of its (at least two) nearest neighbouring periods, as
+        other filings report them."""
+        f = self.records[i]
+        periods = self.series.get((f.concept, f.unit, _duration(f)), {})
+        nearest = self._nearest.get(((f.concept, f.unit, _duration(f)), f.period_end))
+        if nearest is None:
+            self.distance(i, exclude)
+            nearest = self._nearest.get(((f.concept, f.unit, _duration(f)), f.period_end), [])
+        signs: list[float] = []
+        for e in nearest:
+            values = [
+                self.signed[(f.concept, f.unit, _duration(f))][e][acc] for acc, _ in periods[e] if acc not in exclude
+            ]
+            if values:
+                signs.append(math.copysign(1.0, statistics.median(values)))
+            if len(signs) == NEIGHBOURS:
+                break
+        return len(signs) >= 2 and all(sg != math.copysign(1.0, f.value) for sg in signs)
 
     def own_distance(self, i: int) -> float | None:
         """Orders of magnitude between a fact and the other periods its own filing reports for the same line (the
@@ -443,11 +507,24 @@ def _comparative_errors(records: list[FundamentalFact], logs: list[float | None]
     return held
 
 
+def _assets_multiple(concept: str) -> float:
+    if _TAX_AMOUNT.search(concept) and not _NOT_A_TAX_AMOUNT.search(concept):
+        return TAX_ASSETS_MULTIPLE
+    if _CHANGE.search(concept):
+        return CHANGE_ASSETS_MULTIPLE
+    if _FLOW.search(concept):
+        return FLOW_ASSETS_MULTIPLE
+    if _TURNOVER.search(concept):
+        return TURNOVER_ASSETS_MULTIPLE
+    return MAX_ASSETS_MULTIPLE
+
+
 def _beyond_assets(records: list[FundamentalFact], logs: list[float | None], held: set[int]) -> set[int]:
     """Currency facts too large for the company: more than MAX_ASSETS_MULTIPLE times its total assets (same currency),
-    TAX_ASSETS_MULTIPLE times for a tax amount, TURNOVER_ASSETS_MULTIPLE times for revenue and cost lines. Total assets
-    is the median of the NEIGHBOURS nearest period ends, each as reported by other filings where there are any, leaving
-    out facts already held: one mis-scaled filing cannot shrink the yardstick and hold the newest genuine figures."""
+    TAX_ASSETS_MULTIPLE times for a tax amount, CHANGE_ASSETS_MULTIPLE for changes and OCI, FLOW_ASSETS_MULTIPLE for
+    cash-flow lines and TURNOVER_ASSETS_MULTIPLE for revenue and cost lines. Total assets is the median of the
+    NEIGHBOURS nearest period ends, each as reported by other filings where there are any, leaving out facts already
+    held: one mis-scaled filing cannot shrink the yardstick and hold the newest genuine figures."""
     assets: dict[tuple[str, date], list[tuple[str, float]]] = {}
     for i, f in enumerate(records):
         if f.concept == "Assets" and f.period_start is None and i not in held and (v := logs[i]) is not None:
@@ -472,12 +549,7 @@ def _beyond_assets(records: list[FundamentalFact], logs: list[float | None], hel
         reference = statistics.median(levels)
         if reference < floor:
             continue
-        if _TAX_AMOUNT.search(f.concept) and not _NOT_A_TAX_AMOUNT.search(f.concept):
-            multiple = TAX_ASSETS_MULTIPLE
-        elif _TURNOVER.search(f.concept):
-            multiple = TURNOVER_ASSETS_MULTIPLE
-        else:
-            multiple = MAX_ASSETS_MULTIPLE
+        multiple = _assets_multiple(f.concept)
         if value - reference > math.log10(multiple):
             out.add(i)
     return out
@@ -587,24 +659,25 @@ def _learned_relations(
 def _learn_signs(
     records: list[FundamentalFact], rows: list[tuple[list[tuple[int, float]], dict[str, int]]], names: list[str]
 ) -> dict[str, float] | None:
+    """The signs that close the most years; among those, the ones that close them most exactly. A line far smaller than
+    the table's largest term (an opening balance) closes it either way within the tolerance, but only its true sign
+    leaves no residual beyond rounding."""
     best: dict[str, float] | None = None
-    closed_best = 0
+    best_score = (0, 0.0)
     for combination in itertools.product((1.0, -1.0), repeat=len(names)):
         signs = dict(zip(names, combination, strict=True))
-        closed = sum(
-            _balances(
-                [
-                    *(coef * records[i].value for i, coef in anchor),
-                    *(-signs[c] * records[i].value for c, i in lines.items()),
-                ]
-            )
-            for anchor, lines in rows
-        )
-        if closed > closed_best:
-            best, closed_best = signs, closed
-        if closed == len(rows):
-            break
-    if closed_best < 2 or closed_best < len(rows) - 1:
+        closed, residual = 0, 0.0
+        for anchor, lines in rows:
+            terms = [
+                *(coef * records[i].value for i, coef in anchor),
+                *(-signs[c] * records[i].value for c, i in lines.items()),
+            ]
+            if _balances(terms):
+                closed += 1
+                residual += abs(sum(terms)) / max(abs(v) for v in terms)
+        if (closed, -residual) > (best_score[0], -best_score[1]) or best is None:
+            best, best_score = signs, (closed, residual)
+    if best_score[0] < 2 or best_score[0] < len(rows) - 1:
         return None
     return best
 
@@ -659,7 +732,18 @@ def _repair(
             involved = {k for inst in fixed for k, _ in inst}
             blamed = _blame(neighbours, list(group), [k for k in rest if k in involved], own)
             held |= set(blamed) & involved if blamed is not None else involved
-    return held
+    if repairs:
+        return held
+    # No rescale repairs the system: a single fact entered with the wrong sign may. It is held when its sign is the
+    # opposite of its own history, or when it is the only fact whose flip closes the system; otherwise the relations a
+    # flip would close are held.
+    flips = [(k, fixed) for k in terms if (fixed := _fixed(records, system, broken, {k}, -1.0))]
+    blamed_flips = {k for k, _ in flips if neighbours.sign_against_history(k, own)}
+    if blamed_flips:
+        return blamed_flips
+    if len(flips) == 1:
+        return {flips[0][0]}
+    return {k for _, fixed in flips for inst in fixed for k, _ in inst}
 
 
 def _fixed(
