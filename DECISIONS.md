@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-10-22, round 12) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-10-22, round 13) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -296,12 +296,16 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    - changes = closing − opening balance (goodwill, cash);
    - relations whose lines and signs vary by filer (rate reconciliation, OCI and its parts, the unrecognized tax
      benefit rollforward): the signs are learned from the filing's own table, and the relation is used only if they
-     close it in all its years but at most one (and in at least two).
+     close it in all its years but at most one (and in at least two). Among sign assignments closing the same years,
+     the one with the smallest residual wins: a line tiny next to the table's balance closes it within the tolerance
+     with either sign, but only its true sign leaves no residual. Tables of more than 12 lines are not learned.
 
    A relation counts as broken evidence only if rescaling a minimal group of its facts by a power of 1000 closes it,
    and only if the rescaled facts and the rest are both needed for it to close. That group is held if its own history
    (other filings, or failing that its own comparatives as evidence against it) blames it. Otherwise the facts of the
-   relations it closes are held.
+   relations it closes are held. When no rescale closes a broken relation, flipping the sign of one fact may: that fact
+   is held when its sign is the opposite of all of its (at least two) neighbouring periods, or when it is the only
+   fact whose flip closes the system; otherwise the facts of the relations a flip closes are held.
 7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
    is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
    the 15 filers below with the bound itself switched off:
@@ -309,12 +313,13 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    | Lines | Held above | Largest clean value |
    | --- | --- | --- |
    | Tax amounts (expense and parts, reconciliation, taxes paid, deferred and uncertain tax) | 1× | 0.43× (about 30,000 facts) |
+   | Changes in balances (working capital, period increases) and OCI | 1× | 0.34×, 0.61× and 0.14× |
+   | Cash-flow lines (gross proceeds, payments, repayments; net cash by activity) | 2× | 0.96× (AAPL purchases of securities) and 0.72× |
    | Revenue, cost and purchase lines | 20× | 2.34× (AMZN 2011 revenue) |
-   | Everything else | 3× | 1.51× (XOM gross PP&E), about 350,000 facts |
+   | Everything else | 3× | 1.51× (XOM gross PP&E) |
 
    The only clean values above 3× outside revenue and cost lines are option intrinsic values that were themselves
-   entered at the wrong scale (NVDA FY2012–13, up to 14.9×; MMM Q1-2022, 4.1×): they
-   are now held. Revenue and cost lines get a wide bound because asset turnover is higher for low-margin distributors
+   entered at the wrong scale (NVDA FY2012–13, up to 14.9×; MMM Q1-2022, 4.1×): they are now held. Revenue and cost lines get a wide bound because asset turnover is higher for low-margin distributors
    and traders than for any calibration filer; a ×1000 error still lands far above it. Exempt:
    - companies under $10M of assets;
    - derivative notionals and client assets under management, custody or fiduciary care;
@@ -324,12 +329,17 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
 8. *Spreading.* A held fact's siblings in the same table, a filing's column once mostly held, and relations that
    close around a held fact whose other facts are off their own history too.
 9. *Balance jumps.* A balance in a recent filing that moved more than 10^2 from the previous period end is flagged.
+10. *Impossible signs.* A negative value of a balance or total that cannot be negative is held: assets, liabilities,
+    their current parts, liabilities and equity, cash, PP&E, goodwill, intangibles, inventory, receivables, payables,
+    long-term debt, revenue and share counts (22 concepts; none of about 32,000 clean facts is negative).
 
-A filing whose current-period column (its currency facts for its latest period end) is held entirely, whether the
-whole filing or only that column is mis-scaled, no longer makes older figures current: the response's as-of date is the
-newest filing whose own column is shown, the figures are judged stale a week after the held filing arrived (blocked
-120 days after their own filing), and a note names both filings. Its comparatives may still be served. Facts that are undated, filed in the future or filed before
-their period ended are set aside with a warning.
+A filing's current-period column is its us-gaap currency facts for the period end it reports most facts for (a cover
+public float, a footnote amount dated after the quarter or a cover-only amendment does not move it). When that column
+is held entirely, whether the whole filing or only the column is wrong, the filing no longer makes older figures
+current: the response's as-of date is the newest filing whose own column is shown, the figures are judged stale a week
+after the held filing arrived (blocked 120 days after their own filing), and a note names both filings. Its
+comparatives may still be served. Facts that are undated, filed in the future or filed before their period ended are
+set aside with a warning.
 
 **Alternatives.**
 - Quarantine every cross-filing disagreement: rejected, it hides restatements.
@@ -375,10 +385,11 @@ contingencies at 0.1×), so size alone cannot tell it apart. Whole filings and m
 entirely (all 15 filers, both factors, round 12).
 
 **Limit (stated, not hidden).** The remaining misses are of two kinds:
-- *Tables that do not close as tagged, even on clean data.* These are the rate reconciliations of MSFT FY2026 (0.75%
-  off), NVDA FY2026 (2.4% off), AAPL (the $10.2B EU state-aid charge uses Apple's own tag), JPM and AMZN (no
-  consistent sign assignment closes it in two years). When the genuine
-  table does not close, a wrong line in it cannot be told apart.
+- *Rate reconciliations the filing's own years cannot vouch for.* NVDA FY2026 does not close as tagged (15% off with
+  the learned signs) and AAPL's does not either (the $10.2B EU state-aid charge uses Apple's own tag). AMZN's and JPM's
+  have 13 lines, beyond the 12 whose signs are learned (the round-13 reviewer found one assignment closing 2 of 3
+  years within 0.9% for each, probably by chance among 8,192). MSFT FY2026 reports its new table for one year only, so
+  there is nothing to learn the signs from. A wrong line in such a table cannot be told apart from the table itself.
 - *Lines whose relation is defined only in the filing's XBRL calculation linkbase*: cash-flow details (working-capital
   changes, gross investing and financing flows), footnote rollforwards with filer-specific lines, and new single-year
   tables. The company-facts API P1 uses does not carry which lines make up each section or their weights, and guessing
