@@ -1665,7 +1665,7 @@ async def test_sec_scale_error_against_another_filing_is_quarantined() -> None:
     assert shown
     assert max(f.value for f in shown) < 1e12  # the 323-trillion figure never reaches the user
     # held: the x1000 fact and its sibling in the same table (that filing's Q2-2025 comparative)...
-    held = [f for f in resp.quarantined if isinstance(f, FundamentalFact)]
+    held = [f for f in resp.quarantined if isinstance(f, FundamentalFact) and f.accession != FY2014_10K]
     assert {(f.accession, f.period_end.isoformat()) for f in held} == {("0001018724-26-000026", "2025-06-30")}
     assert len(held) == 2
     # ...while Q2 2025 is still shown, as reported by the other filings
@@ -1677,10 +1677,18 @@ async def test_sec_scale_error_against_another_filing_is_quarantined() -> None:
     assert any("scale_consistency" in w for w in resp.quality.warnings)
 
 
+#: Amazon's FY2014 10-K reports its 2013-14 quarterly (and annual) income-tax expense with the opposite sign to every
+#: other filing of the same periods: a real sign error in the recorded data.
+FY2014_10K = "0001018724-15-000006"
+
+
 async def test_sec_real_facts_trip_no_scale_quarantine() -> None:
-    """The rule is calibrated on real data: 9,000 multi-filing periods, none quarantined (restatements kept)."""
+    """The rules are calibrated on real data: 9,000 multi-filing periods, restatements kept. The only facts held are
+    the FY2014 10-K's sign-flipped income-tax expense."""
     resp = await _replay(SecEdgarAdapter, _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS))
-    assert resp.quarantined == ()
+    held = [f for f in resp.quarantined if isinstance(f, FundamentalFact)]
+    assert {(f.accession, f.concept) for f in held} == {(FY2014_10K, "IncomeTaxExpenseBenefit")}
+    assert len(held) == 10
 
 
 async def test_fred_record_percent_release_is_shown(ctx_factory: Any) -> None:
@@ -2700,15 +2708,14 @@ async def test_a_later_dated_footnote_fact_or_a_cover_only_amendment_does_not_hi
 
 
 def test_the_current_column_is_the_period_a_filing_reports_most() -> None:
+    main = [(f"Line{k}", 2025, 1e9 * (k + 1)) for k in range(6)]
     records = [
-        *_filing(
-            [("Revenues", 2025, 1e9), ("NetIncomeLoss", 2025, 1e8), ("LossContingencyDamagesAwardedValue", 2026, 5e6)]
-        ),
+        *_filing([*main, ("LossContingencyDamagesAwardedValue", 2026, 5e6)]),
         *_filing([("EntityPublicFloat", 2026, 3e9)], accession="cover"),
     ]
     object.__setattr__(records[-1], "taxonomy", "dei")
     columns = sec_scale.current_columns(records)
-    assert {records[i].concept for i in columns["a"]} == {"Revenues", "NetIncomeLoss"}
+    assert {records[i].concept for i in columns["a"]} == {c for c, _, _ in main}
     assert "cover" not in columns
 
 
@@ -2818,3 +2825,80 @@ def test_a_small_genuine_line_still_pins_a_mis_scaled_cell() -> None:
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
         ("UnrecognizedTaxBenefitsDecreasesResultingFromPriorPeriodTaxPositions", 2025, "a")
     }
+
+
+# ------------------------------------------------------------------------------------- review round 14 (P1)
+
+
+async def test_a_concepts_filter_does_not_bypass_the_checks() -> None:
+    """FY2025 current federal tax x1000 ($1.22T) is held in the full response, and also when only that concept is
+    asked for: the checks need total assets and the tax table, which the filter would otherwise remove."""
+    concept = "CurrentFederalTaxExpenseBenefit"
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(
+        SecEdgarAdapter,
+        request,
+        {0: _scale_filing(NEWEST_10K, 1000.0, concept=concept, end="2025-12-31")},
+        params={"concepts": concept},
+    )
+    served = [f for f in resp.records if isinstance(f, FundamentalFact)]
+    assert served
+    assert {f.concept for f in served} == {concept}
+    assert all(f.value < 1e11 for f in served)
+    with pytest.raises(NotFound):
+        await _replay(SecEdgarAdapter, request, params={"concepts": "NoSuch"})
+
+
+def test_a_young_filers_mis_scaled_current_column_is_held() -> None:
+    """A filer with one earlier filing: the newest 10-K's 2025 column is /1000 while its 2024 comparatives are right.
+    No neighbouring periods vouch for either filing, but the whole column sits 1000x below the year before."""
+    concepts = [f"Line{k}" for k in range(12)]
+    earlier = _filing([(c, y, 1e9 * (k + 1)) for k, c in enumerate(concepts) for y in (2023, 2024)], accession="old")
+    newest = _filing(
+        [(c, y, 1e9 * (k + 1) * (1.1 if y == 2025 else 1.0)) for k, c in enumerate(concepts) for y in (2024, 2025)]
+    )
+    for f in newest:
+        if f.period_end.year == 2025:
+            object.__setattr__(f, "value", f.value / 1000)
+    records = [*earlier, *newest]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].accession, records[i].period_end.year) for i in held} == {("a", 2025)}
+    # the same filer on scale: nothing held
+    for f in newest:
+        if f.period_end.year == 2025:
+            object.__setattr__(f, "value", f.value * 1000)
+    assert sec_scale.scale_errors(records)[0] == set()
+
+
+async def test_a_flipped_net_income_row_breaks_the_half_year_sum_and_is_held() -> None:
+    def flip(data: dict[str, Any]) -> None:
+        for f in data["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"]:
+            if f["accn"] == NEWEST_10Q and f["end"] == "2026-06-30":
+                f["val"] = -f["val"]
+
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(flip)})
+    served = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept == "NetIncomeLoss" and f.period_end == date(2026, 6, 30)
+    ]
+    assert all(f.value > 0 for f in served)
+
+
+def test_a_filing_that_flips_the_sign_of_reported_periods_is_held() -> None:
+    """Amazon's FY2014 10-K reports its 2013-14 quarterly tax expense with the opposite sign to every other filing of
+    the same quarters: that filing's values are held; the others stand."""
+
+    def quarters(accession: str, sign: float) -> list[FundamentalFact]:
+        out = []
+        for q, v in enumerate((18e6, -13e6, 12e6)):
+            f = _filing([("IncomeTaxExpenseBenefit", 2013, sign * v)], accession=accession)[0]
+            object.__setattr__(f, "period_start", date(2013, 1 + 3 * q, 1))
+            object.__setattr__(f, "period_end", date(2013, 3 + 3 * q, 28))
+            out.append(f)
+        return out
+
+    records = [*quarters("q1", 1.0), *quarters("q2", 1.0), *quarters("k", -1.0)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {records[i].accession for i in held} == {"k"}

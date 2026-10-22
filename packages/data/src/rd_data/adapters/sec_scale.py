@@ -47,6 +47,14 @@ NEEDED_SHARE = 1e-4
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 #: Held facts needed (with FILING_SCALE_SHARE of the column) before a filing's whole column for one date is held.
 COLUMN_MIN_HELD = 3
+#: A filing's column for one date is held whole when at least COLUMN_SHIFT_MIN of its currency facts can be compared
+#: with their neighbouring periods (other filings; or the filing's own periods within PREVIOUS_WINDOW_DAYS when other
+#: filings report too few) and the column sits a power of 1000 from them: the
+#: median step within NEAR_POWER of it, and COLUMN_SHIFT_SHARE of the steps within 10^1. A whole statement never moves
+#: that way in clean data; for a young filer it is often the only evidence there is.
+COLUMN_SHIFT_MIN = 10
+COLUMN_SHIFT_SHARE = 0.6
+PREVIOUS_WINDOW_DAYS = 400
 #: A currency fact larger than this multiple of the company's own total assets is held. Across about 400,000 clean
 #: us-gaap facts of 15 large filers, outside revenue and cost lines, the largest ratio is 1.5 (XOM gross PP&E); the only
 #: larger ones are option intrinsic values entered at the wrong scale (NVDA FY2012-13, MMM Q1-2022: 4.1x to 14.9x).
@@ -82,6 +90,29 @@ _CHANGE = re.compile(r"^IncreaseDecreaseIn|PeriodIncreaseDecrease|^OtherComprehe
 #: maxima 0.96x (AAPL purchases of securities) and 0.72x.
 FLOW_ASSETS_MULTIPLE = 2.0
 _FLOW = re.compile(r"^(Proceeds|Payments|Repayments)|^NetCashProvidedByUsedIn")
+#: Headline totals whose sign filers do not re-tag between filings: a sign disagreement or a sign-only break of a
+#: period sum in these is checked (in other lines, conventions for OCI, hedge and allowance amounts flip often).
+SIGN_CHECKED = frozenset(
+    {
+        "NetIncomeLoss",
+        "ProfitLoss",
+        "OperatingIncomeLoss",
+        "GrossProfit",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+        "IncomeTaxExpenseBenefit",
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInInvestingActivities",
+        "NetCashProvidedByUsedInFinancingActivities",
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "CostOfRevenue",
+        "OperatingExpenses",
+        "ComprehensiveIncomeNetOfTax",
+    }
+)
+#: When the sign history does not single out one side of a sign error, hold every candidate (True) or none (False).
+SIGN_UNDECIDED_HOLDS = False
 #: Balances and totals that cannot be negative: none of about 32,000 clean facts of these concepts is. A negative one
 #: is a sign error and is held.
 NEVER_NEGATIVE = frozenset(
@@ -103,7 +134,6 @@ NEVER_NEGATIVE = frozenset(
         "AccountsReceivableNetCurrent",
         "AccountsPayableCurrent",
         "LongTermDebt",
-        "Revenues",
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "SalesRevenueNet",
         "CommonStockSharesOutstanding",
@@ -192,6 +222,20 @@ SIGNED_IDENTITIES: tuple[tuple[tuple[str, float], ...], ...] = (
         ("NetCashProvidedByUsedInInvestingActivities", -1.0),
         ("NetCashProvidedByUsedInFinancingActivities", -1.0),
         ("EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", -1.0),
+    ),
+    (
+        (
+            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
+            1.0,
+        ),
+        ("NetCashProvidedByUsedInOperatingActivities", -1.0),
+        ("NetCashProvidedByUsedInInvestingActivities", -1.0),
+        ("NetCashProvidedByUsedInFinancingActivities", -1.0),
+        (
+            "EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroup"
+            "AndDiscontinuedOperations",
+            -1.0,
+        ),
     ),
     (
         ("ComprehensiveIncomeNetOfTax", 1.0),
@@ -334,9 +378,11 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     held, flagged = _fact_holds(records, distance)
     held |= {i for i, f in enumerate(records) if f.value < 0 and f.concept in NEVER_NEGATIVE}
     held |= _filing_disagreements(records, logs, by_period, neighbours)
+    held |= _sign_disagreements(records, by_period, neighbours)
     held |= _additivity_errors(records, neighbours)
     held |= _prefix_errors(records, logs, neighbours)
     held |= _comparative_errors(records, logs)
+    held |= _column_shifts(records, logs, neighbours)
     held |= _identity_errors(records, held, neighbours)
     recent = _recent_accessions(records)
     for i, f in enumerate(records):
@@ -360,14 +406,15 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
 
 
 def current_columns(records: list[FundamentalFact]) -> dict[str, list[int]]:
-    """Each filing's current-period column: its us-gaap currency facts for the period end it reports most facts for
-    (the latest on a tie). A cover-page public float or a single later-dated footnote fact does not move it, and a
-    filing with no such facts (a cover-only amendment) has none."""
+    """Each filing's current-period column: its us-gaap currency facts for its latest period end reported with at least
+    half as many facts as its busiest one (a 10-K's prior-year end can carry more facts than its current one). A
+    cover-page public float or a single later-dated footnote fact does not move it, and a filing with no such facts (a
+    cover-only amendment) has none."""
     ends: dict[str, Counter[date]] = {}
     money = [i for i, f in enumerate(records) if _CURRENCY.match(f.unit) and f.taxonomy != "dei"]
     for i in money:
         ends.setdefault(records[i].accession, Counter())[records[i].period_end] += 1
-    main = {acc: max(c, key=lambda e: (c[e], e)) for acc, c in ends.items()}
+    main = {acc: max(e for e, n in c.items() if 2 * n >= max(c.values())) for acc, c in ends.items()}
     columns: dict[str, list[int]] = {}
     for i in money:
         if records[i].period_end == main[records[i].accession]:
@@ -401,8 +448,15 @@ class _Neighbours:
         self._nearest: dict[tuple[_SeriesKey, date], list[date]] = {}
 
     def distance(self, i: int, exclude: frozenset[str]) -> float | None:
-        f = self.records[i]
+        levels = self._levels(i, exclude)
         value = self.logs[i]
+        if len(levels) < 2 or value is None:
+            return None
+        return abs(value - statistics.median(levels))
+
+    def _levels(self, i: int, exclude: frozenset[str]) -> list[float]:
+        """The nearest NEIGHBOURS periods' levels (median log value per period), leaving out the given filings."""
+        f = self.records[i]
         key = (f.concept, f.unit, _duration(f))
         periods = self.series.get(key, {})
         nearest = self._nearest.get((key, f.period_end))
@@ -417,13 +471,11 @@ class _Neighbours:
                 levels.append(statistics.median(values))
             if len(levels) == NEIGHBOURS:
                 break
-        if len(levels) < 2 or value is None:
-            return None
-        return abs(value - statistics.median(levels))
+        return levels
 
     def sign_against_history(self, i: int, exclude: frozenset[str]) -> bool:
-        """Whether a fact's sign is the opposite of every one of its (at least two) nearest neighbouring periods, as
-        other filings report them."""
+        """Whether a fact's sign is the opposite of most of its (at least two) nearest neighbouring periods, as other
+        filings report them."""
         f = self.records[i]
         periods = self.series.get((f.concept, f.unit, _duration(f)), {})
         nearest = self._nearest.get(((f.concept, f.unit, _duration(f)), f.period_end))
@@ -439,7 +491,32 @@ class _Neighbours:
                 signs.append(math.copysign(1.0, statistics.median(values)))
             if len(signs) == NEIGHBOURS:
                 break
-        return len(signs) >= 2 and all(sg != math.copysign(1.0, f.value) for sg in signs)
+        opposite = sum(sg != math.copysign(1.0, f.value) for sg in signs)
+        return len(signs) >= 2 and 2 * opposite > len(signs)
+
+    def level_step(self, i: int) -> float | None:
+        """Signed orders of magnitude to the fact from the same period as other filings report it, else from its
+        neighbouring periods in other filings, else (a line no other filing reports) from the other periods its own
+        filing reports beside it."""
+        f = self.records[i]
+        value = self.logs[i]
+        if value is None:
+            return None
+        periods = self.series.get((f.concept, f.unit, _duration(f)), {})
+        same = [v for acc, v in periods.get(f.period_end, []) if acc != f.accession]
+        if same:
+            return value - statistics.median(same)
+        levels = self._levels(i, frozenset({f.accession}))
+        if levels:
+            return value - statistics.median(levels)
+        own = [
+            statistics.median(values)
+            for e, reported in periods.items()
+            if e != f.period_end
+            and abs((e - f.period_end).days) <= PREVIOUS_WINDOW_DAYS
+            and (values := [v for acc, v in reported if acc == f.accession])
+        ]
+        return value - statistics.median(own) if own else None
 
     def own_distance(self, i: int) -> float | None:
         """Orders of magnitude between a fact and the other periods its own filing reports for the same line (the
@@ -479,6 +556,28 @@ def _recent_accessions(records: list[FundamentalFact]) -> set[str]:
     for f in records:
         filed_on[f.accession] = max(filed_on.get(f.accession, f.filed), f.filed)
     return set(sorted(filed_on, key=filed_on.__getitem__)[-FLAG_FILINGS:])
+
+
+def _column_shifts(records: list[FundamentalFact], logs: list[float | None], neighbours: _Neighbours) -> set[int]:
+    """A filing's column for one date (its currency facts) that sits a power of 1000 from the neighbouring periods of
+    its series: the scale was set for the whole statement (see COLUMN_SHIFT_MIN). Neighbours are medians of several
+    periods, so one mis-scaled earlier column does not make the next, genuine one look shifted."""
+    columns: dict[tuple[str, date], list[int]] = {}
+    for i, f in enumerate(records):
+        if logs[i] is not None and _CURRENCY.match(f.unit) and f.taxonomy != "dei":
+            columns.setdefault((f.accession, f.period_end), []).append(i)
+    out: set[int] = set()
+    for idx in columns.values():
+        steps = [d for i in idx if (d := neighbours.level_step(i)) is not None]
+        if len(steps) < COLUMN_SHIFT_MIN:
+            continue
+        centre = statistics.median(steps)
+        power = round(centre / 3)
+        if power == 0 or abs(centre - 3 * power) > NEAR_POWER:
+            continue
+        if sum(abs(d - 3 * power) <= 1 for d in steps) >= COLUMN_SHIFT_SHARE * len(steps):
+            out.update(idx)
+    return out
 
 
 def _comparative_errors(records: list[FundamentalFact], logs: list[float | None]) -> set[int]:
@@ -853,6 +952,48 @@ def _clear_pick(
     return None
 
 
+def _majority(records: list[FundamentalFact], groups: Sequence[Sequence[int]]) -> int | None:
+    """The group reported by two or more filings when every other group comes from a single filing: one filing's
+    error, not a restatement that several filings carry."""
+    counts = [len({records[i].accession for i in g}) for g in groups]
+    best = max(range(len(groups)), key=lambda g: counts[g])
+    if counts[best] >= 2 and all(c == 1 for g, c in enumerate(counts) if g != best):
+        return best
+    return None
+
+
+def _sign_disagreements(
+    records: list[FundamentalFact], by_period: dict[_PeriodKey, list[int]], neighbours: _Neighbours
+) -> set[int]:
+    """Periods filed more than once where filings report the same amount with opposite signs: the side that a single
+    filing reports against two or more, or else the side whose sign is the opposite of the series' neighbouring periods
+    (other filings), is held; when neither decides, both are."""
+    held: set[int] = set()
+    for (concept, *_), idx in by_period.items():
+        if concept not in SIGN_CHECKED or len({records[i].accession for i in idx}) < 2:
+            continue
+        positive = [i for i in idx if records[i].value > 0]
+        negative = [i for i in idx if records[i].value < 0]
+        if not positive or not negative:
+            continue
+        a = statistics.median(records[i].value for i in positive)
+        b = statistics.median(records[i].value for i in negative)
+        if abs(a + b) > ADDITIVITY_TOLERANCE * max(abs(a), abs(b)):
+            continue  # a restatement, not the same amount with its sign flipped
+        groups = [positive, negative]
+        pick = _majority(records, groups)
+        if pick is not None:
+            held.update(groups[1 - pick])
+            continue
+        exclude = frozenset(records[i].accession for i in idx)
+        against = [all(neighbours.sign_against_history(i, exclude) for i in g) for g in groups]
+        if against.count(True) == 1:
+            held.update(groups[against.index(True)])
+        elif SIGN_UNDECIDED_HOLDS:
+            held.update(idx)
+    return held
+
+
 def _filing_disagreements(
     records: list[FundamentalFact],
     logs: list[float | None],
@@ -886,6 +1027,8 @@ def _filing_disagreements(
             else:
                 group.append(i)
         keep = _clear_pick(neighbours, groups, accessions, nearest=True)
+        if keep is None:
+            keep = _majority(records, groups)
         if keep is None:
             ambiguous.update((records[i].concept, records[i].unit, records[i].accession) for i in idx)
             continue
@@ -991,6 +1134,27 @@ def _adds_up_with_every_term(values: Sequence[float]) -> bool:
     )
 
 
+def _sign_flipped_in(records: list[FundamentalFact], combo: tuple[int, ...], neighbours: _Neighbours) -> set[int]:
+    """The facts of one ``whole = first + second`` sum that one filing's sign error explains: flipping that filing's
+    facts makes the sum hold. The filing whose facts oppose the sign of their neighbouring periods (in other filings)
+    is held; when that does not decide, every candidate is (nothing else here can tell a restatement of sign)."""
+    if records[combo[0]].concept not in SIGN_CHECKED:
+        return set()
+    values = [records[i].value for i in combo]
+    accessions = frozenset(records[i].accession for i in combo)
+    fixes: list[list[int]] = []
+    for acc in sorted(accessions):
+        flipped = [-v if records[i].accession == acc else v for i, v in zip(combo, values, strict=True)]
+        if _adds_up_with_every_term(flipped):
+            fixes.append([i for i in combo if records[i].accession == acc])
+    if not fixes:
+        return set()  # neither a scale nor a sign error (e.g. a restatement): left to the other checks
+    against = [all(neighbours.sign_against_history(i, accessions) for i in part) for part in fixes]
+    if against.count(True) == 1:
+        return set(fixes[against.index(True)])
+    return {i for part in fixes for i in part} if SIGN_UNDECIDED_HOLDS else set()
+
+
 def _misscaled_in(records: list[FundamentalFact], combo: tuple[int, ...], neighbours: _Neighbours) -> set[int]:
     """The facts of one ``whole = first + second`` sum that a power-of-1000 scale error in one filing explains."""
     values = [records[i].value for i in combo]
@@ -1005,7 +1169,7 @@ def _misscaled_in(records: list[FundamentalFact], combo: tuple[int, ...], neighb
             if _adds_up_with_every_term(scaled):
                 fixes.append(part)
     if not fixes:
-        return set()  # not a scale error (e.g. a restatement): left to the other checks
+        return _sign_flipped_in(records, combo, neighbours)
     # Scaling one filing up is the same as scaling the other down: the side far from its neighbouring periods is the
     # mis-scaled one. Without a clear answer every candidate is held (a guess could serve the wrong scale).
     wrong = _clear_pick(neighbours, fixes, accessions, nearest=False)

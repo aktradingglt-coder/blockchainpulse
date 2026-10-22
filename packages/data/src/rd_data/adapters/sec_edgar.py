@@ -258,8 +258,6 @@ class SecEdgarAdapter(BaseAdapter):
         impossible = 0
         for taxonomy, concepts in (data.get("facts") or {}).items():
             for concept, body in concepts.items():
-                if wanted and concept not in wanted:
-                    continue
                 for unit, facts in (body.get("units") or {}).items():
                     for fact in facts:
                         form = str(fact.get("form", ""))
@@ -291,12 +289,21 @@ class SecEdgarAdapter(BaseAdapter):
                                 )
                             )
                         except (KeyError, ValueError, TypeError):
-                            rejected += 1
+                            # a malformed row outside the requested concepts only leaves that row out of the checks
+                            rejected += not wanted or concept in wanted
         if not records and not rejected:
             raise NotFound(f"sec: no XBRL facts for CIK {cik}", provider=self.name)
+        if wanted and not any(f.concept in wanted for f in records):
+            raise NotFound(f"sec: none of the requested concepts for CIK {cik}", provider=self.name)
         records.sort(key=lambda f: (f.filed, f.concept, f.period_end, f.unit, f.accession))
         keys = [(f.concept, f.unit, f.period_start, f.period_end, f.accession, f.frame) for f in records]
-        held, flagged = scale_errors(records)
+        # The checks run on every concept the company reports (total assets, identity parts and relation peers are the
+        # evidence); a `concepts` filter only narrows what is returned and reported.
+        held_all, flagged_all = scale_errors(records)
+        kept = [i for i, f in enumerate(records) if not wanted or f.concept in wanted]
+        position = {i: k for k, i in enumerate(kept)}
+        held = {position[i] for i in held_all if i in position}
+        flagged = {position[i] for i in flagged_all if i in position}
         checks = (
             subject,
             check_duplicates(keys),
@@ -326,13 +333,13 @@ class SecEdgarAdapter(BaseAdapter):
             ),
         )
         quality = with_schema_rejections(
-            DataQualityReport(f"sec:facts:{cik}", checks, tuple(sorted(held)), len(records)), rejected
+            DataQualityReport(f"sec:facts:{cik}", checks, tuple(sorted(held)), len(kept)), rejected
         )
-        usable = [f for i, f in enumerate(records) if i not in held]
+        usable = [records[i] for i in kept if i not in held_all]
         # The response is as fresh as the newest filing whose own figures (its current-period column) are shown; a
         # filing whose current column is held only contributes comparatives and does not make old figures current.
         columns = current_columns(records)
-        shown = {acc for acc, idx in columns.items() if any(i not in held for i in idx)}
+        shown = {acc for acc, idx in columns.items() if any(i not in held_all for i in idx)}
         superseded = set(columns) - shown
         filed_on = {f.accession: f.filed for f in records}
         as_of = max((filed_on[acc] for acc in shown), default=usable[-1].filed if usable else None)
@@ -352,7 +359,7 @@ class SecEdgarAdapter(BaseAdapter):
             as_of,
             FreshnessSpec(DataType.FUNDAMENTALS, next_filing_at=superseded_at),
             source_tz="America/New_York",
-            quarantined=tuple(f for i, f in enumerate(records) if i in held),
+            quarantined=tuple(records[i] for i in kept if i in held_all),
             notes=tuple(notes),
         )
 
