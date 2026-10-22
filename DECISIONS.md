@@ -381,8 +381,11 @@ On clean data:
   inconsistencies such as TSLA's positive 2010–11 domestic pre-tax income beside a pre-tax loss, or goodwill
   "increases" in periods goodwill fell) and genuine values withheld. Before the round-11 changes the same data held
   3,789.
-- The 59 AMZN 10-K and 10-Q filing dates since 2012, each as an as-of date: 10 snapshots hold 1–4 genuine facts in 3 concepts. No wrong value is served at any date.
-  The cost is withholding, which is the side these rules err on (P2 backtests must treat held facts as missing).
+- The 59 AMZN 10-K and 10-Q filing dates since 2012, each as an as-of date: from 2015-01-30 on, every snapshot holds
+  the FY2014 10-K's 10 sign-flipped tax facts (at that filing's own date with 4 reconciliation lines that close around
+  them, so its 2014 tax figures are withheld until the next filing restates them); besides those, 10 snapshots hold 1–4
+  genuine facts in 3 concepts. No wrong value is served at any date. The cost is withholding, which is the side these
+  rules err on (P2 backtests must treat held facts as missing).
 
 Each USD concept's current-period facts in one filing were seeded one at a time, in the full company facts as recorded
 (later 10-Qs are present for AAPL, NVDA and JPM; the round-12 reviewer found re-running as of each 10-K's own filing

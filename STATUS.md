@@ -4,8 +4,8 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–13 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–17); awaiting review round 14.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–14 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–18); awaiting review round 15.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -113,6 +113,10 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   withhold genuine data. Rate reconciliations of more than 12 lines (AMZN, JPM) are not sign-learned. The poison case
   (previous 10-Q column /1000) still withholds genuine newest facts; the 5-year neighbour window leaves some newest
   facts without neighbours (no seed regression measured).
+- P2 (from P1 review round 14, minor): withholding in historical snapshots (138 of 984 hold 1–10 facts of the then
+  newest filing, mostly the filers' own errors); sign checks across filings cover headline totals only; a ticker map
+  of 8,000–10,442 rows is served as complete; a company's very first filing mis-scaled whole has no in-source evidence
+  beyond the size bounds.
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after
