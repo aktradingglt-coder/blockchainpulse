@@ -12,7 +12,7 @@ import itertools
 import math
 import re
 import statistics
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 from datetime import date, timedelta
 
@@ -171,8 +171,51 @@ PRETAX_TOTALS = (
     "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
     "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
 )
-#: Rate-reconciliation line items (currency amounts), checked against total tax = statutory + items.
+#: Rate-reconciliation lines (currency amounts, the statutory amount included): total tax = their signed sum.
 _RECONCILING = ("IncomeTaxReconciliation", "EffectiveIncomeTaxRateReconciliation")
+_OCI_TOTALS = (
+    "OtherComprehensiveIncomeLossNetOfTax",
+    "OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent",
+)
+
+
+def _oci_part(concept: str) -> bool:
+    """An after-tax OCI component (not a total, not a pre-tax, tax or arising/reclassification sub-line)."""
+    inner = concept.replace("AfterReclassification", "")
+    return (
+        concept.startswith("OtherComprehensiveIncome")
+        and concept.endswith(("NetOfTax", "AfterReclassificationAndTax"))
+        and concept not in _OCI_TOTALS
+        and "Parent" not in concept
+        and "Reclassification" not in inner
+        and "Arising" not in concept
+    )
+
+
+def _oci_parent_part(concept: str) -> bool:
+    return (
+        concept.startswith("OtherComprehensiveIncome")
+        and concept.endswith(("PortionAttributableToParent", "Parent"))
+        and concept not in _OCI_TOTALS
+    )
+
+
+def _utb_movement(concept: str) -> bool:
+    return concept.startswith("UnrecognizedTaxBenefits") and any(
+        w in concept for w in ("Increase", "Decrease", "Reduction")
+    )
+
+
+#: Relations learned per filing (_learned_relations): (total, is a line, balance for a rollforward or None).
+LEARNED: tuple[tuple[str | None, Callable[[str], bool], str | None], ...] = (
+    ("IncomeTaxExpenseBenefit", lambda c: c.startswith(_RECONCILING), None),
+    ("OtherComprehensiveIncomeLossNetOfTax", _oci_part, None),
+    ("OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent", _oci_parent_part, None),
+    (None, _utb_movement, "UnrecognizedTaxBenefits"),
+)
+_LEARNED_PREFIXES = (*_RECONCILING, "OtherComprehensiveIncome", "UnrecognizedTaxBenefits")
+#: Most lines a learned relation may have (signs are searched exhaustively).
+MAX_LEARNED_LINES = 12
 #: Largest group of facts tried as the mis-scaled side of a system larger than MAX_IDENTITY_TERMS.
 MAX_GROUP_IN_LARGE_SYSTEM = 3
 #: (change over a period, balance): the change equals the closing minus the opening balance, from the same filing.
@@ -446,7 +489,7 @@ def _instances(records: list[FundamentalFact]) -> list[_Instance]:
     index: dict[tuple[str, str, date | None, date], dict[str, int]] = {}
     rates: dict[tuple[str, date | None, date], float] = {}
     for i, f in enumerate(records):
-        if (f.concept in wanted or f.concept.startswith(_RECONCILING)) and _CURRENCY.match(f.unit):
+        if (f.concept in wanted or f.concept.startswith(_LEARNED_PREFIXES)) and _CURRENCY.match(f.unit):
             index.setdefault((f.accession, f.unit, f.period_start, f.period_end), {})[f.concept] = i
         elif f.concept == STATUTORY_RATE and f.unit == "pure":
             rates[(f.accession, f.period_start, f.period_end)] = f.value
@@ -469,45 +512,67 @@ def _instances(records: list[FundamentalFact]) -> list[_Instance]:
             opening = index.get((accession, unit, None, start - timedelta(days=1)), {}).get(balance)
             if change in terms and closing is not None and opening is not None:
                 out.append(((terms[change], 1.0), (closing, -1.0), (opening, 1.0)))
-    return out + _proven_reconciliations(records, index)
+    return out + _learned_relations(records, index)
 
 
-def _proven_reconciliations(
+def _learned_relations(
     records: list[FundamentalFact], index: dict[tuple[str, str, date | None, date], dict[str, int]]
 ) -> list[_Instance]:
-    """Rate reconciliations, each used only where the filing's tagging is shown to close: in some other year of the
-    same table. Filers tag reconciling items differently (signs, custom elements), and an unproven relation could be
-    "repaired" by chance."""
-    by_filing: dict[str, list[_Instance]] = {}
-    for (accession, _, _, _), terms in index.items():
-        if (inst := _rate_reconciliation(terms)) is not None:
-            by_filing.setdefault(accession, []).append(inst)
-    return [
-        inst
-        for tables in by_filing.values()
-        for inst in tables
-        if any(other is not inst and _balances(_contributions(records, other)) for other in tables)
-    ]
+    """Relations whose lines and signs vary by filer (LEARNED: the rate reconciliation, OCI and its parts, the
+    unrecognized-tax-benefit rollforward). A filing reports such a table for two or three years; the signs that close it
+    in all its years but at most one (and in at least two) are learned from the filing itself, and only then is the
+    relation used. A table no sign assignment closes is left alone: its tagging is the filer's own."""
+    cells: dict[tuple[str, str], dict[tuple[date | None, date], dict[str, int]]] = {}
+    for (accession, unit, start, end), terms in index.items():
+        cells.setdefault((accession, unit), {})[(start, end)] = terms
+    out: list[_Instance] = []
+    for table in cells.values():
+        for total, is_line, balance in LEARNED:
+            rows: list[tuple[list[tuple[int, float]], dict[str, int]]] = []
+            for (start, end), terms in table.items():
+                lines = {c: i for c, i in terms.items() if is_line(c)}
+                if start is None or not lines:
+                    continue
+                if balance is None:
+                    if total in terms:
+                        rows.append(([(terms[total], 1.0)], lines))
+                    continue
+                closing = table.get((None, end), {}).get(balance)
+                opening = table.get((None, start - timedelta(days=1)), {}).get(balance)
+                if closing is not None and opening is not None:
+                    rows.append(([(closing, 1.0), (opening, -1.0)], lines))
+            names = sorted({c for _, lines in rows for c in lines})
+            if len(rows) < 2 or len(names) > MAX_LEARNED_LINES:
+                continue
+            signs = _learn_signs(records, rows, names)
+            if signs is not None:
+                out += [(*anchor, *((lines[c], -signs[c]) for c in sorted(lines))) for anchor, lines in rows]
+    return out
 
 
-def _rate_reconciliation(terms: dict[str, int]) -> _Instance | None:
-    """Total tax = statutory tax + the reconciling items (credits and the FDII deduction lower it, other items carry
-    their own sign). Where a filer reports total credits, its breakdown is not counted again. Filers differ in which
-    items they tag, so many reconciliations do not close as tagged; that is harmless: a relation only ever holds a fact
-    when one power-of-1000 rescale makes it close."""
-    if "IncomeTaxExpenseBenefit" not in terms or STATUTORY_AMOUNT not in terms:
+def _learn_signs(
+    records: list[FundamentalFact], rows: list[tuple[list[tuple[int, float]], dict[str, int]]], names: list[str]
+) -> dict[str, float] | None:
+    best: dict[str, float] | None = None
+    closed_best = 0
+    for combination in itertools.product((1.0, -1.0), repeat=len(names)):
+        signs = dict(zip(names, combination, strict=True))
+        closed = sum(
+            _balances(
+                [
+                    *(coef * records[i].value for i, coef in anchor),
+                    *(-signs[c] * records[i].value for c, i in lines.items()),
+                ]
+            )
+            for anchor, lines in rows
+        )
+        if closed > closed_best:
+            best, closed_best = signs, closed
+        if closed == len(rows):
+            break
+    if closed_best < 2 or closed_best < len(rows) - 1:
         return None
-    items = [c for c in terms if c.startswith(_RECONCILING) and c != STATUTORY_AMOUNT]
-    if "IncomeTaxReconciliationTaxCredits" in items:
-        items = [
-            c
-            for c in items
-            if not c.startswith("IncomeTaxReconciliationTaxCredits") or c == "IncomeTaxReconciliationTaxCredits"
-        ]
-    if not items:
-        return None
-    signed = [(terms[c], 1.0 if ("TaxCredits" in c or "Fdii" in c) else -1.0) for c in sorted(items)]
-    return ((terms["IncomeTaxExpenseBenefit"], 1.0), (terms[STATUTORY_AMOUNT], -1.0), *signed)
+    return best
 
 
 def _contributions(

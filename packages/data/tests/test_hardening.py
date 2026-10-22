@@ -2532,3 +2532,33 @@ async def test_a_cash_flow_section_total_off_the_change_in_cash_is_held(factor: 
         and f.period_start is not None and f.period_start.isoformat() == "2025-01-01"
     ]  # fmt: skip
     assert operating  # the genuine sections are still shown
+
+
+def test_a_rollforward_with_filer_specific_signs_is_learned_from_its_other_years() -> None:
+    """Unrecognized tax benefits: closing = opening + increases - decreases - settlements - lapses. The signs are
+    learned from the 2023 and 2024 rows of the same 10-K (no fixed sign table), and a 2025 settlement line /1000 is
+    held, alone."""
+    balance = [
+        ("UnrecognizedTaxBenefits", -y, v) for y, v in ((2022, 16.8e9), (2023, 19.5e9), (2024, 22.0e9), (2025, 25.1e9))
+    ]
+    moves = {
+        "UnrecognizedTaxBenefitsIncreasesResultingFromCurrentPeriodTaxPositions": (2.5e9, 2.9e9, 3.3e9),
+        "UnrecognizedTaxBenefitsIncreasesResultingFromPriorPeriodTaxPositions": (1.2e9, 0.9e9, 1.4e9),
+        "UnrecognizedTaxBenefitsDecreasesResultingFromPriorPeriodTaxPositions": (0.6e9, 0.8e9, 0.5e9),
+        "UnrecognizedTaxBenefitsDecreasesResultingFromSettlementsWithTaxingAuthorities": (0.3e9, 0.4e9, 0.9e9 / 1000),
+        "UnrecognizedTaxBenefitsReductionsResultingFromLapseOfApplicableStatuteOfLimitations": (0.1e9, 0.1e9, 0.2e9),
+    }
+    flows = [(c, y, v) for c, vs in moves.items() for y, v in zip((2023, 2024, 2025), vs, strict=True)]
+    earlier = [
+        ("UnrecognizedTaxBenefits", -y, v) for y, v in ((2021, 15.0e9), (2022, 16.8e9), (2023, 19.5e9), (2024, 22.0e9))
+    ]
+    earlier += [
+        (c, y, v)
+        for c, vs in moves.items()
+        for y, v in zip((2022, 2023, 2024), (vs[0] * 0.9, vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing([*balance, *flows])]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("UnrecognizedTaxBenefitsDecreasesResultingFromSettlementsWithTaxingAuthorities", 2025, "a")
+    }
