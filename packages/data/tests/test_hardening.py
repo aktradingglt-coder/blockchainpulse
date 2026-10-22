@@ -2193,7 +2193,7 @@ def test_off_balance_sheet_amounts_may_exceed_total_assets() -> None:
         fact("Liabilities", 5e11),  # 500x: impossible
     ]
     logs: list[float | None] = [math.log10(f.value) for f in records]
-    assert sec_scale._beyond_assets(records, logs, set(), set()) == {3}
+    assert sec_scale._beyond_assets(records, logs, set()) == {3}
 
 
 async def test_a_balance_that_jumps_by_orders_of_magnitude_is_flagged() -> None:
@@ -2335,7 +2335,7 @@ def test_small_filers_and_cumulative_equity_are_not_bounded_by_assets() -> None:
     biotech = [fact("Assets", 2e7), fact("RetainedEarningsAccumulatedDeficit", -2.5e9)]
     for records in (shell, biotech):
         logs: list[float | None] = [math.log10(abs(f.value)) for f in records]
-        assert sec_scale._beyond_assets(records, logs, set(), set()) == set()
+        assert sec_scale._beyond_assets(records, logs, set()) == set()
 
 
 async def test_malformed_kraken_chart_bodies_are_outages(ctx_factory: Any) -> None:
@@ -2611,17 +2611,15 @@ def _held_concepts(records: list[FundamentalFact]) -> set[tuple[str, int]]:
     return {(records[i].concept, records[i].period_end.year) for i in held}
 
 
-def test_size_bounds_are_tiered_by_kind_and_history() -> None:
-    # a drug distributor's revenue runs at about 4.6x its assets, year after year: served
-    steady = (44e9, 45e9, 46e9)
-    assert not _held_concepts(_sized("Revenues", steady, earlier=(43e9, 44e9, 45e9)))
-    # the same size with nothing to compare against is held (no history: 3x)
-    assert ("OtherCostAndExpenseOperating", 2025) in _held_concepts(
-        _sized("OtherCostAndExpenseOperating", steady, earlier=None)
+def test_size_bounds_are_tiered_by_kind() -> None:
+    # revenue runs at a few times assets for a low-margin distributor, year after year: served up to 20x
+    assert not _held_concepts(_sized("Revenues", (60e9, 61e9, 62e9), earlier=(59e9, 60e9, 61e9)))
+    assert ("Revenues", 2025) in _held_concepts(_sized("Revenues", (60e9, 61e9, 250e9), earlier=(59e9, 60e9, 61e9)))
+    # any other line beyond 3x assets is held, history or not (clean data reaches 1.5x)
+    assert ("PropertyPlantAndEquipmentGross", 2025) in _held_concepts(
+        _sized("PropertyPlantAndEquipmentGross", (35e9, 35e9, 35e9), earlier=(35e9, 35e9, 35e9))
     )
-    # anything beyond 5x assets is held, history or not
-    big = (60e9, 61e9, 62e9)
-    assert ("Revenues", 2025) in _held_concepts(_sized("Revenues", big, earlier=(59e9, 60e9, 61e9)))
+    assert not _held_concepts(_sized("PropertyPlantAndEquipmentGross", (15e9, 15e9, 15e9), earlier=(15e9, 15e9, 15e9)))
     # a tax amount beyond 1x assets is held even with matching history; a pre-tax total is not a tax amount
     assert ("IncomeTaxesPaid", 2025) in _held_concepts(
         _sized("IncomeTaxesPaid", (15e9, 15e9, 15e9), earlier=(15e9, 15e9, 15e9))

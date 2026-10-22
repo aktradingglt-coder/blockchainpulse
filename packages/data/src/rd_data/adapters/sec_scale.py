@@ -44,9 +44,14 @@ _CURRENCY = re.compile(r"^[A-Z]{3}$")
 #: Held facts needed (with FILING_SCALE_SHARE of the column) before a filing's whole column for one date is held.
 COLUMN_MIN_HELD = 3
 #: A currency fact larger than this multiple of the company's own total assets is held. Across about 400,000 clean
-#: us-gaap facts of 15 large filers the largest ratio is 2.3 (AMZN 2011 revenue); the highest revenue-to-assets ratios
-#: among US registrants (drug distributors) are about 4.6. Derivative notionals and client assets are exempt.
-MAX_ASSETS_MULTIPLE = 5.0
+#: us-gaap facts of 15 large filers, outside revenue and cost lines, the largest ratio is 1.5 (XOM gross PP&E); the only
+#: larger ones are option intrinsic values entered at the wrong scale (NVDA FY2012-13, MMM Q1-2022: 4.1x to 14.9x).
+MAX_ASSETS_MULTIPLE = 3.0
+#: Revenue, cost and purchase lines scale with asset turnover (2.3x at most in the clean data, AMZN 2011), which is
+#: higher for low-margin distributors and traders not among the calibration filers: they are held only from this
+#: multiple, still far below where a x1000 error lands.
+TURNOVER_ASSETS_MULTIPLE = 20.0
+_TURNOVER = re.compile(r"Revenue|CostOf|CostsAndExpenses|OperatingExpenses|Purchases|SalesOf")
 #: Amounts that are not the company's own and legitimately exceed its balance sheet (derivative notionals, client
 #: assets under management or custody), cumulative equity accounts (a long-loss-making company's accumulated deficit
 #: and paid-in capital can dwarf what it has left) and the dei taxonomy (public float is a market value) are exempt.
@@ -57,11 +62,8 @@ _CUMULATIVE_EQUITY = re.compile(
 )
 #: Below this total (in the reporting currency) a company's assets say little about the size of its line items.
 MIN_ASSETS_FOR_BOUND = 1e7
-#: A fact flagged as unusual against its own history, or with no history in other filings, is held from this multiple
-#: of total assets: no flagged fact in 15 large filers' clean company facts exceeds 0.34x.
-FLAGGED_ASSETS_MULTIPLE = 3.0
 #: Tax amounts (expense and its parts, reconciliation lines, taxes paid, deferred-tax and uncertain-tax balances) are
-#: held from this multiple of total assets: the largest of about 18,000 clean tax facts in 15 large filers is 0.2x.
+#: held from this multiple of total assets: the largest of about 30,000 clean tax facts in 15 large filers is 0.43x.
 TAX_ASSETS_MULTIPLE = 1.0
 _TAX_AMOUNT = re.compile(
     r"IncomeTax|TaxExpenseBenefit|TaxReconciliation|IncomeTaxesPaid|TaxPaid|UnrecognizedTaxBenefits|DeferredTax"
@@ -300,8 +302,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
         step = neighbours.previous_step(i) if f.period_start is None and f.accession in recent else None
         if step is not None and step > INSTANT_FLAG_STEP:
             flagged.add(i)
-    # Facts with no history in other filings get the tighter bound too: nothing else vouches for their size.
-    held |= _beyond_assets(records, logs, held, flagged | (set(range(len(records))) - set(distance)))
+    held |= _beyond_assets(records, logs, held)
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
     # A filing's column (its facts for one period end) that is mostly held is held whole: the scale was set for the
@@ -442,14 +443,11 @@ def _comparative_errors(records: list[FundamentalFact], logs: list[float | None]
     return held
 
 
-def _beyond_assets(
-    records: list[FundamentalFact], logs: list[float | None], held: set[int], flagged: set[int]
-) -> set[int]:
+def _beyond_assets(records: list[FundamentalFact], logs: list[float | None], held: set[int]) -> set[int]:
     """Currency facts too large for the company: more than MAX_ASSETS_MULTIPLE times its total assets (same currency),
-    FLAGGED_ASSETS_MULTIPLE times when the fact is unusual against (or has no) history, TAX_ASSETS_MULTIPLE times for a
-    tax amount. Total assets is the median
-    of the NEIGHBOURS nearest period ends, each as reported by other filings where there are any, leaving out facts
-    already held: one mis-scaled filing cannot shrink the yardstick and hold the newest genuine figures."""
+    TAX_ASSETS_MULTIPLE times for a tax amount, TURNOVER_ASSETS_MULTIPLE times for revenue and cost lines. Total assets
+    is the median of the NEIGHBOURS nearest period ends, each as reported by other filings where there are any, leaving
+    out facts already held: one mis-scaled filing cannot shrink the yardstick and hold the newest genuine figures."""
     assets: dict[tuple[str, date], list[tuple[str, float]]] = {}
     for i, f in enumerate(records):
         if f.concept == "Assets" and f.period_start is None and i not in held and (v := logs[i]) is not None:
@@ -476,8 +474,8 @@ def _beyond_assets(
             continue
         if _TAX_AMOUNT.search(f.concept) and not _NOT_A_TAX_AMOUNT.search(f.concept):
             multiple = TAX_ASSETS_MULTIPLE
-        elif i in flagged:
-            multiple = FLAGGED_ASSETS_MULTIPLE
+        elif _TURNOVER.search(f.concept):
+            multiple = TURNOVER_ASSETS_MULTIPLE
         else:
             multiple = MAX_ASSETS_MULTIPLE
         if value - reference > math.log10(multiple):
