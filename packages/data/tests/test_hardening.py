@@ -2507,3 +2507,28 @@ def test_a_proven_rate_reconciliation_pins_a_lone_mis_scaled_line() -> None:
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
         ("IncomeTaxReconciliationOtherAdjustments", 2025, "a")
     }
+
+
+@pytest.mark.parametrize("factor", [1000.0, 0.001])
+async def test_a_cash_flow_section_total_off_the_change_in_cash_is_held(factor: float) -> None:
+    """Financing cash flow swings too much for its history to judge, but cash change = operating + investing +
+    financing + FX effect in the same 10-K, and only a rescale of financing closes it."""
+    concept = "NetCashProvidedByUsedInFinancingActivities"
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(
+        SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10K, factor, concept=concept, end="2025-12-31")}
+    )
+    assert not [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept == concept and f.accession == NEWEST_10K
+        and f.period_end.isoformat() == "2025-12-31"
+    ]  # fmt: skip
+    operating = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept == "NetCashProvidedByUsedInOperatingActivities"
+        and f.accession == NEWEST_10K and f.period_end.isoformat() == "2025-12-31"
+        and f.period_start is not None and f.period_start.isoformat() == "2025-01-01"
+    ]  # fmt: skip
+    assert operating  # the genuine sections are still shown

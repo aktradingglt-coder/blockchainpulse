@@ -126,6 +126,44 @@ IDENTITIES: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: nothing about a line that moves a lot.
 MIN_COMPARATIVES = 2
 COMPARATIVE_SPREAD = 0.5
+#: Statement identities with signs: (concept, coefficient) terms summing to zero within one filing and period. Each
+#: held on every instance, or all but a handful, of the clean company facts of 15 large filers (D-036).
+SIGNED_IDENTITIES: tuple[tuple[tuple[str, float], ...], ...] = (
+    (
+        (
+            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
+            1.0,
+        ),
+        ("NetCashProvidedByUsedInOperatingActivities", -1.0),
+        ("NetCashProvidedByUsedInInvestingActivities", -1.0),
+        ("NetCashProvidedByUsedInFinancingActivities", -1.0),
+        ("EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", -1.0),
+    ),
+    (
+        ("ComprehensiveIncomeNetOfTax", 1.0),
+        ("NetIncomeLoss", -1.0),
+        ("OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent", -1.0),
+    ),
+    (("ProfitLoss", 1.0), ("NetIncomeLoss", -1.0), ("NetIncomeLossAttributableToNoncontrollingInterest", -1.0)),
+    (
+        ("OtherComprehensiveIncomeLossCashFlowHedgeGainLossAfterReclassificationAndTax", 1.0),
+        ("OtherComprehensiveIncomeLossCashFlowHedgeGainLossBeforeReclassificationAfterTax", -1.0),
+        ("OtherComprehensiveIncomeLossCashFlowHedgeGainLossReclassificationAfterTax", 1.0),
+    ),
+    (
+        ("OtherComprehensiveIncomeLossAvailableForSaleSecuritiesAdjustmentNetOfTax", 1.0),
+        ("OtherComprehensiveIncomeUnrealizedHoldingGainLossOnSecuritiesArisingDuringPeriodNetOfTax", -1.0),
+        ("OtherComprehensiveIncomeLossReclassificationAdjustmentFromAOCIForSaleOfSecuritiesNetOfTax", 1.0),
+    ),
+    (
+        ("GrossProfit", 1.0),
+        ("RevenueFromContractWithCustomerExcludingAssessedTax", -1.0),
+        ("CostOfGoodsAndServicesSold", 1.0),
+    ),
+    (("GrossProfit", 1.0), ("Revenues", -1.0), ("CostOfRevenue", 1.0)),
+    (("Assets", 1.0), ("AssetsCurrent", -1.0), ("AssetsNoncurrent", -1.0)),
+    (("Liabilities", 1.0), ("LiabilitiesCurrent", -1.0), ("LiabilitiesNoncurrent", -1.0)),
+)
 #: Statutory tax in the rate reconciliation = statutory rate x pre-tax income (whichever pre-tax total is reported).
 STATUTORY_RATE = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate"
 STATUTORY_AMOUNT = "IncomeTaxReconciliationIncomeTaxExpenseBenefitAtFederalStatutoryIncomeTaxRate"
@@ -404,7 +442,7 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
 def _instances(records: list[FundamentalFact]) -> list[_Instance]:
     """Every exact relation the response lets us check, as signed terms that sum to zero."""
     wanted = {c for total, parts in IDENTITIES for c in (total, *parts)} | {STATUTORY_AMOUNT, *PRETAX_TOTALS}
-    wanted |= {c for pair in CHANGES for c in pair}
+    wanted |= {c for pair in CHANGES for c in pair} | {c for terms in SIGNED_IDENTITIES for c, _ in terms}
     index: dict[tuple[str, str, date | None, date], dict[str, int]] = {}
     rates: dict[tuple[str, date | None, date], float] = {}
     for i, f in enumerate(records):
@@ -417,6 +455,9 @@ def _instances(records: list[FundamentalFact]) -> list[_Instance]:
         for total, parts in IDENTITIES:
             if total in terms and all(p in terms for p in parts):
                 out.append(((terms[total], 1.0), *((terms[p], -1.0) for p in parts)))
+        for signed in SIGNED_IDENTITIES:
+            if all(c in terms for c, _ in signed):
+                out.append(tuple((terms[c], coef) for c, coef in signed))
         rate = rates.get((accession, start, end))
         pretax = next((terms[c] for c in PRETAX_TOTALS if c in terms), None)
         if rate and STATUTORY_AMOUNT in terms and pretax is not None:
