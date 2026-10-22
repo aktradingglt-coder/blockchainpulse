@@ -20,7 +20,7 @@ import pytest
 
 from rd_core.clock import FixedClock
 from rd_core.settings import Settings
-from rd_data.adapters import sec_edgar
+from rd_data.adapters import sec_scale
 from rd_data.adapters.base import AdapterContext, BaseAdapter, DataRequest, DataResponse, RequestKind
 from rd_data.adapters.cftc import CftcAdapter
 from rd_data.adapters.eia import EiaAdapter
@@ -1905,8 +1905,8 @@ def test_rounded_or_restated_sums_are_not_scale_errors() -> None:
         _fact("2020-04-01", "2020-06-30", 9_918e6, "b"),
         _fact("2020-01-01", "2020-06-30", 9_994e6, "b"),
     ]
-    assert sec_edgar._scale_errors(rounded)[0] == set()
-    assert sec_edgar._scale_errors(restated)[0] == set()
+    assert sec_scale.scale_errors(rounded)[0] == set()
+    assert sec_scale.scale_errors(restated)[0] == set()
 
 
 def test_scale_error_found_by_a_sum_is_pinned_on_the_side_far_from_its_neighbours() -> None:
@@ -1922,12 +1922,12 @@ def test_scale_error_found_by_a_sum_is_pinned_on_the_side_far_from_its_neighbour
     q2 = _fact("2026-04-01", "2026-06-30", 62.65e6, "new")
     h1 = _fact("2026-01-01", "2026-06-30", 92.9e6, "new")
     records = [*history, q1, q2, h1]
-    held, _ = sec_edgar._scale_errors(records)
+    held, _ = sec_scale.scale_errors(records)
     assert {records[i] for i in held} == {q2, h1}
     # no history to decide by: nothing in the disagreeing sum is served
-    assert sec_edgar._scale_errors([q1, q2, h1])[0] == {0, 1, 2}
+    assert sec_scale.scale_errors([q1, q2, h1])[0] == {0, 1, 2}
     # one filing alone cannot show its own scale error
-    assert sec_edgar._scale_errors([q2, h1, _fact("2026-01-01", "2026-03-31", 30.25e6, "new")])[0] == set()
+    assert sec_scale.scale_errors([q2, h1, _fact("2026-01-01", "2026-03-31", 30.25e6, "new")])[0] == set()
 
 
 async def test_a_mis_scaled_filing_is_held_whole() -> None:
@@ -2180,7 +2180,7 @@ def test_off_balance_sheet_amounts_may_exceed_total_assets() -> None:
         fact("Liabilities", 5e11),  # 500x: impossible
     ]
     logs: list[float | None] = [math.log10(f.value) for f in records]
-    assert sec_edgar._beyond_assets(records, logs, set(), set()) == {3}
+    assert sec_scale._beyond_assets(records, logs, set(), set()) == {3}
 
 
 async def test_a_balance_that_jumps_by_orders_of_magnitude_is_flagged() -> None:
@@ -2322,7 +2322,7 @@ def test_small_filers_and_cumulative_equity_are_not_bounded_by_assets() -> None:
     biotech = [fact("Assets", 2e7), fact("RetainedEarningsAccumulatedDeficit", -2.5e9)]
     for records in (shell, biotech):
         logs: list[float | None] = [math.log10(abs(f.value)) for f in records]
-        assert sec_edgar._beyond_assets(records, logs, set(), set()) == set()
+        assert sec_scale._beyond_assets(records, logs, set(), set()) == set()
 
 
 async def test_malformed_kraken_chart_bodies_are_outages(ctx_factory: Any) -> None:
