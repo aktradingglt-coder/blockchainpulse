@@ -4,8 +4,8 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–10 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–14); awaiting review round 11.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–11 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–15); awaiting review round 12.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -91,6 +91,9 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
 - P11 (from P1 review round 9, minor): when the exchange itself lacks the 11+ bars of context bad-print QA needs (an
   outage or a newly listed contract), hold the latest bar or mark freshness unverified instead of serving it with a
   warning.
+- P2, before fundamentals reach reports (from P1 review round 11; D-036 limit): fetch each filing's XBRL calculation
+  linkbase and check every calculation relationship with its declared weights. That covers the scale-error misses the
+  company-facts API cannot show: cash-flow detail lines, footnote rollforwards and single-year tables.
 - P2 (from P1 review round 9, minor): SEC facts held as likely scale errors must be treated as missing in backtests and
   point-in-time panels (9 of 59 historical snapshots hold 1–4 genuine facts; D-036).
 - P11 (from P1 review round 11, minor): a single malformed Kraken candle blocks the whole fetch (schema check);

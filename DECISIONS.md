@@ -266,121 +266,103 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 · SEC company facts: scale errors, not restatements
-**Decision.** XBRL scale errors (thousands entered as units and the like) are found from EDGAR's own data in four
-ways, each judged per concept, unit and duration (`sec_edgar._scale_errors`):
-1. *Neighbouring periods.* Each fact is compared with the median of its nearest 4 periods, as reported by other
-   filings. A fact more than 10^3.5 away is held. On a stable concept (typical distance under 10^0.15), a fact more
-   than 10^2.5 away and within 10^0.5 of a power of 1000 is held. Anything else more than 10^2.5 away in the 4 newest
-   filings is flagged and kept.
-2. *The same period in several filings.* Facts are grouped by scale. The group clearly nearest its neighbours
-   (by ≥ 10^1) is kept, and every group a power of 1000 from it is held. When the neighbours do not decide, both
-   filings' facts of that concept are held: a guess could serve the wrong scale. A filing whose comparatives are
-   mostly a power of 1000 off (at least 3) is held whole.
-3. *Sums.* Currency flows add up across periods: year to date = earlier year to date + latest quarter. The parts
-   usually come from different filings. If a sum fails, and scaling one filing's facts in it by a power of 1000 makes
-   it add up (within 1%), those facts are held. The scaled sum must need all three terms, because shrinking a term
-   into insignificance proves nothing. The side far from its neighbours is the wrong one; if that is unclear, every
-   candidate is held.
-4. *Same year.* A year-to-date fact is compared with the same year's shorter year-to-date from other filings (the
-   year against its nine months, nine months against the half). The ratio is checked against the ratio the concept
-   shows in other years. This needs at least 3 other years with a steady ratio (spread under 10^0.3), so concepts
-   whose ratio swings, like financing flows, are skipped. A ratio about a power of 1000 off (more than 10^2.5, within
-   10^0.5 of the power) is held, unless the neighbours clearly blame the shorter period.
-5. *Same table and column.* A held fact's siblings (same filing, concept and period end, such as the
-   trailing-twelve-month figure beside a mis-scaled quarter) are held with it. If at least 3 facts of a filing's
-   column for one period end are held and they make up at least half of it, the whole column is held.
-6. *Impossible size.* A currency fact more than 100× the company's own total assets is held, or more than 10× when
-   it is also flagged as unusual against its own history. Total assets is the median of the 4 nearest period ends,
-   each as reported by other filings where there are any, leaving out facts already held. That way one mis-scaled
-   filing cannot shrink the yardstick and withhold the newest genuine figures (a regression in round 10).
-   - The bound is skipped below $10M of assets.
-   - It does not apply to amounts that can legitimately exceed a balance sheet: derivative notionals, client assets
-     under management or custody, cumulative equity accounts (paid-in capital, accumulated deficit) and dei market
-     values.
-   - The clean maximum is 5.2× (public float, dei) and 2.3× for us-gaap facts, over 29,718 facts.
-7. *Balance jumps.* A balance (instant) in one of the 4 newest filings that moved more than 10^2 from the previous
-   period end is flagged and kept. AMZN balances made 3 genuine moves that large in 17 years.
-8. *Accounting identities.* Exact US-GAAP identities are checked within one filing and period, wherever every term
-   is reported:
-   - income tax = current + deferred = federal + state + foreign;
-   - current, deferred, and each jurisdiction = the sum of its parts;
-   - taxes paid = federal + state + foreign;
-   - pre-tax income = domestic + foreign;
-   - liabilities and equity = assets.
+### D-036 · 2026-10-21 (rev. 2026-10-22) · SEC company facts: scale errors, not restatements
+**Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
+and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
+response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
+1. *Neighbouring periods.* The median of the 4 nearest periods of the same concept, unit and duration, as reported by
+   other filings.
+   - A fact more than 10^3.5 away is held.
+   - On a stable concept (typical distance under 10^0.15), a fact more than 10^2.5 away and within 10^0.5 of a power
+     of 1000 is held.
+   - Anything else more than 10^2.5 away in the 4 newest filings is flagged.
+2. *The same period in several filings.* Facts are grouped by scale. The group clearly nearest its neighbours (by
+   ≥ 10^1, judged without the disputing filings' own values) is kept; groups a power of 1000 from it are held. If
+   undecided, both filings' facts of that concept are held. A filing is held whole when most of what it shares with
+   other filings is a power of 1000 off.
+3. *Sums across periods.* Year to date = earlier year to date + latest quarter, the parts usually from different
+   filings.
+4. *The same year.* A year-to-date fact against the same year's shorter year-to-date from other filings, judged on the
+   ratio the concept shows in other years (at least 3 years, spread under 10^0.3).
+5. *The filing's own comparatives.* A newest-period cell about a power of 1000 from the prior years the same filing
+   reports beside it (at least two, agreeing within 10^0.5).
+6. *Exact relations within one filing and period*, solved together where they share facts:
+   - US-GAAP identities: income tax = current + deferred = federal + state + foreign (and each part's breakdown),
+     taxes paid, pre-tax domestic + foreign, SG&A, liabilities and equity = assets;
+   - statutory tax = statutory rate × pre-tax income;
+   - statement identities: change in cash = operating + investing + financing + FX; comprehensive income = net income
+     + OCI to the parent; profit = net income + NCI share; cash-flow-hedge and AFS OCI rollforwards; gross profit;
+     current + noncurrent assets and liabilities;
+   - changes = closing − opening balance (goodwill, cash);
+   - relations whose lines and signs vary by filer (rate reconciliation, OCI and its parts, the unrecognized tax
+     benefit rollforward): the signs are learned from the filing's own table, and the relation is used only if they
+     close it in all its years but at most one (and in at least two).
 
-   All 261 instances in the clean facts hold to within 1%. Identities that share terms are solved together. If
-   rescaling a group of terms by a power of 1000 repairs them all (each repaired identity needing every term), the
-   group is held. Because scaling a group up is the same as scaling the rest down, the side clearly further from its
-   own history is blamed. A side with no history is blamed when the other side sits within 10^1 of its own. If that
-   does not decide it, the whole system is held. An identity that holds as reported around a held term is held with
-   it, since its terms were tabled, and mis-scaled, together.
+   A relation counts as broken evidence only if rescaling a minimal group of its facts by a power of 1000 closes it,
+   and only if the rescaled facts and the rest are both needed for it to close. That group is held if its own history
+   (other filings, or failing that its own comparatives as evidence against it) blames it. Otherwise the facts of the
+   relations it closes are held.
+7. *Impossible size.* A currency fact over 100× the company's total assets is held (10× if it is flagged, or has no
+   history in other filings). Total assets is the median of the 4 nearest period ends, from other filings, held facts
+   left out. Exempt:
+   - companies under $10M of assets;
+   - derivative notionals and client assets under management or custody;
+   - cumulative equity accounts;
+   - dei market values.
+8. *Spreading.* A held fact's siblings in the same table, a filing's column once mostly held, and relations that
+   close around a held fact whose other facts are off their own history too.
+9. *Balance jumps.* A balance in a recent filing that moved more than 10^2 from the previous period end is flagged.
 
-Whenever two filings are weighed against each other, neighbours reported by either of them are left out, so a
-mis-scaled filing never vouches for itself. Facts that are undated, filed in the future or filed before their period
-ended are set aside with a warning, without blocking the company. A provider whose responses fail QA shows its last
-failing check on the status page and counts as degraded, without opening the circuit.
+When the newest filing is held whole, the figures shown come from the filing before. They are judged stale a week after
+the newer filing arrived, and a note names both filings. Facts that are undated, filed in the future or filed before
+their period ended are set aside with a warning.
 
-**Alternatives.** Quarantine any cross-filing disagreement; MAD per concept; compare only within one period (the
-round-6 rule).
+**Alternatives.**
+- Quarantine every cross-filing disagreement: rejected, it hides restatements.
+- MAD per concept: rejected, genuine one-offs sit up to 10^3 from their neighbours.
+- A size bound on tax lines: measured and rejected. A genuine Meta tax line is 39× its yardstick, while Microsoft's
+  GILTI ×1000 lands at 30×.
+- A step-from-last-year rule for flows: measured and rejected (10 genuine 10^2–10^3 moves in the newest AMZN filings).
+- A "part ≤ total" bound: measured and rejected. Genuine parts reach 815× their total when the other parts offset (GE,
+  Citi).
+- A fixed-sign rate reconciliation: it closes in 50 of 360 clean instances, and once held genuine Apple facts by
+  chance.
 
-**Reason.** Measured on the recorded AMZN company facts (28,891 facts; 9,052 periods filed more than once):
-- Legitimate restatements reach a cross-filing ratio of 41 (a 20:1 split), so quarantining every disagreement would
-  hide real data.
-- Genuine one-offs sit up to about 10^3 from their neighbours (a $62.8B equity revaluation).
-- Sums fail on real data only through rounding (2 ≠ 1 + 2 at $1M precision) or reclassification (2020 debt proceeds),
-  and the every-term rule rejects both.
+**Reason: measured.** Calibration used the recorded AMZN company facts (the contract cassette) and the full company
+facts of 14 more large filers: AAPL, MSFT, NVDA, JPM, C, WFC, BAC, BRK, XOM, GE, MMM, TSLA, META and GOOGL. These came
+from a public EDGAR cache; they were used for measurement only and are not committed.
 
-Results on the clean facts: **0 held**, and 4 recent genuine one-offs flagged.
+On clean data:
+- AMZN: 0 facts held, and 4 genuine one-offs flagged.
+- The 15 filers together: 314 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
+  classified, of real scale errors in old filings (the round-11 reviewer found some in share counts) and genuine
+  values withheld. Before the round-11 changes the same data held 3,789.
+- 59 past AMZN as-of dates: 9 snapshots hold 1–4 genuine facts in 3 concepts. No wrong value is served at any date.
+  The cost is withholding, which is the side these rules err on (P2 backtests must treat held facts as missing).
 
-Seeding each USD concept's current-period facts in the newest filings (one concept at a time):
+Each USD concept's current-period facts in a newest filing were seeded one at a time. Missed counts exclude zero
+values, which scaling leaves unchanged.
 
-| Filing | Seed | Held | Flagged (kept, warned) | Missed |
-| --- | --- | --- | --- | --- |
-| 10-Q 0001018724-26-000026 (159 concepts) | ÷1000 | 142 | 11 | 6 |
-| | ×1000 | 149 | 6 | 4 |
-| | ×1e6 | 157 | 1 | 1 |
-| 10-K 0001018724-26-000004 (245 concepts) | ÷1000 | 197 | 32 | 16 |
-| | ×1000 | 210 | 23 | 12 |
-| | ×1e6 | 244 | 0 | 1 |
+| Filing | ÷1000 held / flagged / missed | ×1000 held / flagged / missed |
+| --- | --- | --- |
+| AMZN 10-Q 26-000026 (159) | 142 / 11 / 6 | 149 / 6 / 4 |
+| AMZN 10-K 26-000004 (245) | 213 / 24 / 8 | 222 / 16 / 7 |
+| AAPL 10-K FY2025 (174) | 159 / 13 / 2 | 165 / 4 / 5 |
+| MSFT 10-K FY2026 (232) | 198 / 18 / 11 | 208 / 8 / 11 |
+| NVDA 10-K FY2026 (196) | 156 / 19 / 16 | 184 / 4 / 3 |
+| JPM 10-K FY2025 (387) | 351 / 16 / 10 | 352 / 17 / 8 |
 
-Whole tables seeded at once are held entirely: the 10-K's rate-reconciliation table (39 facts) and its current/deferred
-tax table (21 facts), both ×1000 and ÷1000, while the genuine total tax is still served.
+At ×1e6, AMZN misses only the zero value (10-K 244 / 0 / 1, 10-Q 157 / 1 / 1). Whole filings, mis-scaled current
+columns and whole tax tables are held entirely.
 
-The one ×1e6 miss in each filing is `PreferredStockValue` = 0, which scaling leaves unchanged (not an error). Every
-fact of either filing at ×1000 is held, as is a mis-scaled current-period column alone (×1000, ÷1000 or ×1e6). With
-the 10-Q held whole, the response is refused as stale rather than served at the wrong scale.
+**Limit (stated, not hidden).** The remaining misses are of two kinds:
+- *Tables that do not close as tagged, even on clean data.* These are the rate reconciliations of MSFT FY2026 (0.75%
+  off), NVDA FY2026 (2.4% off), AAPL (the $10.2B EU state-aid charge uses Apple's own tag) and JPM. When the genuine
+  table does not close, a wrong line in it cannot be told apart.
+- *Lines whose relation is defined only in the filing's XBRL calculation linkbase*: cash-flow details (working-capital
+  changes, gross investing and financing flows), footnote rollforwards with filer-specific lines, and new single-year
+  tables. The company-facts API P1 uses does not carry which lines make up each section or their weights, and guessing
+  them from element names could hold real data.
 
-Earlier versions measured:
-- the round-6 rule: 158 of 158 newest-quarter seeds undetected;
-- the round-7 version: 36 of 159 10-Q ÷1000 seeds;
-- the round-8 version: 39 of 245 10-K ÷1000 seeds;
-- the round-9 version: 12 of 245 10-K ×1e6 seeds, served at up to 83,965× total assets;
-- the round-10 version: 27 of 245 10-K ÷1000 seeds and 18 of 245 ×1000.
-
-**Real data hidden at past dates.** The facts were truncated to each of 59 past 10-K/10-Q filing dates since 2012.
-In 9 of those snapshots, 1–4 genuine facts are held, in 3 concepts:
-- a long-dated purchase obligation;
-- 9-month foreign-currency OCI in 2019, by the same-year rule;
-- noncurrent restricted cash, which genuinely moved ×813 in late 2024, indistinguishable from a ×1000 error.
-
-No wrong value is served at any of those dates. The cost is that real values are withheld, which is the side the
-rules are built to err on (P2 backtests must treat held facts as missing).
-
-**Limit (stated, not hidden).** What is still missed:
-- No ×1e6 seed is missed except the zero value. One 10-Q ×1e6 seed (a small AFS line) lands at only 6.4× total
-  assets; it is flagged and kept, not held.
-- The ÷1000 and ×1000 misses land within the company's own size range, in three kinds of concept:
-  - concepts first reported in the newest filing, small enough after scaling to stay under the assets bound;
-  - footnote lines outside any identity, with volatile history (impairments, equity-method income, FX gains);
-  - sign-swinging gains and OCI.
-
-A balance whose history has multi-year gaps (PP&E gross: 2019, then 2024) is flagged by the balance-jump rule but not
-held.
-
-A hold rule on the step from the previous period was measured and rejected for flows. The clean recorded facts
-already contain 10 genuine moves of 10^2–10^3 in the 4 newest filings, in concepts of the same kind (unrealized-gain
-OCI, equity revaluations, FY2025 non-operating income). Any threshold that catches a ÷1000 on these lines would also
-hold real data.
-
-None of these misses can be caught from this one source. (P1 review rounds 6–10.)
+Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
+fundamentals into reports (STATUS). (P1 review rounds 6–11.)
