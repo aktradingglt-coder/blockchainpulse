@@ -360,10 +360,12 @@ from a public EDGAR cache; they were used for measurement only and are not commi
 
 On clean data:
 - AMZN: 0 facts held, and 4 genuine one-offs flagged.
-- The 15 filers together: 314 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
-  classified, of real scale errors in old filings (share counts; NVDA's and MMM's option intrinsic values) and genuine
-  values withheld. Before the round-11 changes the same data held 3,789.
-- 59 past AMZN as-of dates: 10 snapshots hold 1–4 genuine facts in 3 concepts. No wrong value is served at any date.
+- The 15 filers together: 333 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
+  classified, of real errors in old filings (share counts; NVDA's and MMM's option intrinsic values; sign
+  inconsistencies such as TSLA's positive 2010–11 domestic pre-tax income beside a pre-tax loss, or goodwill
+  "increases" in periods goodwill fell) and genuine values withheld. Before the round-11 changes the same data held
+  3,789.
+- The 59 AMZN 10-K and 10-Q filing dates since 2012, each as an as-of date: 10 snapshots hold 1–4 genuine facts in 3 concepts. No wrong value is served at any date.
   The cost is withholding, which is the side these rules err on (P2 backtests must treat held facts as missing).
 
 Each USD concept's current-period facts in one filing were seeded one at a time, in the full company facts as recorded
@@ -374,11 +376,11 @@ scaling) are counted separately in every row.
 | Filing (USD concepts) | ÷1000 | ×1000 | Zero values |
 | --- | --- | --- | --- |
 | AMZN 10-Q 26-000026 (159) | 141 / 12 / 5 | 150 / 5 / 3 | 1 |
-| AMZN 10-K 26-000004 (245) | 213 / 24 / 7 | 232 / 7 / 5 | 1 |
-| AAPL 10-K FY2025 (174) | 159 / 13 / 2 | 169 / 2 / 3 | 0 |
-| MSFT 10-K FY2026 (232) | 198 / 18 / 11 | 217 / 7 / 3 | 5 |
+| AMZN 10-K 26-000004 (245) | 213 / 24 / 7 | 233 / 6 / 5 | 1 |
+| AAPL 10-K FY2025 (174) | 160 / 13 / 1 | 171 / 2 / 1 | 0 |
+| MSFT 10-K FY2026 (232) | 198 / 18 / 11 | 218 / 6 / 3 | 5 |
 | NVDA 10-K FY2026 (196) | 156 / 19 / 16 | 186 / 3 / 2 | 5 |
-| JPM 10-K FY2025 (387) | 351 / 16 / 10 | 356 / 13 / 8 | 10 |
+| JPM 10-K FY2025 (387) | 351 / 16 / 10 | 357 / 13 / 7 | 10 |
 
 Every ×1000 miss lands below its tier's size bound (for example MSFT's FDII line at 0.8× total assets, JPM's tax
 contingencies at 0.1×), so size alone cannot tell it apart. Whole filings and mis-scaled current columns are held
