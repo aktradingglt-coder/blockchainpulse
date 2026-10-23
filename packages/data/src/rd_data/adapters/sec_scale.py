@@ -241,6 +241,26 @@ _AFTER_TAX = (
 #: A sign-flip repair must close its relations to within this share of the largest term: reported figures are exact up
 #: to rounding, and a flip that merely lands inside ADDITIVITY_TOLERANCE is a coincidence, not evidence.
 FLIP_TOLERANCE = 0.001
+_CAPITAL: tuple[tuple[_Term, ...], ...] = (
+    (
+        _term("CommonStockValue", coef=-1.0, optional=True),
+        _term("AdditionalPaidInCapital", "AdditionalPaidInCapitalCommonStock", coef=-1.0),
+    ),
+    (_term("CommonStocksIncludingAdditionalPaidInCapital", coef=-1.0),),
+)
+
+
+def _equity_components(capital: tuple[_Term, ...], *, treasury: float, aoci: float) -> tuple[_Term, ...]:
+    return (
+        _term("StockholdersEquity", coef=1.0),
+        *capital,
+        _term("PreferredStockValue", coef=-1.0, optional=True),
+        _term("TreasuryStockValue", "TreasuryStockCommonValue", coef=treasury, optional=True),
+        _term("AccumulatedOtherComprehensiveIncomeLossNetOfTax", coef=aoci, optional=True),
+        _term("RetainedEarningsAccumulatedDeficit", coef=-1.0),
+    )
+
+
 SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
     (
         _term(*_CASH_CHANGE, coef=1.0),
@@ -366,12 +386,23 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         _term("StockholdersEquity", coef=-1.0),
         _term("MinorityInterest", coef=-1.0),
     ),
+    # equity = common stock + paid-in capital (or the two as one line) + preferred - treasury stock + AOCI + retained
+    # earnings
+    *(_equity_components(capital, treasury=1.0, aoci=-1.0) for capital in _CAPITAL),
     (_term("Assets", coef=1.0), _term("AssetsCurrent", coef=-1.0), _term("AssetsNoncurrent", coef=-1.0)),
     (
         _term("Liabilities", coef=1.0),
         _term("LiabilitiesCurrent", coef=-1.0),
         _term("LiabilitiesNoncurrent", coef=-1.0),
     ),
+)
+#: The same relations under sign conventions some filers use (treasury stock or AOCI tagged with the opposite sign).
+#: They are never repaired themselves; where one closes exactly as reported it vetoes a false sign repair of the
+#: line whose convention differs.
+CONVENTION_VARIANTS: tuple[tuple[_Term, ...], ...] = tuple(
+    _equity_components(capital, treasury=treasury, aoci=aoci)
+    for capital in _CAPITAL
+    for treasury, aoci in ((-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0))
 )
 #: Statutory tax in the rate reconciliation = statutory rate x pre-tax income (whichever pre-tax total is reported).
 STATUTORY_RATE = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate"
@@ -779,7 +810,7 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     that does not decide, the whole system is held. A relation that holds as reported around a held fact is held with
     it when its other facts are off their own history too (the table was mis-scaled together); when they sit on their
     history, the relation holding is evidence that the held fact is right, not a reason to hold more."""
-    tables, learned, statements = _instances(records)
+    tables, learned, statements, conventions = _instances(records)
     footnotes = tables + learned
     instances = footnotes + statements
     broken = [inst for inst in instances if not _balances(_contributions(records, inst))]
@@ -788,12 +819,15 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     # Statement identities (SIGNED_IDENTITIES) and footnote tables are solved as separate systems: joined through a
     # shared total (income tax), the tax table would exceed MAX_IDENTITY_TERMS and lose its whole-table repairs.
     explained: set[_Instance] = set()
-    for system in [*_systems(footnotes), *_systems(statements)]:
+    # A convention variant that closes exactly as reported shows its facts are consistent: it joins the statement
+    # systems as a closed relation, so no rescale of its facts is taken for a repair.
+    vetoes = [inst for inst in conventions if _exact(_contributions(records, inst))]
+    for system in [*_systems(footnotes), *_systems(statements + vetoes)]:
         if any(inst in broken for inst in system):
             held_here, fixed = _repair(records, system, [inst for inst in system if inst in broken], neighbours)
             out |= held_here
             explained |= fixed
-    for system in _systems(instances):
+    for system in _systems(instances + conventions):  # conventions only veto: never broken, never repaired
         unexplained = [inst for inst in system if inst in broken and inst not in explained]
         if unexplained:
             system_broken = [inst for inst in system if inst in broken]
@@ -815,12 +849,15 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     return out
 
 
-def _instances(records: list[FundamentalFact]) -> tuple[list[_Instance], list[_Instance], list[_Instance]]:
+def _instances(
+    records: list[FundamentalFact],
+) -> tuple[list[_Instance], list[_Instance], list[_Instance], list[_Instance]]:
     """Every exact relation the response lets us check, as signed terms that sum to zero: (footnote and tax-table
-    identities, relations with signs learned from the filing, statement identities)."""
+    identities, relations with signs learned from the filing, statement identities, CONVENTION_VARIANTS)."""
     wanted = {c for total, parts in IDENTITIES for c in (total, *parts)} | {STATUTORY_AMOUNT, *PRETAX_TOTALS}
     wanted |= {c for pair in CHANGES for c in pair}
     wanted |= {c for terms in SIGNED_IDENTITIES for concepts, _, _ in terms for c in concepts}
+    wanted |= {c for terms in CONVENTION_VARIANTS for concepts, _, _ in terms for c in concepts}
     index: dict[tuple[str, str, date | None, date], dict[str, int]] = {}
     rates: dict[tuple[str, date | None, date], float] = {}
     for i, f in enumerate(records):
@@ -830,13 +867,12 @@ def _instances(records: list[FundamentalFact]) -> tuple[list[_Instance], list[_I
             rates[(f.accession, f.period_start, f.period_end)] = f.value
     out: list[_Instance] = []
     statements: list[_Instance] = []
+    conventions: list[_Instance] = []
     for (accession, unit, start, end), terms in index.items():
         for total, parts in IDENTITIES:
             if total in terms and all(p in terms for p in parts):
                 out.append(((terms[total], 1.0), *((terms[p], -1.0) for p in parts)))
-        for signed in SIGNED_IDENTITIES:
-            if (instance := _signed_instance(signed, terms)) is not None and instance not in statements:
-                statements.append(instance)
+        _add_signed(terms, statements, conventions)
         rate = rates.get((accession, start, end))
         pretax = next((terms[c] for c in PRETAX_TOTALS if c in terms), None)
         if rate and STATUTORY_AMOUNT in terms and pretax is not None:
@@ -848,7 +884,17 @@ def _instances(records: list[FundamentalFact]) -> tuple[list[_Instance], list[_I
             opening = index.get((accession, unit, None, start - timedelta(days=1)), {}).get(balance)
             if change in terms and closing is not None and opening is not None:
                 out.append(((terms[change], 1.0), (closing, -1.0), (opening, 1.0)))
-    return out, _learned_relations(records, index), statements
+    return out, _learned_relations(records, index), statements, conventions
+
+
+def _add_signed(terms: dict[str, int], statements: list[_Instance], conventions: list[_Instance]) -> None:
+    """One filing's and period's instances of SIGNED_IDENTITIES and CONVENTION_VARIANTS, without duplicates."""
+    for signed in SIGNED_IDENTITIES:
+        if (instance := _signed_instance(signed, terms)) is not None and instance not in statements:
+            statements.append(instance)
+    for variant in CONVENTION_VARIANTS:
+        if (instance := _signed_instance(variant, terms)) is not None and instance not in statements:
+            conventions.append(instance)
 
 
 def _signed_instance(signed: tuple[_Term, ...], terms: dict[str, int]) -> _Instance | None:
@@ -1037,12 +1083,14 @@ def _flip_fixes(
 def _fixed(
     records: list[FundamentalFact], system: list[_Instance], broken: list[_Instance], group: set[int], factor: float
 ) -> list[_Instance]:
-    """The broken relations this rescale closes (each needing every term), or none if it breaks a closed one."""
+    """The broken relations this rescale closes (each needing every term), or none if it breaks a closed one (a
+    relation that closes exactly as reported must stay exact)."""
     closed = []
     for inst in system:
         contributions = _contributions(records, inst, group, factor)
         if inst not in broken:
-            if not _balances(contributions):
+            exact = _exact(_contributions(records, inst))
+            if not (_exact(contributions) if exact else _balances(contributions)):
                 return []
         elif _closes_with_both_sides(contributions, [k in group for k, _ in inst]):
             closed.append(inst)

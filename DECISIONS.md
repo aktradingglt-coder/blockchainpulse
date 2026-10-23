@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-10-23, round 17) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-10-23, round 18) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -302,7 +302,12 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      = liabilities + equity (including NCI, or the parent's and the NCI apart) + temporary equity where reported (in
      total, or the parent's and the redeemable NCI apart; clean instances closing per variant: 1,710 and 1,736 of
      1,762 with total equity, 849 and 889 of 889 with the parent's and the NCI apart); equity including NCI =
-     the parent's + NCI (934 of 935); cash-flow-hedge and AFS OCI
+     the parent's + NCI (934 of 935); equity = common stock + paid-in capital (or the two as one line) + preferred
+     − treasury stock + AOCI + retained earnings (1,182 of 1,347 with the lines apart; 297 of 394 with one line;
+     AMZN 138 of 138; it does not fit banks). Under sign conventions some filers use (treasury stock or AOCI tagged
+     with the opposite sign) the same relation is kept as a veto only: where it closes exactly as reported, its
+     facts are taken as consistent, and neither a rescale nor a flip of them counts as a repair; cash-flow-hedge and
+     AFS OCI
      rollforwards; gross profit; current + noncurrent assets and liabilities. Several of these do not fit every
      filer's statements (a net-income line that includes discontinued operations, costs that include non-operating
      items, total OCI that includes the NCI's share): a relation that no repair below explains is left alone, and one
@@ -317,7 +322,8 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    A relation counts as broken evidence only if rescaling a minimal group of its facts by a power of 1000 closes it,
    and only if the rescaled facts and the rest are both needed for it to close. That group is held if its own history
    (other filings, or failing that its own comparatives as evidence against it) blames it. Otherwise the facts of the
-   relations it closes are held. Statement identities and footnote tables are searched for rescales as separate
+   relations it closes are held. A relation that closes exactly as reported (within 0.1%) must stay exact under a
+   repair, not merely within 1%. Statement identities and footnote tables are searched for rescales as separate
    systems (joined, the tax table would be too large to search whole). When no rescale explains a broken relation,
    flipping the sign of one fact may, closing it exactly (within 0.1%: reported figures are exact up to rounding, and
    a flip that lands inside the 1% tolerance is a coincidence) without breaking any relation of the joined system

@@ -3072,3 +3072,45 @@ def test_a_flipped_total_equity_breaks_liabilities_plus_equity_and_is_held(with_
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
         ("StockholdersEquity", 2025, "a")
     }
+
+
+# ------------------------------------------------------------------------------------- review round 18 (P1)
+
+
+async def test_a_flipped_equity_breaks_its_components_even_without_total_liabilities() -> None:
+    """AMZN tags no total liabilities, but equity = common stock + paid-in capital - treasury stock + AOCI + retained
+    earnings (0.113 + 149.619 - 7.837 + 66.287 + 343.438 = 551.620, $B) catches a flipped total."""
+
+    def flip(data: dict[str, Any]) -> None:
+        for f in data["facts"]["us-gaap"]["StockholdersEquity"]["units"]["USD"]:
+            if f["accn"] == NEWEST_10Q and f["end"] == "2026-06-30":
+                f["val"] = -f["val"]
+
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(flip)})
+    served = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact) and f.concept == "StockholdersEquity" and f.period_end == date(2026, 6, 30)
+    ]
+    assert all(f.value > 0 for f in served)
+
+
+def test_a_filer_reporting_treasury_stock_as_a_negative_amount_is_not_held() -> None:
+    """GE tags treasury stock as a negative amount, so equity = capital + treasury + AOCI + retained earnings closes
+    exactly only under that convention: it vetoes flipping the treasury line, and nothing is held."""
+    rows = {
+        "StockholdersEquity": (34e9, 35e9, 35.161e9),
+        "CommonStockValue": (0.702e9, 0.702e9, 0.702e9),
+        "AdditionalPaidInCapital": (34.1e9, 34.2e9, 34.345e9),
+        "TreasuryStockValue": (-83.4e9, -83.3e9, -83.328e9),
+        "AccumulatedOtherComprehensiveIncomeLossNetOfTax": (-13.7e9, -13.6e9, -13.485e9),
+        "RetainedEarningsAccumulatedDeficit": (96.298e9, 96.998e9, 96.927e9),
+    }
+    years = (2023, 2024, 2025)
+    facts = [(c, -y, v) for c, vs in rows.items() for y, v in zip(years, vs, strict=True)]
+    earlier = [
+        (c, -y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    assert sec_scale.scale_errors(records)[0] == set()
