@@ -394,9 +394,10 @@ On clean data:
   "increases" in periods goodwill fell) and genuine values withheld. Before the round-11 changes the same data held
   3,789.
 - The 59 AMZN 10-K and 10-Q filing dates since 2012, each as an as-of date: from 2015-01-30 on, every snapshot holds
-  the FY2014 10-K's 10 sign-flipped tax facts (at that filing's own date with 4 reconciliation lines that close around
-  them, so its 2014 tax figures are withheld until the next filing restates them); besides those, 10 snapshots hold 1–4
-  genuine facts in 3 concepts. No wrong value is served at any date. The cost is withholding, which is the side these
+  the FY2014 10-K's 10 sign-flipped tax facts (at the four 2015 dates also 4–6 of that filing's rate-reconciliation
+  lines, held with them; at the filing's own date its 2014 tax figures are withheld until the next filing restates
+  them); besides that filing, 10 snapshots hold 1–4 genuine facts in 3 concepts (purchase obligations, OCI translation,
+  noncurrent restricted cash). No wrong value is served at any date. The cost is withholding, which is the side these
   rules err on (P2 backtests must treat held facts as missing).
 
 Each USD concept's current-period facts in one filing were seeded one at a time, in the full company facts as recorded

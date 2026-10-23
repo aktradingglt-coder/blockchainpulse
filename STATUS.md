@@ -4,8 +4,8 @@ _Last updated: 2026-10-21_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–14 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–18); awaiting review round 15.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–15 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–19); awaiting review round 16.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -117,6 +117,11 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   newest filing, mostly the filers' own errors); sign checks across filings cover headline totals only; a ticker map
   of 8,000–10,442 rows is served as complete; a company's very first filing mis-scaled whole has no in-source evidence
   beyond the size bounds.
+- P2 (from P1 review round 15, minor): non-headline sign flips (cost of goods, S&M, G&A, taxes paid) are served where
+  the filing has no line they must add up with; `Revenues` sign flips have no closing relation (left off the
+  never-negative list: asset managers can report it negative); MMM's cash-flow statement does not close as tagged, so
+  its flips are served; a small OCI flip can sit within the 1% tolerance. Measure cost lines for the never-negative
+  list before widening coverage.
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after
