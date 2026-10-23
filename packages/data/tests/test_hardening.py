@@ -3114,3 +3114,48 @@ def test_a_filer_reporting_treasury_stock_as_a_negative_amount_is_not_held() -> 
     ]
     records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
     assert sec_scale.scale_errors(records)[0] == set()
+
+
+# ------------------------------------------------------------------------------------- review round 19 (P1)
+
+
+async def test_a_flipped_aoci_breaks_the_equity_components_and_is_held() -> None:
+    """No calibration filer tags AOCI with the opposite sign (that convention closes 1 clean instance of 1,741), so it
+    no longer vetoes the repair: AMZN's June AOCI (+66.29B) entered as -66.29B breaks equity = capital + AOCI + ..."""
+
+    def flip(data: dict[str, Any]) -> None:
+        for f in data["facts"]["us-gaap"]["AccumulatedOtherComprehensiveIncomeLossNetOfTax"]["units"]["USD"]:
+            if f["accn"] == NEWEST_10Q and f["end"] == "2026-06-30":
+                f["val"] = -f["val"]
+
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(flip)})
+    served = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact)
+        and f.concept == "AccumulatedOtherComprehensiveIncomeLossNetOfTax"
+        and f.period_end == date(2026, 6, 30)
+    ]
+    assert all(f.value > 0 for f in served)
+
+
+async def test_a_flipped_trailing_twelve_month_cell_is_held() -> None:
+    """TTM net income = FY2025 + H1-2026 - H1-2025 (77,670 + 92,902 - 35,291 = 135,281, $M), all in the response."""
+
+    def flip(data: dict[str, Any]) -> None:
+        for f in data["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"]:
+            if f["accn"] == NEWEST_10Q and f.get("start") == "2025-07-01" and f["end"] == "2026-06-30":
+                f["val"] = -f["val"]
+
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(flip)})
+    served = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact)
+        and f.concept == "NetIncomeLoss"
+        and f.period_start == date(2025, 7, 1)
+        and f.period_end == date(2026, 6, 30)
+    ]
+    assert all(f.value > 0 for f in served)

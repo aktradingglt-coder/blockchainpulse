@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-10-23, round 18) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-10-23, round 19) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -304,9 +304,11 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      1,762 with total equity, 849 and 889 of 889 with the parent's and the NCI apart); equity including NCI =
      the parent's + NCI (934 of 935); equity = common stock + paid-in capital (or the two as one line) + preferred
      − treasury stock + AOCI + retained earnings (1,182 of 1,347 with the lines apart; 297 of 394 with one line;
-     AMZN 138 of 138; it does not fit banks). Under sign conventions some filers use (treasury stock or AOCI tagged
-     with the opposite sign) the same relation is kept as a veto only: where it closes exactly as reported, its
-     facts are taken as consistent, and neither a rescale nor a flip of them counts as a repair; cash-flow-hedge and
+     AMZN 138 of 138; it does not fit banks). With treasury stock tagged as a negative amount (a convention filers do
+     use: GE re-tagged it so in 2015) the same relation is kept as a veto only: where it closes exactly as reported,
+     its facts are taken as consistent, and neither a rescale nor a flip of them counts as a repair. AOCI has no such
+     convention in the calibration set (the opposite sign closes 1 clean instance of 1,741, by coincidence), so AOCI
+     flips are repaired; cash-flow-hedge and
      AFS OCI
      rollforwards; gross profit; current + noncurrent assets and liabilities. Several of these do not fit every
      filer's statements (a net-income line that includes discontinued operations, costs that include non-operating
@@ -331,7 +333,10 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    close only loosely, and relations whose signs were learned from the filing (they adapt to a sign error carried
    through a whole filing, as a flipped tax total in every column of a 10-K), do not veto a flip. The fact is held when its sign opposes
    most of its (at least two) neighbouring periods, or when it is the only fact whose flip closes that relation;
-   otherwise nothing is held.
+   otherwise nothing is held. Headline totals over trailing periods are also checked: trailing twelve months = the
+   last fiscal year + this year to date − last year to date, each part from the same filing where it reports it.
+   These relations chain periods together, so each is checked on its own: a flip that closes one exactly, without
+   breaking any relation that closes exactly as reported, is held as above.
 7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
    is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
    the 15 filers below with the bound itself switched off:
@@ -402,7 +407,7 @@ On clean data:
 - AMZN: 10 facts held, all in its FY2014 10-K, which reports the 2013–14 quarterly and annual income-tax expense with
   the opposite sign to every other filing of those periods (a real error in the recorded data); 4 genuine one-offs
   flagged.
-- The 15 filers together: 332 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
+- The 15 filers together: 333 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
   classified, of real errors in old filings (share counts; NVDA's and MMM's option intrinsic values; sign
   inconsistencies such as TSLA's positive 2010–11 domestic pre-tax income beside a pre-tax loss, or goodwill
   "increases" in periods goodwill fell) and genuine values withheld. Before the round-11 changes the same data held

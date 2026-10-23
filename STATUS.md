@@ -4,8 +4,8 @@ _Last updated: 2026-10-23_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–18 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–22); awaiting review round 19.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–19 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–23); awaiting review round 20.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -133,6 +133,11 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
 - P2 (from P1 review round 18, minor): a sign flip that moves an exact identity by less than the 1% "broken"
   tolerance is served (BRK's minority interest, 0.6% of equity; TSLA's redeemable NCI); measure a per-relation
   tolerance for relations that close exactly on clean data.
+- P2 (from P1 review round 19, minor): treasury-stock sign flips are served where the filer's treasury convention is
+  ambiguous (GE re-tagged treasury stock negative in 2015, so a flip cannot be told from a re-tag in this source);
+  GOOGL's equity does not close (convertible preferred under its own tag), and banks' equity does not fit the
+  components identity, so their retained-earnings and capital flips are served; non-revenue income-statement flows
+  (e.g. derivative gains) fall under the 3x size tier — a separate flow tier is unmeasured.
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after

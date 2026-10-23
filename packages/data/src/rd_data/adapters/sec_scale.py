@@ -396,13 +396,12 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         _term("LiabilitiesNoncurrent", coef=-1.0),
     ),
 )
-#: The same relations under sign conventions some filers use (treasury stock or AOCI tagged with the opposite sign).
-#: They are never repaired themselves; where one closes exactly as reported it vetoes a false sign repair of the
-#: line whose convention differs.
+#: The same relation under a sign convention filers do use (treasury stock tagged as a negative amount: GE re-tagged
+#: it so in 2015). It is never repaired itself; where it closes exactly as reported it vetoes a false sign repair of
+#: the treasury line. AOCI has no such convention in the calibration set (the opposite sign closes 1 clean instance of
+#: 1,741, by coincidence), so AOCI flips stay repairable.
 CONVENTION_VARIANTS: tuple[tuple[_Term, ...], ...] = tuple(
-    _equity_components(capital, treasury=treasury, aoci=aoci)
-    for capital in _CAPITAL
-    for treasury, aoci in ((-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0))
+    _equity_components(capital, treasury=-1.0, aoci=-1.0) for capital in _CAPITAL
 )
 #: Statutory tax in the rate reconciliation = statutory rate x pre-tax income (whichever pre-tax total is reported).
 STATUTORY_RATE = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate"
@@ -834,6 +833,7 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
             out |= _sign_repair(
                 records, system, system_broken, unexplained, learned=set(learned), neighbours=neighbours
             )
+    out |= _trailing_sign_errors(records, instances + conventions, neighbours)
     known = held | out
     for _ in range(len(IDENTITIES)):  # spread through nested identities (total -> current -> current federal)
         spread: set[int] = set()
@@ -887,13 +887,88 @@ def _instances(
     return out, _learned_relations(records, index), statements, conventions
 
 
+def _trailing_instances(records: list[FundamentalFact]) -> list[_Instance]:
+    """Headline totals over a trailing period: whole = A + B - C, where B runs to the whole's end from a later start, A
+    ends the day before B starts, and C runs from A's start to the day before the whole starts (the trailing twelve
+    months = last fiscal year + this year to date - last year to date). Each part is taken from the whole's own filing
+    where it reports it, else from the latest filing that does."""
+    spans: dict[tuple[str, str, date, date], list[int]] = {}
+    for i, f in enumerate(records):
+        if f.concept in SIGN_CHECKED and f.period_start is not None and _CURRENCY.match(f.unit):
+            spans.setdefault((f.concept, f.unit, f.period_start, f.period_end), []).append(i)
+    starts: dict[tuple[str, str, date], list[date]] = {}
+    for concept, unit, start, end in spans:
+        starts.setdefault((concept, unit, end), []).append(start)
+    day = timedelta(days=1)
+    out: list[_Instance] = []
+    for (concept, unit, start, end), wholes in spans.items():
+        for later in starts[(concept, unit, end)]:
+            if later <= start:
+                continue
+            for first in starts.get((concept, unit, later - day), []):
+                part_c = spans.get((concept, unit, first, start - day))
+                if first >= start or part_c is None:
+                    continue
+                part_a, part_b = spans[(concept, unit, first, later - day)], spans[(concept, unit, later, end)]
+                for whole in wholes:
+                    pick = [
+                        _same_filing_or_latest(records, part, records[whole].accession)
+                        for part in (part_a, part_b, part_c)
+                    ]
+                    out.append(((whole, 1.0), (pick[0], -1.0), (pick[1], -1.0), (pick[2], 1.0)))
+    return out
+
+
+def _trailing_sign_errors(
+    records: list[FundamentalFact], instances: list[_Instance], neighbours: _Neighbours
+) -> set[int]:
+    """Sign errors that break a trailing-period relation (_trailing_instances). These relations chain periods together,
+    so they are checked one at a time rather than joined into systems: a fact whose flip closes a broken one exactly is
+    a candidate unless the flip breaks another relation that closes exactly as reported (statement and footnote
+    identities, conventions, other trailing relations); it is held as in _sign_repair."""
+    trailing = _trailing_instances(records)
+    containing: dict[int, list[_Instance]] = {}
+    for inst in [*instances, *trailing]:
+        for k, _ in inst:
+            containing.setdefault(k, []).append(inst)
+    out: set[int] = set()
+    for inst in trailing:
+        if _balances(_contributions(records, inst)):
+            continue
+        candidates = []
+        for k, _ in inst:
+            after = _contributions(records, inst, {k}, -1.0)
+            if not (_exact(after) and _closes_with_both_sides(after, [j == k for j, _ in inst])):
+                continue
+            if any(
+                other is not inst
+                and _exact(_contributions(records, other))
+                and not _balances(_contributions(records, other, {k}, -1.0))
+                for other in containing[k]
+            ):
+                continue
+            candidates.append(k)
+        own = frozenset({records[inst[0][0]].accession})
+        against = {k for k in candidates if neighbours.sign_against_history(k, own)}
+        if against:
+            out |= against
+        elif len(candidates) == 1:
+            out.add(candidates[0])
+    return out
+
+
+def _same_filing_or_latest(records: list[FundamentalFact], idx: list[int], accession: str) -> int:
+    return next((i for i in idx if records[i].accession == accession), max(idx, key=lambda i: records[i].filed))
+
+
 def _add_signed(terms: dict[str, int], statements: list[_Instance], conventions: list[_Instance]) -> None:
     """One filing's and period's instances of SIGNED_IDENTITIES and CONVENTION_VARIANTS, without duplicates."""
     for signed in SIGNED_IDENTITIES:
         if (instance := _signed_instance(signed, terms)) is not None and instance not in statements:
             statements.append(instance)
     for variant in CONVENTION_VARIANTS:
-        if (instance := _signed_instance(variant, terms)) is not None and instance not in statements:
+        instance = _signed_instance(variant, terms)
+        if instance is not None and instance not in statements and instance not in conventions:
             conventions.append(instance)
 
 
