@@ -212,55 +212,118 @@ MIN_COMPARATIVES = 2
 COMPARATIVE_SPREAD = 0.5
 #: Statement identities with signs: (concept, coefficient) terms summing to zero within one filing and period. Each
 #: held on every instance, or all but a handful, of the clean company facts of 15 large filers (D-036).
-SIGNED_IDENTITIES: tuple[tuple[tuple[str, float], ...], ...] = (
+#: A term of a signed identity: the concepts that may report it (first reported wins), its coefficient, and whether the
+#: identity holds without it (an exchange-rate line a filer with no foreign cash does not report).
+_Term = tuple[tuple[str, ...], float, bool]
+
+
+def _term(*concepts: str, coef: float, optional: bool = False) -> _Term:
+    return (concepts, coef, optional)
+
+
+_CASH_CHANGE = (
+    "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
+    "CashAndCashEquivalentsPeriodIncreaseDecrease",
+)
+_FX_ON_CASH = (
+    "EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    "EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroupAnd"
+    "DiscontinuedOperations",
+    "EffectOfExchangeRateOnCashAndCashEquivalents",
+)
+_REVENUE = ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet")
+_AFTER_TAX = (
+    "IncomeLossFromContinuingOperationsIncludingPortionAttributableToNoncontrollingInterest",
+    "IncomeLossFromContinuingOperations",
+    "ProfitLoss",
+    "NetIncomeLoss",
+)
+#: A sign-flip repair must close its relations to within this share of the largest term: reported figures are exact up
+#: to rounding, and a flip that merely lands inside ADDITIVITY_TOLERANCE is a coincidence, not evidence.
+FLIP_TOLERANCE = 0.001
+SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
     (
-        (
-            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
-            1.0,
+        _term(*_CASH_CHANGE, coef=1.0),
+        _term("NetCashProvidedByUsedInOperatingActivities", coef=-1.0),
+        _term("NetCashProvidedByUsedInInvestingActivities", coef=-1.0),
+        _term("NetCashProvidedByUsedInFinancingActivities", coef=-1.0),
+        _term(*_FX_ON_CASH, coef=-1.0, optional=True),
+    ),
+    (
+        _term("ComprehensiveIncomeNetOfTax", coef=1.0),
+        _term("NetIncomeLoss", coef=-1.0),
+        _term(
+            "OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent",
+            "OtherComprehensiveIncomeLossNetOfTax",
+            coef=-1.0,
         ),
-        ("NetCashProvidedByUsedInOperatingActivities", -1.0),
-        ("NetCashProvidedByUsedInInvestingActivities", -1.0),
-        ("NetCashProvidedByUsedInFinancingActivities", -1.0),
-        ("EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", -1.0),
     ),
     (
-        (
-            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
-            1.0,
+        _term("ComprehensiveIncomeNetOfTaxIncludingPortionAttributableToNoncontrollingInterest", coef=1.0),
+        _term("ProfitLoss", coef=-1.0),
+        _term("OtherComprehensiveIncomeLossNetOfTax", coef=-1.0),
+    ),
+    (
+        _term("ComprehensiveIncomeNetOfTaxIncludingPortionAttributableToNoncontrollingInterest", coef=1.0),
+        _term("ComprehensiveIncomeNetOfTax", coef=-1.0),
+        _term("ComprehensiveIncomeNetOfTaxAttributableToNoncontrollingInterest", coef=-1.0),
+    ),
+    (
+        _term("ProfitLoss", coef=1.0),
+        _term("NetIncomeLoss", coef=-1.0),
+        _term("NetIncomeLossAttributableToNoncontrollingInterest", coef=-1.0),
+    ),
+    (  # income from continuing operations (or net income) = pre-tax income (equity-method income included) - tax
+        _term(*_AFTER_TAX, coef=1.0),
+        _term("IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest", coef=-1.0),
+        _term("IncomeTaxExpenseBenefit", coef=1.0),
+    ),
+    (  # the same, before equity-method income, which is then added after tax
+        _term(*_AFTER_TAX, coef=1.0),
+        _term(
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+            coef=-1.0,
         ),
-        ("NetCashProvidedByUsedInOperatingActivities", -1.0),
-        ("NetCashProvidedByUsedInInvestingActivities", -1.0),
-        ("NetCashProvidedByUsedInFinancingActivities", -1.0),
-        (
-            "EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroup"
-            "AndDiscontinuedOperations",
-            -1.0,
-        ),
+        _term("IncomeTaxExpenseBenefit", coef=1.0),
+        _term("IncomeLossFromEquityMethodInvestments", coef=-1.0, optional=True),
+    ),
+    (  # pre-tax income = revenue - all costs and expenses (filers whose costs include non-operating items)
+        _term("IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest", coef=1.0),
+        _term(*_REVENUE, coef=-1.0),
+        _term("CostsAndExpenses", coef=1.0),
     ),
     (
-        ("ComprehensiveIncomeNetOfTax", 1.0),
-        ("NetIncomeLoss", -1.0),
-        ("OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent", -1.0),
-    ),
-    (("ProfitLoss", 1.0), ("NetIncomeLoss", -1.0), ("NetIncomeLossAttributableToNoncontrollingInterest", -1.0)),
-    (
-        ("OtherComprehensiveIncomeLossCashFlowHedgeGainLossAfterReclassificationAndTax", 1.0),
-        ("OtherComprehensiveIncomeLossCashFlowHedgeGainLossBeforeReclassificationAfterTax", -1.0),
-        ("OtherComprehensiveIncomeLossCashFlowHedgeGainLossReclassificationAfterTax", 1.0),
+        _term("OtherComprehensiveIncomeLossCashFlowHedgeGainLossAfterReclassificationAndTax", coef=1.0),
+        _term("OtherComprehensiveIncomeLossCashFlowHedgeGainLossBeforeReclassificationAfterTax", coef=-1.0),
+        _term("OtherComprehensiveIncomeLossCashFlowHedgeGainLossReclassificationAfterTax", coef=1.0),
     ),
     (
-        ("OtherComprehensiveIncomeLossAvailableForSaleSecuritiesAdjustmentNetOfTax", 1.0),
-        ("OtherComprehensiveIncomeUnrealizedHoldingGainLossOnSecuritiesArisingDuringPeriodNetOfTax", -1.0),
-        ("OtherComprehensiveIncomeLossReclassificationAdjustmentFromAOCIForSaleOfSecuritiesNetOfTax", 1.0),
+        _term("OtherComprehensiveIncomeLossAvailableForSaleSecuritiesAdjustmentNetOfTax", coef=1.0),
+        _term("OtherComprehensiveIncomeUnrealizedHoldingGainLossOnSecuritiesArisingDuringPeriodNetOfTax", coef=-1.0),
+        _term("OtherComprehensiveIncomeLossReclassificationAdjustmentFromAOCIForSaleOfSecuritiesNetOfTax", coef=1.0),
     ),
     (
-        ("GrossProfit", 1.0),
-        ("RevenueFromContractWithCustomerExcludingAssessedTax", -1.0),
-        ("CostOfGoodsAndServicesSold", 1.0),
+        _term("GrossProfit", coef=1.0),
+        _term("RevenueFromContractWithCustomerExcludingAssessedTax", coef=-1.0),
+        _term("CostOfGoodsAndServicesSold", coef=1.0),
     ),
-    (("GrossProfit", 1.0), ("Revenues", -1.0), ("CostOfRevenue", 1.0)),
-    (("Assets", 1.0), ("AssetsCurrent", -1.0), ("AssetsNoncurrent", -1.0)),
-    (("Liabilities", 1.0), ("LiabilitiesCurrent", -1.0), ("LiabilitiesNoncurrent", -1.0)),
+    (_term("GrossProfit", coef=1.0), _term("Revenues", coef=-1.0), _term("CostOfRevenue", coef=1.0)),
+    (
+        _term("OperatingIncomeLoss", coef=1.0),
+        _term("GrossProfit", coef=-1.0),
+        _term("OperatingExpenses", coef=1.0),
+    ),
+    (
+        _term("OperatingIncomeLoss", coef=1.0),
+        _term(*_REVENUE, coef=-1.0),
+        _term("CostsAndExpenses", coef=1.0),
+    ),
+    (_term("Assets", coef=1.0), _term("AssetsCurrent", coef=-1.0), _term("AssetsNoncurrent", coef=-1.0)),
+    (
+        _term("Liabilities", coef=1.0),
+        _term("LiabilitiesCurrent", coef=-1.0),
+        _term("LiabilitiesNoncurrent", coef=-1.0),
+    ),
 )
 #: Statutory tax in the rate reconciliation = statutory rate x pre-tax income (whichever pre-tax total is reported).
 STATUTORY_RATE = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate"
@@ -668,13 +731,24 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     that does not decide, the whole system is held. A relation that holds as reported around a held fact is held with
     it when its other facts are off their own history too (the table was mis-scaled together); when they sit on their
     history, the relation holding is evidence that the held fact is right, not a reason to hold more."""
-    instances = _instances(records)
+    footnotes, statements = _instances(records)
+    instances = footnotes + statements
     broken = [inst for inst in instances if not _balances(_contributions(records, inst))]
     consistent = [inst for inst in instances if inst not in broken]
     out: set[int] = set()
-    for system in _systems(instances):
+    # Statement identities (SIGNED_IDENTITIES) and footnote tables are solved as separate systems: joined through a
+    # shared total (income tax), the tax table would exceed MAX_IDENTITY_TERMS and lose its whole-table repairs.
+    explained: set[_Instance] = set()
+    for system in [*_systems(footnotes), *_systems(statements)]:
         if any(inst in broken for inst in system):
-            out |= _repair(records, system, [inst for inst in system if inst in broken], neighbours)
+            held_here, fixed = _repair(records, system, [inst for inst in system if inst in broken], neighbours)
+            out |= held_here
+            explained |= fixed
+    for system in _systems(instances):
+        unexplained = [inst for inst in system if inst in broken and inst not in explained]
+        if unexplained:
+            system_broken = [inst for inst in system if inst in broken]
+            out |= _sign_repair(records, system, system_broken, unexplained, neighbours)
     known = held | out
     for _ in range(len(IDENTITIES)):  # spread through nested identities (total -> current -> current federal)
         spread: set[int] = set()
@@ -690,10 +764,12 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     return out
 
 
-def _instances(records: list[FundamentalFact]) -> list[_Instance]:
-    """Every exact relation the response lets us check, as signed terms that sum to zero."""
+def _instances(records: list[FundamentalFact]) -> tuple[list[_Instance], list[_Instance]]:
+    """Every exact relation the response lets us check, as signed terms that sum to zero: (footnote and tax-table
+    relations, statement identities)."""
     wanted = {c for total, parts in IDENTITIES for c in (total, *parts)} | {STATUTORY_AMOUNT, *PRETAX_TOTALS}
-    wanted |= {c for pair in CHANGES for c in pair} | {c for terms in SIGNED_IDENTITIES for c, _ in terms}
+    wanted |= {c for pair in CHANGES for c in pair}
+    wanted |= {c for terms in SIGNED_IDENTITIES for concepts, _, _ in terms for c in concepts}
     index: dict[tuple[str, str, date | None, date], dict[str, int]] = {}
     rates: dict[tuple[str, date | None, date], float] = {}
     for i, f in enumerate(records):
@@ -702,13 +778,14 @@ def _instances(records: list[FundamentalFact]) -> list[_Instance]:
         elif f.concept == STATUTORY_RATE and f.unit == "pure":
             rates[(f.accession, f.period_start, f.period_end)] = f.value
     out: list[_Instance] = []
+    statements: list[_Instance] = []
     for (accession, unit, start, end), terms in index.items():
         for total, parts in IDENTITIES:
             if total in terms and all(p in terms for p in parts):
                 out.append(((terms[total], 1.0), *((terms[p], -1.0) for p in parts)))
         for signed in SIGNED_IDENTITIES:
-            if all(c in terms for c, _ in signed):
-                out.append(tuple((terms[c], coef) for c, coef in signed))
+            if (instance := _signed_instance(signed, terms)) is not None:
+                statements.append(instance)
         rate = rates.get((accession, start, end))
         pretax = next((terms[c] for c in PRETAX_TOTALS if c in terms), None)
         if rate and STATUTORY_AMOUNT in terms and pretax is not None:
@@ -720,7 +797,20 @@ def _instances(records: list[FundamentalFact]) -> list[_Instance]:
             opening = index.get((accession, unit, None, start - timedelta(days=1)), {}).get(balance)
             if change in terms and closing is not None and opening is not None:
                 out.append(((terms[change], 1.0), (closing, -1.0), (opening, 1.0)))
-    return out + _learned_relations(records, index)
+    return out + _learned_relations(records, index), statements
+
+
+def _signed_instance(signed: tuple[_Term, ...], terms: dict[str, int]) -> _Instance | None:
+    """One filing's and period's instance of a signed identity: each term reported under the first of its concepts the
+    filing uses; None when a required term is not reported at all."""
+    instance: list[tuple[int, float]] = []
+    for concepts, coef, optional in signed:
+        found = next((terms[c] for c in concepts if c in terms), None)
+        if found is not None:
+            instance.append((found, coef))
+        elif not optional:
+            return None
+    return tuple(instance)
 
 
 def _learned_relations(
@@ -809,14 +899,16 @@ def _systems(instances: list[_Instance]) -> list[list[_Instance]]:
 
 def _repair(
     records: list[FundamentalFact], system: list[_Instance], broken: list[_Instance], neighbours: _Neighbours
-) -> set[int]:
+) -> tuple[set[int], set[_Instance]]:
     """Find groups of facts whose power-of-1000 rescale makes broken relations close without breaking any that closed;
     blame one side of each (_blame). Relations that no rescale closes (a filer's own tagging) are left alone. When the
-    history cannot decide, the facts of the relations that rescale would close are held."""
+    history cannot decide, the facts of the relations that rescale would close are held. Returns the facts held and the
+    broken relations some rescale explains."""
     terms = sorted({k for inst in system for k, _ in inst})
     largest = len(terms) // 2 if len(terms) <= MAX_IDENTITY_TERMS else MAX_GROUP_IN_LARGE_SYSTEM
     own = frozenset({records[terms[0]].accession})
     held: set[int] = set()
+    explained: set[_Instance] = set()
     repairs: list[set[int]] = []
     for size in range(1, largest + 1):
         for group in itertools.combinations(terms, size):
@@ -831,21 +923,44 @@ def _repair(
             if not fixed:
                 continue
             repairs.append(set(group))
+            explained.update(fixed)
             involved = {k for inst in fixed for k, _ in inst}
             blamed = _blame(neighbours, list(group), [k for k in rest if k in involved], own)
             held |= set(blamed) & involved if blamed is not None else involved
-    if repairs:
-        return held
-    # No rescale repairs the system: a single fact entered with the wrong sign may. It is held when its sign is the
-    # opposite of its own history, or when it is the only fact whose flip closes the system; otherwise the relations a
-    # flip would close are held.
-    flips = [(k, fixed) for k in terms if (fixed := _fixed(records, system, broken, {k}, -1.0))]
-    blamed_flips = {k for k, _ in flips if neighbours.sign_against_history(k, own)}
-    if blamed_flips:
-        return blamed_flips
-    if len(flips) == 1:
-        return {flips[0][0]}
-    return {k for _, fixed in flips for inst in fixed for k, _ in inst}
+    return held, explained
+
+
+def _sign_repair(
+    records: list[FundamentalFact],
+    system: list[_Instance],
+    broken: list[_Instance],
+    unexplained: list[_Instance],
+    neighbours: _Neighbours,
+) -> set[int]:
+    """Broken relations no rescale explains may be explained by a single fact entered with the wrong sign: flipping it
+    closes the relation exactly (FLIP_TOLERANCE) without breaking any relation of the system (statement identities and
+    footnote tables together, so a total that another identity confirms is never the one flipped). The fact is held
+    when its sign opposes most of its history, or when it is the only fact whose flip closes that relation; otherwise
+    nothing is held (SIGN_UNDECIDED_HOLDS)."""
+    terms = sorted({k for inst in system for k, _ in inst})
+    own = frozenset({records[terms[0]].accession})
+    flips = [
+        (k, fixed)
+        for k in terms
+        if (fixed := _fixed(records, system, broken, {k}, -1.0))
+        and all(_exact(_contributions(records, inst, {k}, -1.0)) for inst in fixed)
+    ]
+    flipped: set[int] = set()
+    for inst in unexplained:  # decided per broken relation: a system can join several periods' statements
+        candidates = [k for k, fixed in flips if inst in fixed]
+        against = {k for k in candidates if neighbours.sign_against_history(k, own)}
+        if against:
+            flipped |= against
+        elif len(candidates) == 1:
+            flipped.add(candidates[0])
+        elif candidates and SIGN_UNDECIDED_HOLDS:
+            flipped |= {k for k, _ in inst}
+    return flipped
 
 
 def _fixed(
@@ -909,6 +1024,12 @@ def _known_mean(neighbours: _Neighbours, group: list[int], own: frozenset[str]) 
         if d is not None:
             found.append(d)
     return statistics.mean(found) if found else None
+
+
+def _exact(contributions: Sequence[float]) -> bool:
+    """Signed terms that should sum to zero do, within FLIP_TOLERANCE of the largest term."""
+    largest = max(abs(v) for v in contributions)
+    return largest == 0 or abs(sum(contributions)) <= FLIP_TOLERANCE * largest
 
 
 def _balances(contributions: Sequence[float]) -> bool:
@@ -1145,7 +1266,8 @@ def _sign_flipped_in(records: list[FundamentalFact], combo: tuple[int, ...], nei
     fixes: list[list[int]] = []
     for acc in sorted(accessions):
         flipped = [-v if records[i].accession == acc else v for i, v in zip(combo, values, strict=True)]
-        if _adds_up_with_every_term(flipped):
+        whole, first, second = flipped
+        if _adds_up_with_every_term(flipped) and _exact([whole, -first, -second]):
             fixes.append([i for i in combo if records[i].accession == acc])
     if not fixes:
         return set()  # neither a scale nor a sign error (e.g. a restatement): left to the other checks

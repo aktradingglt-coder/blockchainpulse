@@ -2831,22 +2831,36 @@ def test_a_small_genuine_line_still_pins_a_mis_scaled_cell() -> None:
 
 
 async def test_a_concepts_filter_does_not_bypass_the_checks() -> None:
-    """FY2025 current federal tax x1000 ($1.22T) is held in the full response, and also when only that concept is
-    asked for: the checks need total assets and the tax table, which the filter would otherwise remove."""
-    concept = "CurrentFederalTaxExpenseBenefit"
+    """FY2025 income-tax expense x1000 ($19T) is held when only that concept is asked for: the checks need total assets
+    and the tax table, which the filter would otherwise remove. The filtered response is then dated by the concept's
+    own newest shown column (the Q3-2025 10-Q), not by unrelated concepts of later filings, so it is stale once the
+    10-K holding the cell has been out a week."""
+    concept = "IncomeTaxExpenseBenefit"
     request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
     resp = await _replay(
         SecEdgarAdapter,
         request,
         {0: _scale_filing(NEWEST_10K, 1000.0, concept=concept, end="2025-12-31")},
         params={"concepts": concept},
+        now=datetime(2026, 2, 20, 12, tzinfo=UTC),
     )
     served = [f for f in resp.records if isinstance(f, FundamentalFact)]
     assert served
     assert {f.concept for f in served} == {concept}
-    assert all(f.value < 1e11 for f in served)
+    assert all(abs(f.value) < 1e11 for f in served)
+    assert str(resp.as_of)[:10] == "2025-10-31"
+    assert resp.freshness is not None
+    assert resp.freshness.status is Freshness.STALE
+    assert any("filing of 2026-02-06 are held" in n for n in resp.notes)
     with pytest.raises(NotFound):
         await _replay(SecEdgarAdapter, request, params={"concepts": "NoSuch"})
+
+
+async def test_a_filtered_request_for_a_concept_no_longer_reported_is_not_fresh() -> None:
+    """Amazon last tagged SalesRevenueNet in 2018: asked for alone, it is as old as that, whatever else was filed."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    with pytest.raises(Stale):
+        await _replay(SecEdgarAdapter, request, params={"concepts": "SalesRevenueNet"})
 
 
 def test_a_young_filers_mis_scaled_current_column_is_held() -> None:
@@ -2902,3 +2916,68 @@ def test_a_filing_that_flips_the_sign_of_reported_periods_is_held() -> None:
     records = [*quarters("q1", 1.0), *quarters("q2", 1.0), *quarters("k", -1.0)]
     held, _ = sec_scale.scale_errors(records)
     assert {records[i].accession for i in held} == {"k"}
+
+
+# ------------------------------------------------------------------------------------- review round 15 (P1)
+
+
+async def test_a_flipped_annual_net_income_breaks_comprehensive_income_and_is_held() -> None:
+    """A 10-K has no half-year sum; comprehensive income = net income + OCI (77,670 + 28,264 = 105,934) catches it."""
+
+    def flip(data: dict[str, Any]) -> None:
+        for f in data["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"]:
+            if f["accn"] == NEWEST_10K and f["end"] == "2025-12-31" and f.get("start") == "2025-01-01":
+                f["val"] = -f["val"]
+
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _json_edit(flip)})
+    served = [
+        f
+        for f in resp.records
+        if isinstance(f, FundamentalFact)
+        and f.concept == "NetIncomeLoss"
+        and f.period_end == date(2025, 12, 31)
+        and f.period_start == date(2025, 1, 1)
+    ]
+    assert all(f.value > 0 for f in served)
+
+
+@pytest.mark.parametrize(
+    ("rows", "flipped"),
+    [
+        (  # change in cash = operating + investing + financing, for a filer with no exchange-rate line
+            {
+                "CashAndCashEquivalentsPeriodIncreaseDecrease": (2e9, -1e9, 3.61e9),
+                "NetCashProvidedByUsedInOperatingActivities": (100e9, 110e9, 117e9),
+                "NetCashProvidedByUsedInInvestingActivities": (-20e9, -15e9, -18.81e9),
+                "NetCashProvidedByUsedInFinancingActivities": (-78e9, -96e9, -94.58e9),
+            },
+            "NetCashProvidedByUsedInOperatingActivities",
+        ),
+        (  # operating income = gross profit - operating expenses
+            {
+                "GrossProfit": (150e9, 170e9, 225.465e9),
+                "OperatingExpenses": (55e9, 60e9, 70.228e9),
+                "OperatingIncomeLoss": (95e9, 110e9, 155.237e9),
+            },
+            "OperatingIncomeLoss",
+        ),
+    ],
+)
+def test_a_flipped_headline_total_that_breaks_a_statement_identity_is_held(
+    rows: dict[str, tuple[float, float, float]], flipped: str
+) -> None:
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, y, v * (-1 if (c == flipped and y == 2025) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    earlier = [
+        (c, y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (flipped, 2025, "a")
+    }

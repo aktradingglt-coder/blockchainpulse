@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-10-22, round 14) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-10-23, round 15) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -291,9 +291,16 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    - US-GAAP identities: income tax = current + deferred = federal + state + foreign (and each part's breakdown),
      taxes paid, pre-tax domestic + foreign, SG&A, liabilities and equity = assets;
    - statutory tax = statutory rate × pre-tax income;
-   - statement identities: change in cash = operating + investing + financing + FX; comprehensive income = net income
-     + OCI to the parent; profit = net income + NCI share; cash-flow-hedge and AFS OCI rollforwards; gross profit;
-     current + noncurrent assets and liabilities;
+   - statement identities, each term under whichever of its usual tags the filing uses: change in cash (either cash
+     tag) = operating + investing + financing (+ FX, under any of three tags, when reported); comprehensive income =
+     net income + OCI (parent portion, or total); comprehensive income including NCI = profit + OCI, and = the
+     parent's + the NCI's; profit = net income + NCI share; income from continuing operations (or profit, or net
+     income) = pre-tax income − tax, with equity-method income added after tax where the pre-tax line excludes it;
+     pre-tax income = revenue − costs and expenses; operating income = gross profit − operating expenses, and =
+     revenue − costs and expenses; cash-flow-hedge and AFS OCI rollforwards; gross profit; current + noncurrent
+     assets and liabilities. Several of these do not fit every filer's statements (a net-income line that includes
+     discontinued operations, costs that include non-operating items): a relation that no repair below explains is
+     left alone, so a variant that does not fit costs nothing;
    - changes = closing − opening balance (goodwill, cash);
    - relations whose lines and signs vary by filer (rate reconciliation, OCI and its parts, the unrecognized tax
      benefit rollforward): the signs are learned from the filing's own table, and the relation is used only if they
@@ -304,9 +311,13 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    A relation counts as broken evidence only if rescaling a minimal group of its facts by a power of 1000 closes it,
    and only if the rescaled facts and the rest are both needed for it to close. That group is held if its own history
    (other filings, or failing that its own comparatives as evidence against it) blames it. Otherwise the facts of the
-   relations it closes are held. When no rescale closes a broken relation, flipping the sign of one fact may: that fact
-   is held when its sign is the opposite of all of its (at least two) neighbouring periods, or when it is the only
-   fact whose flip closes the system; otherwise the facts of the relations a flip closes are held.
+   relations it closes are held. Statement identities and footnote tables are searched for rescales as separate
+   systems (joined, the tax table would be too large to search whole). When no rescale explains a broken relation,
+   flipping the sign of one fact may, closing it exactly (within 0.1%: reported figures are exact up to rounding, and
+   a flip that lands inside the 1% tolerance is a coincidence) without breaking any other relation of the joined
+   system, so a total another identity confirms is never the one flipped. The fact is held when its sign opposes
+   most of its (at least two) neighbouring periods, or when it is the only fact whose flip closes that relation;
+   otherwise nothing is held.
 7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
    is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
    the 15 filers below with the bound itself switched off:
@@ -344,7 +355,8 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
     the filing's own other periods within 400 days, and the column sits a power of 1000 from them (median within
     10^0.5, 60% of facts within 10^1). For a young filer this is often the only evidence; it adds no clean holds.
 
-All checks run on every concept the company reports; a `concepts` filter narrows only what is returned.
+All checks run on every concept the company reports; a `concepts` filter narrows only what is returned, and the
+returned concepts alone date the response (a concept last reported years ago is as old as its last report).
 
 A filing's current-period column is its us-gaap currency facts for its latest period end reported with at least half as
 many facts as its busiest one (a cover public float, a footnote amount dated after the quarter or a cover-only

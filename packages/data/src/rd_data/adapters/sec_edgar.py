@@ -338,7 +338,12 @@ class SecEdgarAdapter(BaseAdapter):
         usable = [records[i] for i in kept if i not in held_all]
         # The response is as fresh as the newest filing whose own figures (its current-period column) are shown; a
         # filing whose current column is held only contributes comparatives and does not make old figures current.
-        columns = current_columns(records)
+        # With a `concepts` filter, only the returned concepts date the response: a concept last reported years ago is
+        # as old as its last report, whatever else the company filed since.
+        returned = set(kept)
+        columns = {
+            acc: mine for acc, idx in current_columns(records).items() if (mine := [i for i in idx if i in returned])
+        }
         shown = {acc for acc, idx in columns.items() if any(i not in held_all for i in idx)}
         superseded = set(columns) - shown
         filed_on = {f.accession: f.filed for f in records}
