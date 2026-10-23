@@ -2981,3 +2981,63 @@ def test_a_flipped_headline_total_that_breaks_a_statement_identity_is_held(
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
         (flipped, 2025, "a")
     }
+
+
+# ------------------------------------------------------------------------------------- review round 16 (P1)
+
+
+def _three_years(rows: dict[str, tuple[float, float, float]], flipped: str) -> list[FundamentalFact]:
+    """A 10-K reporting 2023-2025 (with ``flipped``'s 2025 cell sign-flipped) and last year's 10-K, on scale."""
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, y, v * (-1 if (c == flipped and y == 2025) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    earlier = [
+        (c, y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    return [*_filing(earlier, accession="earlier"), *_filing(facts)]
+
+
+def test_a_loosely_closing_relation_does_not_veto_an_exact_sign_repair() -> None:
+    """XOM: profit = net income + NCI closes exactly; comprehensive income = net income + total OCI (which includes the
+    NCI's share) only within 0.95%. A flipped net income closes the first exactly and is held; the loose relation
+    does not save it."""
+    rows = {
+        "ProfitLoss": (37e9, 34e9, 29.764e9),
+        "NetIncomeLoss": (36e9, 33e9, 28.844e9),
+        "NetIncomeLossAttributableToNoncontrollingInterest": (1e9, 1e9, 0.92e9),
+        "OtherComprehensiveIncomeLossNetOfTax": (-1e9, 2e9, 3.4e9),
+        "ComprehensiveIncomeNetOfTax": (35e9, 35e9, 31.938e9),  # 28.844 + 3.4 = 32.244: 0.95% off
+    }
+    records = _three_years(rows, "NetIncomeLoss")
+    held, _ = sec_scale.scale_errors(records)
+    assert ("NetIncomeLoss", 2025, "a") in {
+        (records[i].concept, records[i].period_end.year, records[i].accession) for i in held
+    }
+
+
+def test_a_banks_flipped_revenue_breaks_interest_plus_noninterest_income() -> None:
+    rows = {
+        "Revenues": (78e9, 81e9, 85.225e9),
+        "InterestIncomeExpenseNet": (48e9, 54e9, 58e9),
+        "NoninterestIncome": (30e9, 27e9, 27.225e9),
+    }
+    records = _three_years(rows, "Revenues")
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("Revenues", 2025, "a")
+    }
+
+
+async def test_a_tax_total_flipped_through_a_whole_10k_is_held() -> None:
+    """The sign error carried through every column of the 10-K: the rate reconciliation, whose signs are learned from
+    the filing, adapts to it, but total = current + deferred breaks exactly in every year."""
+    concept = "IncomeTaxExpenseBenefit"
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+    resp = await _replay(SecEdgarAdapter, request, {0: _scale_filing(NEWEST_10K, -1.0, concept=concept)})
+    served = [
+        f for f in resp.records if isinstance(f, FundamentalFact) and f.concept == concept and f.accession == NEWEST_10K
+    ]
+    assert all(f.value > 0 for f in served)

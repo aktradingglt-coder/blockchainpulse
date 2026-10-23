@@ -1,11 +1,11 @@
 # STATUS.md
 
-_Last updated: 2026-10-21_
+_Last updated: 2026-10-23_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–15 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–19); awaiting review round 16.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–16 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–20); awaiting review round 17.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -122,6 +122,11 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   never-negative list: asset managers can report it negative); MMM's cash-flow statement does not close as tagged, so
   its flips are served; a small OCI flip can sit within the 1% tolerance. Measure cost lines for the never-negative
   list before widening coverage.
+- P2 (from P1 review round 16, minor): a `concepts` request for an annual-only line is blocked 120 days after the
+  10-K (the same facts are served in an unfiltered response); decide per-concept freshness for annual lines with the
+  report layer. EPS sign flips are served (an EPS-vs-net-income sign check would hold genuine data in 28 of 3,600
+  clean pairs; use net income to common shareholders). Flips with no exact relation in the response (CostOfRevenue
+  without a gross-profit line; GE revenue) remain.
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after

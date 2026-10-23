@@ -318,6 +318,16 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         _term(*_REVENUE, coef=-1.0),
         _term("CostsAndExpenses", coef=1.0),
     ),
+    (  # a bank's revenue = net interest income + noninterest income
+        _term("Revenues", coef=1.0),
+        _term("InterestIncomeExpenseNet", coef=-1.0),
+        _term("NoninterestIncome", coef=-1.0),
+    ),
+    (
+        _term("Revenues", coef=1.0),
+        _term("RevenueFromContractWithCustomerExcludingAssessedTax", coef=-1.0),
+        _term("RevenueNotFromContractWithCustomer", coef=-1.0),
+    ),
     (_term("Assets", coef=1.0), _term("AssetsCurrent", coef=-1.0), _term("AssetsNoncurrent", coef=-1.0)),
     (
         _term("Liabilities", coef=1.0),
@@ -731,7 +741,8 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     that does not decide, the whole system is held. A relation that holds as reported around a held fact is held with
     it when its other facts are off their own history too (the table was mis-scaled together); when they sit on their
     history, the relation holding is evidence that the held fact is right, not a reason to hold more."""
-    footnotes, statements = _instances(records)
+    tables, learned, statements = _instances(records)
+    footnotes = tables + learned
     instances = footnotes + statements
     broken = [inst for inst in instances if not _balances(_contributions(records, inst))]
     consistent = [inst for inst in instances if inst not in broken]
@@ -748,7 +759,9 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
         unexplained = [inst for inst in system if inst in broken and inst not in explained]
         if unexplained:
             system_broken = [inst for inst in system if inst in broken]
-            out |= _sign_repair(records, system, system_broken, unexplained, neighbours)
+            out |= _sign_repair(
+                records, system, system_broken, unexplained, learned=set(learned), neighbours=neighbours
+            )
     known = held | out
     for _ in range(len(IDENTITIES)):  # spread through nested identities (total -> current -> current federal)
         spread: set[int] = set()
@@ -764,9 +777,9 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     return out
 
 
-def _instances(records: list[FundamentalFact]) -> tuple[list[_Instance], list[_Instance]]:
+def _instances(records: list[FundamentalFact]) -> tuple[list[_Instance], list[_Instance], list[_Instance]]:
     """Every exact relation the response lets us check, as signed terms that sum to zero: (footnote and tax-table
-    relations, statement identities)."""
+    identities, relations with signs learned from the filing, statement identities)."""
     wanted = {c for total, parts in IDENTITIES for c in (total, *parts)} | {STATUTORY_AMOUNT, *PRETAX_TOTALS}
     wanted |= {c for pair in CHANGES for c in pair}
     wanted |= {c for terms in SIGNED_IDENTITIES for concepts, _, _ in terms for c in concepts}
@@ -797,7 +810,7 @@ def _instances(records: list[FundamentalFact]) -> tuple[list[_Instance], list[_I
             opening = index.get((accession, unit, None, start - timedelta(days=1)), {}).get(balance)
             if change in terms and closing is not None and opening is not None:
                 out.append(((terms[change], 1.0), (closing, -1.0), (opening, 1.0)))
-    return out + _learned_relations(records, index), statements
+    return out, _learned_relations(records, index), statements
 
 
 def _signed_instance(signed: tuple[_Term, ...], terms: dict[str, int]) -> _Instance | None:
@@ -935,21 +948,20 @@ def _sign_repair(
     system: list[_Instance],
     broken: list[_Instance],
     unexplained: list[_Instance],
+    *,
+    learned: AbstractSet[_Instance],
     neighbours: _Neighbours,
 ) -> set[int]:
     """Broken relations no rescale explains may be explained by a single fact entered with the wrong sign: flipping it
-    closes the relation exactly (FLIP_TOLERANCE) without breaking any relation of the system (statement identities and
-    footnote tables together, so a total that another identity confirms is never the one flipped). The fact is held
-    when its sign opposes most of its history, or when it is the only fact whose flip closes that relation; otherwise
-    nothing is held (SIGN_UNDECIDED_HOLDS)."""
+    closes the relation exactly (FLIP_TOLERANCE) without breaking any relation of the system that closes exactly as
+    reported (statement identities and footnote tables together, so a total that another identity confirms is never
+    the one flipped). A relation that closes only loosely, or whose signs were learned from the filing itself (they
+    adapt to a sign error carried through the whole filing), does not veto. The fact is held when its sign opposes
+    most of its history, or when it is the only fact whose flip closes that relation; otherwise nothing is held
+    (SIGN_UNDECIDED_HOLDS)."""
     terms = sorted({k for inst in system for k, _ in inst})
     own = frozenset({records[terms[0]].accession})
-    flips = [
-        (k, fixed)
-        for k in terms
-        if (fixed := _fixed(records, system, broken, {k}, -1.0))
-        and all(_exact(_contributions(records, inst, {k}, -1.0)) for inst in fixed)
-    ]
+    flips = [(k, fixed) for k in terms if (fixed := _flip_fixes(records, system, broken, learned, k))]
     flipped: set[int] = set()
     for inst in unexplained:  # decided per broken relation: a system can join several periods' statements
         candidates = [k for k, fixed in flips if inst in fixed]
@@ -961,6 +973,27 @@ def _sign_repair(
         elif candidates and SIGN_UNDECIDED_HOLDS:
             flipped |= {k for k, _ in inst}
     return flipped
+
+
+def _flip_fixes(
+    records: list[FundamentalFact],
+    system: list[_Instance],
+    broken: list[_Instance],
+    learned: AbstractSet[_Instance],
+    k: int,
+) -> list[_Instance]:
+    """The broken relations that flipping fact k closes exactly (each needing both sides), or none if the flip breaks a
+    fixed relation that closes exactly as reported."""
+    closed = []
+    for inst in system:
+        after = _contributions(records, inst, {k}, -1.0)
+        if inst not in broken:
+            vetoes = inst not in learned and _exact(_contributions(records, inst))
+            if vetoes and not _balances(after):
+                return []
+        elif _exact(after) and _closes_with_both_sides(after, [j == k for j, _ in inst]):
+            closed.append(inst)
+    return closed
 
 
 def _fixed(

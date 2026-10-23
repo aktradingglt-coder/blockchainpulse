@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-10-23, round 15) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-10-23, round 16) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -297,10 +297,12 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      parent's + the NCI's; profit = net income + NCI share; income from continuing operations (or profit, or net
      income) = pre-tax income − tax, with equity-method income added after tax where the pre-tax line excludes it;
      pre-tax income = revenue − costs and expenses; operating income = gross profit − operating expenses, and =
-     revenue − costs and expenses; cash-flow-hedge and AFS OCI rollforwards; gross profit; current + noncurrent
-     assets and liabilities. Several of these do not fit every filer's statements (a net-income line that includes
-     discontinued operations, costs that include non-operating items): a relation that no repair below explains is
-     left alone, so a variant that does not fit costs nothing;
+     revenue − costs and expenses; a bank's revenue = net interest income + noninterest income (588 of 588 clean
+     instances within 0.1%); revenue = contract revenue + other revenue (90 of 90); cash-flow-hedge and AFS OCI
+     rollforwards; gross profit; current + noncurrent assets and liabilities. Several of these do not fit every
+     filer's statements (a net-income line that includes discontinued operations, costs that include non-operating
+     items, total OCI that includes the NCI's share): a relation that no repair below explains is left alone, and one
+     that closes only loosely never vetoes a sign repair;
    - changes = closing − opening balance (goodwill, cash);
    - relations whose lines and signs vary by filer (rate reconciliation, OCI and its parts, the unrecognized tax
      benefit rollforward): the signs are learned from the filing's own table, and the relation is used only if they
@@ -314,8 +316,10 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    relations it closes are held. Statement identities and footnote tables are searched for rescales as separate
    systems (joined, the tax table would be too large to search whole). When no rescale explains a broken relation,
    flipping the sign of one fact may, closing it exactly (within 0.1%: reported figures are exact up to rounding, and
-   a flip that lands inside the 1% tolerance is a coincidence) without breaking any other relation of the joined
-   system, so a total another identity confirms is never the one flipped. The fact is held when its sign opposes
+   a flip that lands inside the 1% tolerance is a coincidence) without breaking any relation of the joined system
+   that closes exactly as reported, so a total another identity confirms is never the one flipped. Relations that
+   close only loosely, and relations whose signs were learned from the filing (they adapt to a sign error carried
+   through a whole filing, as a flipped tax total in every column of a 10-K), do not veto a flip. The fact is held when its sign opposes
    most of its (at least two) neighbouring periods, or when it is the only fact whose flip closes that relation;
    otherwise nothing is held.
 7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
@@ -388,7 +392,7 @@ On clean data:
 - AMZN: 10 facts held, all in its FY2014 10-K, which reports the 2013–14 quarterly and annual income-tax expense with
   the opposite sign to every other filing of those periods (a real error in the recorded data); 4 genuine one-offs
   flagged.
-- The 15 filers together: 333 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
+- The 15 filers together: 330 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
   classified, of real errors in old filings (share counts; NVDA's and MMM's option intrinsic values; sign
   inconsistencies such as TSLA's positive 2010–11 domestic pre-tax income beside a pre-tax loss, or goodwill
   "increases" in periods goodwill fell) and genuine values withheld. Before the round-11 changes the same data held
