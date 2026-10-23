@@ -4,8 +4,8 @@ _Last updated: 2026-10-23_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–16 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–20); awaiting review round 17.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–17 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–21); awaiting review round 18.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -127,6 +127,10 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   report layer. EPS sign flips are served (an EPS-vs-net-income sign check would hold genuine data in 28 of 3,600
   clean pairs; use net income to common shareholders). Flips with no exact relation in the response (CostOfRevenue
   without a gross-profit line; GE revenue) remain.
+- P2 (from P1 review round 17, minor): EPS entered x100 or /100 is served (x1000 is held); EPS = net income / diluted
+  shares is only approximate (closes within 2% for non-banks, not for banks). AMZN reports no total-liabilities line,
+  so a flipped AMZN equity breaks no relation in the response. Revenue = contract + other revenue is calibrated on
+  one filer (BRK); a relation that does not close is left alone.
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after

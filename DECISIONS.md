@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-10-23, round 16) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-10-23, round 17) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -298,7 +298,11 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      income) = pre-tax income − tax, with equity-method income added after tax where the pre-tax line excludes it;
      pre-tax income = revenue − costs and expenses; operating income = gross profit − operating expenses, and =
      revenue − costs and expenses; a bank's revenue = net interest income + noninterest income (588 of 588 clean
-     instances within 0.1%); revenue = contract revenue + other revenue (90 of 90); cash-flow-hedge and AFS OCI
+     instances within 0.1%); revenue = contract revenue + other revenue (90 of 90, one filer); liabilities and equity
+     = liabilities + equity (including NCI, or the parent's and the NCI apart) + temporary equity where reported (in
+     total, or the parent's and the redeemable NCI apart; clean instances closing per variant: 1,710 and 1,736 of
+     1,762 with total equity, 849 and 889 of 889 with the parent's and the NCI apart); equity including NCI =
+     the parent's + NCI (934 of 935); cash-flow-hedge and AFS OCI
      rollforwards; gross profit; current + noncurrent assets and liabilities. Several of these do not fit every
      filer's statements (a net-income line that includes discontinued operations, costs that include non-operating
      items, total OCI that includes the NCI's share): a relation that no repair below explains is left alone, and one
@@ -392,13 +396,13 @@ On clean data:
 - AMZN: 10 facts held, all in its FY2014 10-K, which reports the 2013–14 quarterly and annual income-tax expense with
   the opposite sign to every other filing of those periods (a real error in the recorded data); 4 genuine one-offs
   flagged.
-- The 15 filers together: 330 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
+- The 15 filers together: 332 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
   classified, of real errors in old filings (share counts; NVDA's and MMM's option intrinsic values; sign
   inconsistencies such as TSLA's positive 2010–11 domestic pre-tax income beside a pre-tax loss, or goodwill
   "increases" in periods goodwill fell) and genuine values withheld. Before the round-11 changes the same data held
   3,789.
 - The 59 AMZN 10-K and 10-Q filing dates since 2012, each as an as-of date: from 2015-01-30 on, every snapshot holds
-  the FY2014 10-K's 10 sign-flipped tax facts (at the four 2015 dates also 4–6 of that filing's rate-reconciliation
+  the FY2014 10-K's 10 sign-flipped tax facts (at the four 2015 dates also 2–5 of that filing's rate-reconciliation
   lines, held with them; at the filing's own date its 2014 tax figures are withheld until the next filing restates
   them); besides that filing, 10 snapshots hold 1–4 genuine facts in 3 concepts (purchase obligations, OCI translation,
   noncurrent restricted cash). No wrong value is served at any date. The cost is withholding, which is the side these

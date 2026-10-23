@@ -328,6 +328,44 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         _term("RevenueFromContractWithCustomerExcludingAssessedTax", coef=-1.0),
         _term("RevenueNotFromContractWithCustomer", coef=-1.0),
     ),
+    # liabilities and equity = liabilities + equity (including NCI, or the parent's and the NCI apart) + temporary
+    # equity where reported (in total, or as the parent's and the redeemable NCI apart)
+    *(
+        (
+            _term("LiabilitiesAndStockholdersEquity", coef=1.0),
+            _term("Liabilities", coef=-1.0),
+            *equity,
+            *temporary,
+        )
+        for equity in (
+            (
+                _term(
+                    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+                    "StockholdersEquity",
+                    coef=-1.0,
+                ),
+            ),
+            (_term("StockholdersEquity", coef=-1.0), _term("MinorityInterest", coef=-1.0)),
+        )
+        for temporary in (
+            (
+                _term(
+                    "TemporaryEquityCarryingAmountIncludingPortionAttributableToNoncontrollingInterests",
+                    coef=-1.0,
+                    optional=True,
+                ),
+            ),
+            (
+                _term("TemporaryEquityCarryingAmountAttributableToParent", coef=-1.0, optional=True),
+                _term("RedeemableNoncontrollingInterestEquityCarryingAmount", coef=-1.0, optional=True),
+            ),
+        )
+    ),
+    (
+        _term("StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", coef=1.0),
+        _term("StockholdersEquity", coef=-1.0),
+        _term("MinorityInterest", coef=-1.0),
+    ),
     (_term("Assets", coef=1.0), _term("AssetsCurrent", coef=-1.0), _term("AssetsNoncurrent", coef=-1.0)),
     (
         _term("Liabilities", coef=1.0),
@@ -797,7 +835,7 @@ def _instances(records: list[FundamentalFact]) -> tuple[list[_Instance], list[_I
             if total in terms and all(p in terms for p in parts):
                 out.append(((terms[total], 1.0), *((terms[p], -1.0) for p in parts)))
         for signed in SIGNED_IDENTITIES:
-            if (instance := _signed_instance(signed, terms)) is not None:
+            if (instance := _signed_instance(signed, terms)) is not None and instance not in statements:
                 statements.append(instance)
         rate = rates.get((accession, start, end))
         pretax = next((terms[c] for c in PRETAX_TOTALS if c in terms), None)

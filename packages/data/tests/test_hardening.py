@@ -3041,3 +3041,34 @@ async def test_a_tax_total_flipped_through_a_whole_10k_is_held() -> None:
         f for f in resp.records if isinstance(f, FundamentalFact) and f.concept == concept and f.accession == NEWEST_10K
     ]
     assert all(f.value > 0 for f in served)
+
+
+# ------------------------------------------------------------------------------------- review round 17 (P1)
+
+
+@pytest.mark.parametrize("with_temporary_equity", [False, True])
+def test_a_flipped_total_equity_breaks_liabilities_plus_equity_and_is_held(with_temporary_equity: bool) -> None:
+    """liabilities and equity = liabilities + equity (+ temporary equity, the parent's and the redeemable NCI apart)."""
+    rows = {
+        "LiabilitiesAndStockholdersEquity": (352e9, 364e9, 359.24e9),
+        "Liabilities": (290e9, 308e9, 251.72e9),
+        "StockholdersEquity": (62e9, 56e9, 107.52e9),
+    }
+    if with_temporary_equity:
+        rows["Liabilities"] = (288e9, 306e9, 249.72e9)
+        rows["TemporaryEquityCarryingAmountAttributableToParent"] = (1.5e9, 1.5e9, 1.5e9)
+        rows["RedeemableNoncontrollingInterestEquityCarryingAmount"] = (0.5e9, 0.5e9, 0.5e9)
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, -y, v * (-1 if (c == "StockholdersEquity" and y == 2025) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    earlier = [
+        (c, -y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("StockholdersEquity", 2025, "a")
+    }
