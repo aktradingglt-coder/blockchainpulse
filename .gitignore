@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+# Node
+node_modules/
+# Local env and secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Tools and artefacts
+.tools/
+dist/
+build/
+coverage.json
+.coverage.*
+.recordings-failed/

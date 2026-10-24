@@ -1,0 +1,8 @@
+# Defaults; the FEATURE_FLAGS env var (JSON object) overrides individual keys at runtime.
+schema_version: 1
+flags:
+  provider_fred: false          # D-010 legal review pending
+  provider_twelvedata: false    # no contract
+  provider_databento: false     # no contract
+  provider_defillama: false     # terms review pending
+  publishing_enabled: true      # global kill switch for publishing (admin console)

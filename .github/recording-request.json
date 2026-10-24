@@ -1,0 +1,1 @@
+{"providers": ["cftc", "sec_edgar", "us_treasury", "kraken_futures", "eia"], "requests": [], "requested": "2026-10-21 P1 review round 2: re-record all keyless providers under the stricter QA; sources cite the CI run only"}
