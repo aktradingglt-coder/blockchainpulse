@@ -5,7 +5,7 @@ _Last updated: 2026-11-10_
 ## Current phase
 
 **P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–21 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–25); awaiting review round 22.** P2 does not start until the P1 reviewer returns PASS.
+major findings fixed (ledger rounds 5–25); awaiting review round 22 (ledger row 25 written).** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
