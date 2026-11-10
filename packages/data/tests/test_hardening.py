@@ -3282,3 +3282,95 @@ def test_noninterest_expense_cannot_be_negative() -> None:
     records = _filing([("NoninterestExpense", 2025, -54e9)])
     held, _ = sec_scale.scale_errors(records)
     assert held == {0}
+
+
+# ------------------------------------------------------------------------------------- review round 22 (P1)
+
+
+@pytest.mark.parametrize(
+    "flipped", ["InterestAndDividendIncomeOperating", "InterestExpense", "InterestIncomeExpenseNet"]
+)
+def test_a_banks_flipped_interest_line_breaks_net_interest_income(flipped: str) -> None:
+    """Net interest income = interest income - interest expense closes exactly at every bank, so a flipped gross
+    interest line (or the net) is held."""
+    rows = {  # synthetic round figures, not any bank's
+        "InterestAndDividendIncomeOperating": (90e9, 95e9, 100e9),
+        "InterestExpense": (44e9, 47e9, 50e9),
+        "InterestIncomeExpenseNet": (46e9, 48e9, 50e9),
+    }
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, y, v * (-1 if (c == flipped and y == 2025) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    earlier = [
+        (c, y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (flipped, 2025, "a")
+    }
+
+
+@pytest.mark.parametrize(
+    "flipped", ["RetainedEarningsAccumulatedDeficit", "AccumulatedOtherComprehensiveIncomeLossNetOfTax"]
+)
+def test_equity_components_count_preferred_stock_tagged_with_its_paid_in_capital(flipped: str) -> None:
+    """JPM tags preferred stock including its paid-in capital under its own tag: equity = preferred + common +
+    paid-in capital + retained earnings + AOCI - treasury closes with it, and catches a flipped component."""
+    rows = {  # synthetic round figures, not any bank's
+        "StockholdersEquity": (330e9, 350e9, 373e9),
+        "PreferredStockIncludingAdditionalPaidInCapitalNetOfDiscount": (27e9, 20e9, 20e9),
+        "CommonStockValue": (4e9, 4e9, 4e9),
+        "AdditionalPaidInCapital": (90e9, 90e9, 90e9),
+        "RetainedEarningsAccumulatedDeficit": (380e9, 410e9, 445e9),
+        "AccumulatedOtherComprehensiveIncomeLossNetOfTax": (-11e9, -10e9, -8e9),
+        "TreasuryStockValue": (160e9, 164e9, 178e9),
+    }
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, -y, v * (-1 if (c == flipped and y == 2025) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    earlier = [
+        (c, -y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (flipped, 2025, "a")
+    }
+
+
+@pytest.mark.parametrize(
+    "concept",
+    [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "RetainedEarningsAccumulatedDeficit",
+        "AccumulatedOtherComprehensiveIncomeLossNetOfTax",
+    ],
+)
+def test_an_equity_balance_reported_with_the_opposite_sign_by_a_later_filing_is_held(concept: str) -> None:
+    """A 10-K that flips its whole equity row restates earlier year-ends with the opposite sign to the filings that
+    reported them: those cells are held, the earlier filings stand."""
+    values = {2021: 60e9, 2022: 50e9, 2023: 62e9, 2024: 57e9}
+    e1 = _filing([(concept, -y, values[y]) for y in (2021, 2022)], accession="e1")
+    e2 = _filing([(concept, -y, values[y]) for y in (2021, 2022, 2023)], accession="e2")
+    e3 = _filing([(concept, -y, values[y]) for y in (2022, 2023)], accession="e3")
+    newest = _filing([(concept, -y, -values[y]) for y in (2022, 2023, 2024)], accession="a")
+    records = [*e1, *e2, *e3, *newest]
+    held, _ = sec_scale.scale_errors(records)
+    held_cells = {(records[i].period_end.year, records[i].accession) for i in held}
+    assert {(2022, "a"), (2023, "a")} <= held_cells
+    assert all(acc == "a" for _, acc in held_cells)
+
+
+def test_a_banks_interest_income_cannot_be_negative() -> None:
+    for concept in ("InterestAndDividendIncomeOperating", "InterestIncomeOperating"):
+        records = _filing([(concept, 2025, -50e9)])
+        held, _ = sec_scale.scale_errors(records)
+        assert held == {0}

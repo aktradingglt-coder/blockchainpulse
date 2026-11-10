@@ -4,8 +4,8 @@ _Last updated: 2026-11-10_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–21 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–25); awaiting review round 22 (ledger row 25 written).** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–22 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–26); awaiting review round 23.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -147,6 +147,11 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   flips (FX on cash, small OCI and AOCI lines, NCI lines) and lines with no exact relation in company facts (SG&A parts,
   deferred tax without current tax, taxes paid without a foreign line, OCI components) need the calculation linkbase;
   historical snapshots withhold some genuine then-newest figures (XOM 11 of 68 snapshots, AAPL 3 of 69).
+- P2 (from P1 review round 22, minor): a flipped NCI share of OCI is not repaired where the opposite-sign NCI OCI
+  convention closes (veto-only, C FY2025 $125M served); WFC equity and most BAC filings do not close the components
+  identity; BRK and GE costs-and-expenses, GE revenue and BRK provision have no exact relation; EPS flips cannot be
+  made exact (EPS and net income differ in sign in 14 of 3,654 clean pairs); bank historical snapshots withhold some
+  genuine then-newest facts (JPM 36 facts on 13 of 69 dates, WFC 28 on 15 of 69), unchanged since round 20.
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after

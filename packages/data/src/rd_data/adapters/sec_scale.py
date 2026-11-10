@@ -110,12 +110,17 @@ SIGN_CHECKED = frozenset(
         "OperatingExpenses",
         "ComprehensiveIncomeNetOfTax",
         "RevenuesNetOfInterestExpense",
+        # equity balances: no period in the 15 filers' clean data is reported with opposite signs by two filings
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "RetainedEarningsAccumulatedDeficit",
+        "AccumulatedOtherComprehensiveIncomeLossNetOfTax",
     }
 )
 #: When the sign history does not single out one side of a sign error, hold every candidate (True) or none (False).
 SIGN_UNDECIDED_HOLDS = False
-#: Balances and totals that cannot be negative: of about 33,800 clean facts of these concepts in 15 large filers, one is
-#: (C's Q4-2020 cost of revenue, -46M). A negative one is a sign error and is held.
+#: Balances and totals that cannot be negative: of 33,433 clean 10-K and 10-Q facts of these concepts in 15 large
+#: filers, one is (C's Q4-2020 cost of revenue, -46M). A negative one is a sign error and is held.
 NEVER_NEGATIVE = frozenset(
     {
         "Assets",
@@ -141,6 +146,8 @@ NEVER_NEGATIVE = frozenset(
         "CostOfGoodsAndServicesSold",
         "CommonStockValue",
         "NoninterestExpense",
+        "InterestAndDividendIncomeOperating",
+        "InterestIncomeOperating",
         "CommonStockSharesOutstanding",
         "WeightedAverageNumberOfSharesOutstandingBasic",
     }
@@ -273,11 +280,19 @@ _CAPITAL: tuple[tuple[_Term, ...], ...] = (
 )
 
 
+#: Preferred stock, at par or (banks: JPM, BAC) including its paid-in capital.
+_PREFERRED = (
+    "PreferredStockValue",
+    "PreferredStockIncludingAdditionalPaidInCapitalNetOfDiscount",
+    "PreferredStockIncludingAdditionalPaidInCapital",
+)
+
+
 def _equity_components(capital: tuple[_Term, ...], *, treasury: float, aoci: float) -> tuple[_Term, ...]:
     return (
         _term("StockholdersEquity", coef=1.0),
         *capital,
-        _term("PreferredStockValue", coef=-1.0, optional=True),
+        _term(*_PREFERRED, coef=-1.0, optional=True),
         _term("TreasuryStockValue", "TreasuryStockCommonValue", coef=treasury, optional=True),
         _term("AccumulatedOtherComprehensiveIncomeLossNetOfTax", coef=aoci, optional=True),
         _term("RetainedEarningsAccumulatedDeficit", coef=-1.0),
@@ -387,6 +402,11 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         _term("RevenuesNetOfInterestExpense", coef=1.0),
         _term("InterestIncomeExpenseNet", coef=-1.0),
         _term("NoninterestIncome", coef=-1.0),
+    ),
+    (  # a bank's net interest income = interest income - interest expense
+        _term("InterestIncomeExpenseNet", coef=1.0),
+        _term("InterestAndDividendIncomeOperating", "InterestIncomeOperating", coef=-1.0),
+        _term("InterestExpense", "InterestExpenseOperating", coef=1.0),
     ),
     # a bank's pre-tax income = net revenue (as either total, or as its two parts) - provision for credit losses -
     # noninterest expense

@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-11-10, round 21) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-11-10, round 22) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -302,15 +302,18 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      instances within 0.1%), and so is its net revenue where tagged as such (223 of 223, JPM and WFC); a bank's
      pre-tax income = net revenue (either total, or its two parts) − provision for credit losses − noninterest expense
      (223 of 223 with net revenue, 365 of 373 with `Revenues`, 637 of 645 with the parts; every miss is a BAC 2010–11
-     filing); net interest income after the provision = net interest income − provision (365 of 365 at JPM and WFC
-     with the total provision, 176 of 176 at C with the loan-loss provision alone); revenue = contract revenue + other revenue (90 of 90, one filer); liabilities and equity
+     filing); a bank's net interest income = interest income − interest expense (892 of 892: JPM 227, WFC 225, BAC
+     225, C 215; it applies at no other filer); net interest income after the provision = net interest income −
+     provision (with the total provision 370 of 478: 365 of 365 at JPM and WFC, 5 of 113 at C; with the loan-loss
+     provision alone 178 of 198: 176 of 176 at C, 2 of 22 at JPM; an instance that does not close is left alone); revenue = contract revenue + other revenue (90 of 90, one filer); liabilities and equity
      = liabilities + equity (including NCI, or the parent's and the NCI apart) + temporary equity where reported (in
      total, or the parent's and the redeemable NCI apart; clean instances closing per variant: 1,710 and 1,736 of
      1,762 with total equity, 849 and 889 of 889 with the parent's and the NCI apart); equity including NCI =
      the parent's + NCI (934 of 935); equity = common stock + paid-in capital (or the two as one line, or, for a
-     filing with no paid-in-capital line, no-par common stock alone, as XOM tags it) + preferred
-     − treasury stock + AOCI + retained earnings (1,182 of 1,347 with the lines apart; 297 of 394 with one line;
-     AMZN 138 of 138; it does not fit banks). With treasury stock tagged as a negative amount (a convention filers do
+     filing with no paid-in-capital line, no-par common stock alone, as XOM tags it) + preferred (at par, or
+     including its paid-in capital as JPM and BAC tag it) − treasury stock + AOCI + retained earnings (1,195 of 1,357
+     with the lines apart; 305 of 394 with one line; AMZN 138 of 138, JPM 130 of 140, C 132 of 132; WFC (21 of 138)
+     and most BAC filings (8 of 96) do not close). With treasury stock tagged as a negative amount (a convention filers do
      use: GE re-tagged it so in 2015) the same relation is kept as a veto only: where it closes exactly as reported,
      its facts are taken as consistent, and neither a rescale nor a flip of them counts as a repair. AOCI has no such
      convention in the calibration set (the opposite sign closes 1 clean instance of 1,741, by coincidence), so AOCI
@@ -369,12 +372,14 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
 9. *Balance jumps.* A balance in a recent filing that moved more than 10^2 from the previous period end is flagged.
 10. *Impossible signs.* A negative value of a balance or total that cannot be negative is held: assets, liabilities,
     their current parts, liabilities and equity, cash, PP&E, goodwill, intangibles, inventory, receivables, payables,
-    long-term debt, contract revenue, cost of revenue and of goods sold, a bank's noninterest expense, common stock at
-    par and share counts (25 concepts; of about 33,800 clean facts, counted in every taxonomy, one is negative: a
+    long-term debt, contract revenue, cost of revenue and of goods sold, a bank's interest income and noninterest
+    expense, common stock at par and share counts (27 concepts; of 33,433 clean facts in 10-K and 10-Q filings,
+    counted in every taxonomy before the adapter's own filters, one is negative: a
     Citi Q4-2020 cost of revenue of −$46M, held with its annual figure;
     total `Revenues` is left out, as asset managers can report it negative). For headline totals (net, operating and
     pre-tax income, tax expense, net cash flows, revenue, a bank's net revenue, cost of revenue, operating expenses,
-    comprehensive income),
+    comprehensive income) and equity balances (equity, equity including NCI, retained earnings, AOCI: no clean
+    period of these is reported with opposite signs by two filings),
     filings that report the same amount with opposite signs, and half-year or year-to-date sums that one filing's
     flip closes, are held on the side that one filing alone reports or that opposes most of its neighbouring periods'
     signs; undecided cases are left alone. Other lines are not sign-checked across filings: their sign conventions
@@ -460,9 +465,10 @@ company's very first filing has nothing in the response to be compared with, bey
   tables. The company-facts API P1 uses does not carry which lines make up each section or their weights, and guessing
   them from element names could hold real data.
 
-- *Sign errors outside headline totals and the identities of rule 6.* Filers flip sign conventions between filings
-  for many lines (OCI, hedges, allowances) in clean data, so a flipped sign there cannot be told from a convention
-  change within this source.
+- *Sign errors in lines outside the identities of rule 6 and the sign-checked totals and balances of rule 10.*
+  Filers flip sign conventions between filings for many lines (OCI flows, hedges, allowances, treasury stock) in
+  clean data, so a flipped sign there cannot be told from a convention change within this source; and a flip that
+  moves an exact identity by less than its 1% tolerance is not distinguishable from rounding.
 
 Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
 fundamentals into reports (STATUS). (P1 review rounds 6–12.)
