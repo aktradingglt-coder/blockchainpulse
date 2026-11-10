@@ -109,12 +109,13 @@ SIGN_CHECKED = frozenset(
         "CostOfRevenue",
         "OperatingExpenses",
         "ComprehensiveIncomeNetOfTax",
+        "RevenuesNetOfInterestExpense",
     }
 )
 #: When the sign history does not single out one side of a sign error, hold every candidate (True) or none (False).
 SIGN_UNDECIDED_HOLDS = False
-#: Balances and totals that cannot be negative: none of about 28,000 clean facts of these concepts is. A negative one
-#: is a sign error and is held.
+#: Balances and totals that cannot be negative: of about 33,800 clean facts of these concepts in 15 large filers, one is
+#: (C's Q4-2020 cost of revenue, -46M). A negative one is a sign error and is held.
 NEVER_NEGATIVE = frozenset(
     {
         "Assets",
@@ -139,6 +140,7 @@ NEVER_NEGATIVE = frozenset(
         "CostOfRevenue",
         "CostOfGoodsAndServicesSold",
         "CommonStockValue",
+        "NoninterestExpense",
         "CommonStockSharesOutstanding",
         "WeightedAverageNumberOfSharesOutstandingBasic",
     }
@@ -240,6 +242,10 @@ _FX_ON_CASH = (
     "EffectOfExchangeRateOnCashAndCashEquivalents",
 )
 _REVENUE = ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet")
+_BANK_PRETAX = (
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+)
 _AFTER_TAX = (
     "IncomeLossFromContinuingOperationsIncludingPortionAttributableToNoncontrollingInterest",
     "IncomeLossFromContinuingOperations",
@@ -305,6 +311,23 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         _term("ComprehensiveIncomeNetOfTax", coef=-1.0),
         _term("ComprehensiveIncomeNetOfTaxAttributableToNoncontrollingInterest", coef=-1.0),
     ),
+    # comprehensive income including NCI = net income + the NCI's share + OCI (in total, or the parent's and the NCI's),
+    # for filers that tag no ProfitLoss line (C, WFC)
+    *(
+        (
+            _term("ComprehensiveIncomeNetOfTaxIncludingPortionAttributableToNoncontrollingInterest", coef=1.0),
+            _term("NetIncomeLoss", coef=-1.0),
+            _term("NetIncomeLossAttributableToNoncontrollingInterest", coef=-1.0),
+            *oci,
+        )
+        for oci in (
+            (_term("OtherComprehensiveIncomeLossNetOfTax", coef=-1.0),),
+            (
+                _term("OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent", coef=-1.0),
+                _term("OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToNoncontrollingInterest", coef=-1.0),
+            ),
+        )
+    ),
     (
         _term("ProfitLoss", coef=1.0),
         _term("NetIncomeLoss", coef=-1.0),
@@ -359,6 +382,36 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         _term("Revenues", coef=1.0),
         _term("InterestIncomeExpenseNet", coef=-1.0),
         _term("NoninterestIncome", coef=-1.0),
+    ),
+    (  # the same, where the bank tags its total as net revenue (JPM, WFC)
+        _term("RevenuesNetOfInterestExpense", coef=1.0),
+        _term("InterestIncomeExpenseNet", coef=-1.0),
+        _term("NoninterestIncome", coef=-1.0),
+    ),
+    # a bank's pre-tax income = net revenue (as either total, or as its two parts) - provision for credit losses -
+    # noninterest expense
+    *(
+        (
+            _term(*_BANK_PRETAX, coef=1.0),
+            *revenue,
+            _term("ProvisionForLoanLeaseAndOtherLosses", "ProvisionForLoanAndLeaseLosses", coef=1.0),
+            _term("NoninterestExpense", coef=1.0),
+        )
+        for revenue in (
+            (_term("RevenuesNetOfInterestExpense", coef=-1.0),),
+            (_term("Revenues", coef=-1.0),),
+            (_term("InterestIncomeExpenseNet", coef=-1.0), _term("NoninterestIncome", coef=-1.0)),
+        )
+    ),
+    # net interest income after the provision = net interest income - the provision (in total at JPM and WFC, for loan
+    # losses alone at C)
+    *(
+        (
+            _term("InterestIncomeExpenseAfterProvisionForLoanLoss", coef=1.0),
+            _term("InterestIncomeExpenseNet", coef=-1.0),
+            _term(provision, coef=1.0),
+        )
+        for provision in ("ProvisionForLoanLeaseAndOtherLosses", "ProvisionForLoanLossesExpensed")
     ),
     (
         _term("Revenues", coef=1.0),
@@ -417,8 +470,16 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
 #: it so in 2015). It is never repaired itself; where it closes exactly as reported it vetoes a false sign repair of
 #: the treasury line. AOCI has no such convention in the calibration set (the opposite sign closes 1 clean instance of
 #: 1,741, by coincidence), so AOCI flips stay repairable.
-CONVENTION_VARIANTS: tuple[tuple[_Term, ...], ...] = tuple(
-    _equity_components(capital, treasury=-1.0, aoci=-1.0) for capital in _CAPITAL
+CONVENTION_VARIANTS: tuple[tuple[_Term, ...], ...] = (
+    *(_equity_components(capital, treasury=-1.0, aoci=-1.0) for capital in _CAPITAL),
+    # the NCI's share of OCI tagged with the opposite sign (C, 2011-14 filings), likewise veto-only
+    (
+        _term("ComprehensiveIncomeNetOfTaxIncludingPortionAttributableToNoncontrollingInterest", coef=1.0),
+        _term("NetIncomeLoss", coef=-1.0),
+        _term("NetIncomeLossAttributableToNoncontrollingInterest", coef=-1.0),
+        _term("OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent", coef=-1.0),
+        _term("OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToNoncontrollingInterest", coef=1.0),
+    ),
 )
 #: Statutory tax in the rate reconciliation = statutory rate x pre-tax income (whichever pre-tax total is reported).
 STATUTORY_RATE = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate"

@@ -1,11 +1,11 @@
 # STATUS.md
 
-_Last updated: 2026-11-09_
+_Last updated: 2026-11-10_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–20 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–24); review round 21 under way.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–21 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–25); awaiting review round 22.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -142,6 +142,11 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   (GE FY2014-Q1 2015), component flips are not repairable (the convention is veto-only); learned relations veto in
   the trailing-period check but not in the joined sign repair (no case found where it matters); the trailing-period
   relation applies only where filers report trailing periods (AMZN in the calibration set).
+- P2 (from P1 review round 21, minor): treasury-stock flips at main-convention filers are still served — a per-filer
+  check that a filing's columns agree on the treasury sign is a candidate (0 of 594 clean filings mix signs); sub-1%
+  flips (FX on cash, small OCI and AOCI lines, NCI lines) and lines with no exact relation in company facts (SG&A parts,
+  deferred tax without current tax, taxes paid without a foreign line, OCI components) need the calculation linkbase;
+  historical snapshots withhold some genuine then-newest figures (XOM 11 of 68 snapshots, AAPL 3 of 69).
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after

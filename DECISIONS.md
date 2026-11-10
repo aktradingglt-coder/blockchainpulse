@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-11-09, round 20) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-11-10, round 21) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -294,11 +294,16 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    - statement identities, each term under whichever of its usual tags the filing uses: change in cash (either cash
      tag) = operating + investing + financing (+ FX, under any of three tags, when reported); comprehensive income =
      net income + OCI (parent portion, or total); comprehensive income including NCI = profit + OCI, and = the
-     parent's + the NCI's; profit = net income + NCI share; income from continuing operations (or profit, or net
+     parent's + the NCI's, and (for filers with no profit line) = net income + NCI share + OCI, in total (843 of 855
+     clean instances within 0.1%) or as the parent's and the NCI's (384 of 439); profit = net income + NCI share; income from continuing operations (or profit, or net
      income) = pre-tax income − tax, with equity-method income added after tax where the pre-tax line excludes it;
      pre-tax income = revenue − costs and expenses; operating income = gross profit − operating expenses, and =
      revenue − costs and expenses; a bank's revenue = net interest income + noninterest income (588 of 588 clean
-     instances within 0.1%); revenue = contract revenue + other revenue (90 of 90, one filer); liabilities and equity
+     instances within 0.1%), and so is its net revenue where tagged as such (223 of 223, JPM and WFC); a bank's
+     pre-tax income = net revenue (either total, or its two parts) − provision for credit losses − noninterest expense
+     (223 of 223 with net revenue, 365 of 373 with `Revenues`, 637 of 645 with the parts; every miss is a BAC 2010–11
+     filing); net interest income after the provision = net interest income − provision (365 of 365 at JPM and WFC
+     with the total provision, 176 of 176 at C with the loan-loss provision alone); revenue = contract revenue + other revenue (90 of 90, one filer); liabilities and equity
      = liabilities + equity (including NCI, or the parent's and the NCI apart) + temporary equity where reported (in
      total, or the parent's and the redeemable NCI apart; clean instances closing per variant: 1,710 and 1,736 of
      1,762 with total equity, 849 and 889 of 889 with the parent's and the NCI apart); equity including NCI =
@@ -309,7 +314,8 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      use: GE re-tagged it so in 2015) the same relation is kept as a veto only: where it closes exactly as reported,
      its facts are taken as consistent, and neither a rescale nor a flip of them counts as a repair. AOCI has no such
      convention in the calibration set (the opposite sign closes 1 clean instance of 1,741, by coincidence), so AOCI
-     flips are repaired; cash-flow-hedge and
+     flips are repaired. The NCI's share of OCI tagged with the opposite sign (C's 2011–14 filings) is likewise a
+     veto only: as an ordinary identity it held 29 genuine Citi facts; cash-flow-hedge and
      AFS OCI
      rollforwards; gross profit; current + noncurrent assets and liabilities. Several of these do not fit every
      filer's statements (a net-income line that includes discontinued operations, costs that include non-operating
@@ -363,11 +369,12 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
 9. *Balance jumps.* A balance in a recent filing that moved more than 10^2 from the previous period end is flagged.
 10. *Impossible signs.* A negative value of a balance or total that cannot be negative is held: assets, liabilities,
     their current parts, liabilities and equity, cash, PP&E, goodwill, intangibles, inventory, receivables, payables,
-    long-term debt, contract revenue, cost of revenue and of goods sold, common stock at par and share counts (24
-    concepts; of about 31,500 clean facts one is negative: a Citi Q4-2020 cost of revenue of −$46M, held with its
-    annual figure;
+    long-term debt, contract revenue, cost of revenue and of goods sold, a bank's noninterest expense, common stock at
+    par and share counts (25 concepts; of about 33,800 clean facts, counted in every taxonomy, one is negative: a
+    Citi Q4-2020 cost of revenue of −$46M, held with its annual figure;
     total `Revenues` is left out, as asset managers can report it negative). For headline totals (net, operating and
-    pre-tax income, tax expense, net cash flows, revenue, cost of revenue, operating expenses, comprehensive income),
+    pre-tax income, tax expense, net cash flows, revenue, a bank's net revenue, cost of revenue, operating expenses,
+    comprehensive income),
     filings that report the same amount with opposite signs, and half-year or year-to-date sums that one filing's
     flip closes, are held on the side that one filing alone reports or that opposes most of its neighbouring periods'
     signs; undecided cases are left alone. Other lines are not sign-checked across filings: their sign conventions

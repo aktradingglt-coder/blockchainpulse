@@ -3198,3 +3198,87 @@ def test_cost_of_revenue_and_common_stock_cannot_be_negative() -> None:
         records = _filing([(concept, 2025, -5e9)])
         held, _ = sec_scale.scale_errors(records)
         assert held == {0}
+
+
+# ------------------------------------------------------------------------------------- review round 21 (P1)
+
+_BANK_PRETAX = "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"
+
+
+@pytest.mark.parametrize(
+    "flipped",
+    [
+        "RevenuesNetOfInterestExpense",
+        "InterestIncomeExpenseNet",
+        "NoninterestIncome",
+        "ProvisionForLoanLeaseAndOtherLosses",
+        "InterestIncomeExpenseAfterProvisionForLoanLoss",
+        _BANK_PRETAX,
+    ],
+)
+def test_a_flipped_bank_income_statement_line_is_held(flipped: str) -> None:
+    """A bank that tags its total as net revenue: net revenue = net interest income + noninterest income, pre-tax =
+    net revenue - provision - noninterest expense and net interest income after the provision all close exactly, so
+    a line entered with the wrong sign is held."""
+    rows = {  # synthetic round figures, not any bank's
+        "InterestIncomeExpenseNet": (46e9, 48e9, 50e9),
+        "NoninterestIncome": (50e9, 53e9, 56e9),
+        "RevenuesNetOfInterestExpense": (96e9, 101e9, 106e9),
+        "ProvisionForLoanLeaseAndOtherLosses": (4e9, 6e9, 5e9),
+        "InterestIncomeExpenseAfterProvisionForLoanLoss": (42e9, 42e9, 45e9),
+        "NoninterestExpense": (50e9, 52e9, 54e9),
+        _BANK_PRETAX: (42e9, 43e9, 47e9),
+    }
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, y, v * (-1 if (c == flipped and y == 2025) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    earlier = [
+        (c, y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (flipped, 2025, "a")
+    }
+
+
+@pytest.mark.parametrize("convention", [False, True])
+def test_comprehensive_income_including_nci_is_checked_from_its_parts(convention: bool) -> None:
+    """Without a ProfitLoss line, comprehensive income including NCI = net income + the NCI's share + the parent's and
+    the NCI's OCI. A flipped total is held; a filing that tags the NCI's OCI with the opposite sign (C, 2011-14) is a
+    convention, not an error, and nothing is held."""
+    nci_oci = (-0.5e9, 0.4e9, 0.6e9)
+    rows = {
+        "NetIncomeLoss": (14e9, 15e9, 17e9),
+        "NetIncomeLossAttributableToNoncontrollingInterest": (0.1e9, 0.2e9, 0.15e9),
+        "OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent": (1.2e9, -2.4e9, 1.6e9),
+        "OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToNoncontrollingInterest": tuple(
+            -v if convention else v for v in nci_oci
+        ),
+        "ComprehensiveIncomeNetOfTaxIncludingPortionAttributableToNoncontrollingInterest": tuple(
+            a + b + c + d
+            for a, b, c, d in zip(
+                (14e9, 15e9, 17e9), (0.1e9, 0.2e9, 0.15e9), (1.2e9, -2.4e9, 1.6e9), nci_oci, strict=True
+            )
+        ),
+    }
+    total = "ComprehensiveIncomeNetOfTaxIncludingPortionAttributableToNoncontrollingInterest"
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, y, v * (-1 if (c == total and y == 2025 and not convention) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    records = _filing(facts)
+    held, _ = sec_scale.scale_errors(records)
+    expected = set() if convention else {(total, 2025)}
+    assert {(records[i].concept, records[i].period_end.year) for i in held} == expected
+
+
+def test_noninterest_expense_cannot_be_negative() -> None:
+    records = _filing([("NoninterestExpense", 2025, -54e9)])
+    held, _ = sec_scale.scale_errors(records)
+    assert held == {0}
