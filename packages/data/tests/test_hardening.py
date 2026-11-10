@@ -3159,3 +3159,42 @@ async def test_a_flipped_trailing_twelve_month_cell_is_held() -> None:
         and f.period_end == date(2026, 6, 30)
     ]
     assert all(f.value > 0 for f in served)
+
+
+# ------------------------------------------------------------------------------------- review round 20 (P1)
+
+
+@pytest.mark.parametrize(
+    "flipped", ["RetainedEarningsAccumulatedDeficit", "AccumulatedOtherComprehensiveIncomeLossNetOfTax"]
+)
+def test_equity_components_hold_for_a_filer_without_a_paid_in_capital_line(flipped: str) -> None:
+    """XOM tags no-par common stock including paid-in capital as common stock alone: equity = common stock + retained
+    earnings + AOCI - treasury stock still closes exactly, and catches a flipped component."""
+    rows = {
+        "StockholdersEquity": (204e9, 260e9, 255.746e9),
+        "CommonStockValue": (17e9, 46e9, 46.426e9),
+        "RetainedEarningsAccumulatedDeficit": (432e9, 470e9, 482.344e9),
+        "AccumulatedOtherComprehensiveIncomeLossNetOfTax": (-14e9, -12e9, -11.098e9),
+        "TreasuryStockValue": (231e9, 244e9, 261.926e9),
+    }
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, -y, v * (-1 if (c == flipped and y == 2025) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    earlier = [
+        (c, -y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (flipped, 2025, "a")
+    }
+
+
+def test_cost_of_revenue_and_common_stock_cannot_be_negative() -> None:
+    for concept in ("CostOfRevenue", "CostOfGoodsAndServicesSold", "CommonStockValue"):
+        records = _filing([(concept, 2025, -5e9)])
+        held, _ = sec_scale.scale_errors(records)
+        assert held == {0}

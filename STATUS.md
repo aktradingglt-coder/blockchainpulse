@@ -1,11 +1,11 @@
 # STATUS.md
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-09_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–19 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–23); awaiting review round 20.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–20 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–24); awaiting review round 21.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -138,6 +138,10 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   GOOGL's equity does not close (convertible preferred under its own tag), and banks' equity does not fit the
   components identity, so their retained-earnings and capital flips are served; non-revenue income-statement flows
   (e.g. derivative gains) fall under the 3x size tier — a separate flow tier is unmeasured.
+- P2 (from P1 review round 20, minor): at a filer whose equity closes only under the negative-treasury convention
+  (GE FY2014-Q1 2015), component flips are not repairable (the convention is veto-only); learned relations veto in
+  the trailing-period check but not in the joined sign repair (no case found where it matters); the trailing-period
+  relation applies only where filers report trailing periods (AMZN in the calibration set).
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after

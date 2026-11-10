@@ -136,6 +136,9 @@ NEVER_NEGATIVE = frozenset(
         "LongTermDebt",
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "SalesRevenueNet",
+        "CostOfRevenue",
+        "CostOfGoodsAndServicesSold",
+        "CommonStockValue",
         "CommonStockSharesOutstanding",
         "WeightedAverageNumberOfSharesOutstandingBasic",
     }
@@ -221,6 +224,11 @@ def _term(*concepts: str, coef: float, optional: bool = False) -> _Term:
     return (concepts, coef, optional)
 
 
+def _absent(*concepts: str) -> _Term:
+    """A condition, not a term: the identity applies only to a filing and period that report none of these."""
+    return (concepts, 0.0, True)
+
+
 _CASH_CHANGE = (
     "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
     "CashAndCashEquivalentsPeriodIncreaseDecrease",
@@ -247,6 +255,15 @@ _CAPITAL: tuple[tuple[_Term, ...], ...] = (
         _term("AdditionalPaidInCapital", "AdditionalPaidInCapitalCommonStock", coef=-1.0),
     ),
     (_term("CommonStocksIncludingAdditionalPaidInCapital", coef=-1.0),),
+    # no-par common stock that includes paid-in capital, tagged as common stock alone (XOM)
+    (
+        _term("CommonStockValue", coef=-1.0),
+        _absent(
+            "AdditionalPaidInCapital",
+            "AdditionalPaidInCapitalCommonStock",
+            "CommonStocksIncludingAdditionalPaidInCapital",
+        ),
+    ),
 )
 
 
@@ -977,6 +994,10 @@ def _signed_instance(signed: tuple[_Term, ...], terms: dict[str, int]) -> _Insta
     filing uses; None when a required term is not reported at all."""
     instance: list[tuple[int, float]] = []
     for concepts, coef, optional in signed:
+        if coef == 0.0:  # _absent: the identity does not apply where any of these is reported
+            if any(c in terms for c in concepts):
+                return None
+            continue
         found = next((terms[c] for c in concepts if c in terms), None)
         if found is not None:
             instance.append((found, coef))

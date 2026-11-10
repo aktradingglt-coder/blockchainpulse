@@ -1,9 +1,11 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 import pytest
 
+from rd_core.clock import FixedClock
 from rd_data import recording
 from rd_data.adapters.cftc import CftcAdapter
 from rd_data.cassette import Cassette, RecordingTransport
@@ -11,6 +13,9 @@ from rd_data.registry import ADAPTERS
 
 
 def _patch_network(monkeypatch: pytest.MonkeyPatch, body: object) -> None:
+    """Serve ``body`` instead of the network, on a clock fixed at the recorded TFF cassette's replay time: the rows are
+    real recorded data, and on the wall clock they would turn stale (and be refused) a couple of weeks later."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=body)
 
@@ -19,19 +24,27 @@ def _patch_network(monkeypatch: pytest.MonkeyPatch, body: object) -> None:
             super().__init__(httpx.MockTransport(handler))
 
     monkeypatch.setattr(recording, "RecordingTransport", OfflineRecording)
+    real_context = recording._context
+    clock = FixedClock(_tff_cassette().replay_time)
+    monkeypatch.setattr(recording, "_context", lambda *a, **k: replace(real_context(*a, **k), clock=clock))
 
 
 CASSETTES = Path(__file__).parent / "cassettes"
 
 
-def _recorded_tff_rows(n: int) -> list[dict[str, str]]:
-    """The newest rows of the real recorded EUR FX TFF response (cassettes/cftc)."""
+def _tff_cassette() -> Cassette:
+    """The real recorded EUR FX TFF cassette (cassettes/cftc)."""
     for path in sorted((CASSETTES / "cftc").glob("*.json")):
-        interaction = Cassette.load(path).interactions[0]
-        if "gpe5-46if" in interaction.url:
-            rows: list[dict[str, str]] = json.loads(interaction.body)
-            return rows[:n]
+        cassette = Cassette.load(path)
+        if "gpe5-46if" in cassette.interactions[0].url:
+            return cassette
     raise AssertionError("recorded TFF cassette missing")
+
+
+def _recorded_tff_rows(n: int) -> list[dict[str, str]]:
+    """The newest rows of the real recorded EUR FX TFF response."""
+    rows: list[dict[str, str]] = json.loads(_tff_cassette().interactions[0].body)
+    return rows[:n]
 
 
 def test_record_then_check_drift(

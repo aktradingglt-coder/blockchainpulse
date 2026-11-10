@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-10-23, round 19) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-11-09, round 20) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -302,7 +302,8 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      = liabilities + equity (including NCI, or the parent's and the NCI apart) + temporary equity where reported (in
      total, or the parent's and the redeemable NCI apart; clean instances closing per variant: 1,710 and 1,736 of
      1,762 with total equity, 849 and 889 of 889 with the parent's and the NCI apart); equity including NCI =
-     the parent's + NCI (934 of 935); equity = common stock + paid-in capital (or the two as one line) + preferred
+     the parent's + NCI (934 of 935); equity = common stock + paid-in capital (or the two as one line, or, for a
+     filing with no paid-in-capital line, no-par common stock alone, as XOM tags it) + preferred
      − treasury stock + AOCI + retained earnings (1,182 of 1,347 with the lines apart; 297 of 394 with one line;
      AMZN 138 of 138; it does not fit banks). With treasury stock tagged as a negative amount (a convention filers do
      use: GE re-tagged it so in 2015) the same relation is kept as a veto only: where it closes exactly as reported,
@@ -362,7 +363,9 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
 9. *Balance jumps.* A balance in a recent filing that moved more than 10^2 from the previous period end is flagged.
 10. *Impossible signs.* A negative value of a balance or total that cannot be negative is held: assets, liabilities,
     their current parts, liabilities and equity, cash, PP&E, goodwill, intangibles, inventory, receivables, payables,
-    long-term debt, contract revenue and share counts (21 concepts; none of about 28,000 clean facts is negative;
+    long-term debt, contract revenue, cost of revenue and of goods sold, common stock at par and share counts (24
+    concepts; of about 31,500 clean facts one is negative: a Citi Q4-2020 cost of revenue of −$46M, held with its
+    annual figure;
     total `Revenues` is left out, as asset managers can report it negative). For headline totals (net, operating and
     pre-tax income, tax expense, net cash flows, revenue, cost of revenue, operating expenses, comprehensive income),
     filings that report the same amount with opposite signs, and half-year or year-to-date sums that one filing's
@@ -407,14 +410,14 @@ On clean data:
 - AMZN: 10 facts held, all in its FY2014 10-K, which reports the 2013–14 quarterly and annual income-tax expense with
   the opposite sign to every other filing of those periods (a real error in the recorded data); 4 genuine one-offs
   flagged.
-- The 15 filers together: 333 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
+- The 15 filers together: 335 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
   classified, of real errors in old filings (share counts; NVDA's and MMM's option intrinsic values; sign
   inconsistencies such as TSLA's positive 2010–11 domestic pre-tax income beside a pre-tax loss, or goodwill
   "increases" in periods goodwill fell) and genuine values withheld. Before the round-11 changes the same data held
   3,789.
 - The 59 AMZN 10-K and 10-Q filing dates since 2012, each as an as-of date: from 2015-01-30 on, every snapshot holds
   the FY2014 10-K's 10 sign-flipped tax facts (at the four 2015 dates also 2–5 of that filing's rate-reconciliation
-  lines, held with them; at the filing's own date its 2014 tax figures are withheld until the next filing restates
+  lines held with them, and at 04-24 and 07-24 two tax-expense facts of other filings; at the filing's own date its 2014 tax figures are withheld until the next filing restates
   them); besides that filing, 10 snapshots hold 1–4 genuine facts in 3 concepts (purchase obligations, OCI translation,
   noncurrent restricted cash). No wrong value is served at any date. The cost is withholding, which is the side these
   rules err on (P2 backtests must treat held facts as missing).
