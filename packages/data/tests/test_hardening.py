@@ -10,7 +10,7 @@ import csv
 import io
 import json
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -33,7 +33,7 @@ from rd_data.cassette import Cassette, RecordingTransport, ReplayTransport
 from rd_data.errors import DataQualityError, InvalidArgs, LicenceBlocked, NotFound, ProviderDown, RateLimited, Stale
 from rd_data.freshness import ExchangeCalendar, Freshness
 from rd_data.http import HttpFetcher, redact_params
-from rd_data.quality import check_cadence, check_interval_gaps
+from rd_data.quality import QA_CONTEXT, check_cadence, check_interval_gaps
 from rd_data.recording import cassette_name
 from rd_data.registry import provider_statuses
 from rd_data.resilience import (
@@ -1321,7 +1321,7 @@ async def test_early_year_treasury_file_gets_last_year_as_context(ctx_factory: A
             d = nyse.closes_after(d, 1)[0].date()
         return out
 
-    last_year = sessions(datetime(2025, 10, 1, tzinfo=UTC), datetime(2025, 12, 31, tzinfo=UTC))
+    last_year = sessions(datetime(2025, 1, 2, tzinfo=UTC), datetime(2025, 12, 31, tzinfo=UTC))
     this_year = sessions(datetime(2026, 1, 2, tzinfo=UTC), datetime(2026, 1, 9, tzinfo=UTC))
     level = [4.2 + 0.03 * math.sin(i) for i in range(len(last_year) + len(this_year))]
     level[-1] *= 2  # the latest 10Y doubled
@@ -3435,4 +3435,159 @@ def test_a_flipped_net_interest_income_after_a_cecl_era_provision_is_held() -> N
     held, _ = sec_scale.scale_errors(records)
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
         (flipped, 2025, "a")
+    }
+
+
+# ------------------------------------------------------------------------------------- review round 24 (P1)
+
+
+def _cut_at(cut: int) -> Mutator:
+    def apply(body: str) -> str:
+        return body[:cut]
+
+    return apply
+
+
+async def test_a_truncated_treasury_file_is_refused_at_every_cut() -> None:
+    """A body cut off anywhere (between rows, losing the year's oldest days, or inside a row, leaving a short row or a
+    number cut short such as "4." for 4.45) is refused as an outage, never served as a fresh but partial or wrong
+    curve."""
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+    body = Cassette.load(CASSETTES / TreasuryAdapter.name / cassette_name(request)).interactions[0].body
+    lines = body.split("\n")
+    start = len("\n".join(lines[: QA_CONTEXT + 2]))  # enough rows that no previous-year context file is fetched
+    cuts = [*range(start, len(body) - 1, 11), len(body) - 1, len(body) - 3]
+    for cut in cuts:
+        with pytest.raises(ProviderDown, match="truncated"):
+            await _replay(TreasuryAdapter, request, {0: _cut_at(cut)})
+    resp = await _replay(TreasuryAdapter, request)  # the whole body is served
+    assert resp.records
+
+
+@pytest.mark.parametrize("factor", [1000.0, 0.001, 3.0, 1 / 3])
+async def test_a_mis_scaled_24h_volume_breaks_the_quote_volume_and_is_quarantined(factor: float) -> None:
+    """A linear perpetual's quote volume is its contract volume x the 24h VWAP; a contract volume off by any factor
+    breaks that and is quarantined, while the clean ticker's volume is served."""
+
+    def seed(t: dict[str, Any]) -> None:
+        t["vol24h"] *= factor
+
+    clean = await _derivatives(lambda _t: None)
+    assert any(
+        isinstance(m, CryptoDerivativeMetric) and m.symbol.startswith("BTC") and m.metric == "volume_24h"
+        for m in clean.records
+    )
+    resp = await _derivatives(seed)
+    volumes = [m for m in resp.records if isinstance(m, CryptoDerivativeMetric) and m.metric == "volume_24h"]
+    held = [m for m in resp.quarantined if isinstance(m, CryptoDerivativeMetric) and m.metric == "volume_24h"]
+    assert len(held) == 1
+    assert held[0].symbol.startswith("BTC")
+    assert not any(m.symbol == held[0].symbol for m in volumes)
+    assert (
+        len(volumes)
+        == sum(1 for m in clean.records if isinstance(m, CryptoDerivativeMetric) and m.metric == "volume_24h") - 1
+    )
+
+
+def _with_units(records: list[FundamentalFact]) -> list[FundamentalFact]:
+    units = {"EarningsPerShare": "USD/shares", "WeightedAverageNumberOf": "shares"}
+    return [
+        r.model_copy(update={"unit": next((u for p, u in units.items() if r.concept.startswith(p)), r.unit)})
+        for r in records
+    ]
+
+
+def _seeded(
+    rows: Mapping[str, Sequence[float]], seeded: str, factor: float, years: tuple[int, ...]
+) -> list[FundamentalFact]:
+    """Filing "a" reports the last three years (the newest, for the seeded concept, times factor); filing "earlier"
+    the years before; instants are given as negative years, as _filing reads them."""
+    newest = years[-1]
+    sign = -1 if any(c.startswith("Cash") for c in rows) else 1
+    facts = [
+        (c, sign * y, v * (factor if (c == seeded and y == newest) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years[-3:], vs[-3:], strict=True)
+    ]
+    earlier = [(c, sign * y, v) for c, vs in rows.items() for y, v in zip(years[:-1], vs[:-1], strict=True)]
+    return _with_units([*_filing(earlier, accession="earlier"), *_filing(facts)])
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1, 100.0, 0.01])
+def test_a_slipped_decimal_that_breaks_an_exact_identity_is_held(factor: float) -> None:
+    """Revenue - costs = pre-tax income closes exactly; a revenue typed 10x or 100x off breaks it, no power-of-1000
+    rescale or sign flip repairs it, and rescaling the one fact by its slip does: that fact is held, and nothing
+    else."""
+    rows = {  # synthetic round figures, not any filer's
+        "Revenues": (80e9, 84e9, 88e9, 90e9, 85e9),
+        "CostsAndExpenses": (72e9, 75e9, 79e9, 82e9, 78e9),
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": (
+            8e9,
+            9e9,
+            9e9,
+            8e9,
+            7e9,
+        ),
+    }
+    records = _seeded(rows, "Revenues", factor, (2021, 2022, 2023, 2024, 2025))
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("Revenues", 2025, "a")
+    }
+
+
+@pytest.mark.parametrize(
+    ("seeded", "factor"),
+    [
+        ("EarningsPerShareDiluted", 10.0),
+        ("EarningsPerShareDiluted", 0.1),
+        ("EarningsPerShareDiluted", 100.0),
+        ("WeightedAverageNumberOfDilutedSharesOutstanding", 10.0),
+        ("WeightedAverageNumberOfDilutedSharesOutstanding", 0.1),
+    ],
+)
+def test_eps_or_shares_a_decimal_off_net_income_is_held(seeded: str, factor: float) -> None:
+    """EPS x weighted shares = net income at the filer's own level (stock splits move EPS and shares together); a
+    product a power of 10 or 100 from that level holds the term that sits that far from its own history."""
+    shares = (1.00e9, 0.99e9, 0.98e9, 0.97e9, 0.96e9)
+    income = (10e9, 11e9, 12e9, 13e9, 14e9)
+    rows = {
+        "NetIncomeLoss": income,
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True)),
+    }
+    records = _seeded(rows, seeded, factor, (2021, 2022, 2023, 2024, 2025))
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (seeded, 2025, "a")
+    }
+    clean, _ = sec_scale.scale_errors(_seeded(rows, seeded, 1.0, (2021, 2022, 2023, 2024, 2025)))
+    assert not clean
+
+
+def test_a_stock_split_moves_eps_and_shares_together_and_holds_nothing() -> None:
+    """A 10-for-1 split in the newest year: EPS and shares both move a power of 10 from their history, but their
+    product still matches net income, so nothing is held."""
+    income = (10e9, 11e9, 12e9, 13e9, 14e9)
+    shares = (1.00e9, 0.99e9, 0.98e9, 0.97e9, 9.6e9)
+    rows = {
+        "NetIncomeLoss": income,
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True)),
+    }
+    held, _ = sec_scale.scale_errors(_seeded(rows, "NetIncomeLoss", 1.0, (2021, 2022, 2023, 2024, 2025)))
+    assert not held
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1])
+def test_cash_a_decimal_off_cash_including_restricted_cash_is_held(factor: float) -> None:
+    """Cash is nearly all of cash including restricted cash; cash a power of 10 off that share is held."""
+    rows = {
+        "CashAndCashEquivalentsAtCarryingValue": (70e9, 78e9, 86e9, 73e9, 66e9),
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": (71e9, 79e9, 87e9, 74e9, 67e9),
+    }
+    records = _seeded(rows, "CashAndCashEquivalentsAtCarryingValue", factor, (2021, 2022, 2023, 2024, 2025))
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("CashAndCashEquivalentsAtCarryingValue", 2025, "a")
     }

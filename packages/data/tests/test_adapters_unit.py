@@ -237,24 +237,27 @@ async def test_sec_empty_filings_not_found(ctx_factory: Any) -> None:
 
 CSV = (
     "﻿Date,1 Mo,1.5 Month,2 Mo,3 Mo,4 Mo,6 Mo,1 Yr,2 Yr,3 Yr,5 Yr,7 Yr,10 Yr,20 Yr,30 Yr\n"
-    "10/20/2026,4.10,4.08,4.05,4.00,,3.90,3.70,3.50,3.45,3.50,3.65,3.85,4.30,4.40\n"
-    "10/19/2026,4.11,4.09,4.06,4.01,3.98,3.91,3.71,3.51,3.46,3.51,3.66,3.86,4.31,4.41\n"
-    "not a date,1,1,1,1,1,1,1,1,1,1,1,1,1,1\n"
+    "01/05/2026,4.10,4.08,4.05,4.00,,3.90,3.70,3.50,3.45,3.50,3.65,3.85,4.30,4.40\n"
+    "01/02/2026,4.11,4.09,4.06,4.01,3.98,3.91,3.71,3.51,3.46,3.51,3.66,3.86,4.31,4.41\n"
+    "not a date,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00\n"
 )
 
 
 async def test_treasury_curve(ctx_factory: Any) -> None:
-    this_year = CSV.replace("not a date,1,1,1,1,1,1,1,1,1,1,1,1,1,1\n", "")
+    this_year = CSV.replace(CSV.splitlines()[-1] + "\n", "")
     header_only = CSV.splitlines()[0] + "\n"  # previous year's file, fetched as QA context for a short year
-    ctx, rec = ctx_factory(lambda r: httpx.Response(200, text=this_year if "/2026/" in r.url.path else header_only))
+    ctx, rec = ctx_factory(
+        lambda r: httpx.Response(200, text=this_year if "/2026/" in r.url.path else header_only),
+        now=datetime(2026, 1, 5, 23, tzinfo=UTC),
+    )
     resp = await TreasuryAdapter(ctx).fetch(DataRequest(kind=RequestKind.TREASURY_CURVE, params={"year": 2026}))
     assert [r.url.path.rsplit("/", 2)[-2] for r in rec.requests] == ["2026", "2025"]
-    assert len(resp.records) == 27  # 4M missing on 2026-10-20
+    assert len(resp.records) == 27  # 4M missing on 2026-01-05
     tenyr = [p for p in of_type(resp.records, TreasuryYieldPoint) if p.tenor == "10Y"]
     assert [p.yield_pct for p in tenyr] == [3.86, 3.85]
-    assert resp.as_of == datetime(2026, 10, 20, tzinfo=UTC)
+    assert resp.as_of == datetime(2026, 1, 5, tzinfo=UTC)
     assert "field_tdr_date_value=2026" in str(rec.requests[0].url)
-    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, text=CSV))
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, text=CSV), now=datetime(2026, 1, 5, 23, tzinfo=UTC))
     with pytest.raises(DataQualityError):
         await TreasuryAdapter(ctx).fetch(DataRequest(kind=RequestKind.TREASURY_CURVE, params={"year": 2026}))
     with pytest.raises(InvalidArgs):

@@ -229,8 +229,13 @@ terms allow display but forbid derived data, which the three-tag model could not
   engineering ceilings, not market data shown to users; refine against EIA's *Working and Shell Storage Capacity*
   report when the host is reachable. A series mixing units is refused.
 - Kraken perpetuals: prices > 0, open interest and volume ≥ 0, funding within ±1% per hourly interval, and mark within
-  10% of index (otherwise mark, index and the funding derived from the mark are quarantined). A requested symbol the
-  exchange did not return is reported.
+  10% of index (otherwise mark, index and the funding derived from the mark are quarantined). A linear (PF_)
+  perpetual's 24h contract volume × 24h VWAP must equal its 24h quote volume (within 10^-6; it holds to float
+  precision on every PF_ ticker of the recording), else the volume is quarantined (P1 review round 24). A requested
+  symbol the exchange did not return is reported.
+- Treasury yield-curve CSV: a body cut off is refused as an outage — a last row with missing fields or a number cut
+  short (Treasury prints every yield with two decimals), or a year's file that starts after the 7th of January (the
+  file runs newest first, so a cut between rows loses the year's oldest days) (P1 review round 24).
 - COT: both the long and the short side (with spreading) must sum to open interest; rows for another market are
   rejected.
 - Corporate actions: an unexplained split-ratio jump blocks the series only when split dates come from a
@@ -266,7 +271,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-11-11, round 23) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-11-11, round 24) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -351,7 +356,21 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    otherwise nothing is held. Headline totals over trailing periods are also checked: trailing twelve months = the
    last fiscal year + this year to date − last year to date, each part from the same filing where it reports it.
    These relations chain periods together, so each is checked on its own: a flip that closes one exactly, without
-   breaking any relation that closes exactly as reported, is held as above.
+   breaking any relation that closes exactly as reported, is held as above. A slipped decimal (one fact typed 10× or
+   100× off, or a tenth or a hundredth) is found the same way: when no power-of-1000 rescale explains a broken
+   relation, rescaling one fact by 10, 100, 1/10 or 1/100 that closes it exactly (within 0.1%) without breaking any
+   relation that closes exactly as reported explains it. The facts whose rescale closes it and that sit about that
+   far from their own history are held; with no history to decide, every one of them is. Relations whose signs were
+   learned from the filing are not repaired this way (on clean data one JPM 2013 tax-benefit line closed so by
+   coincidence).
+6a. *Ratios at the filer's own level.* EPS × weighted shares = net income (diluted and basic), and cash is nearly
+   all of cash including restricted cash, hold at a level of the filer's own rather than exactly (preferred dividends
+   move EPS: up to 10^0.8 in 2008–10 bank filings; cash is within 10^0.3 of the total everywhere). An instance whose
+   level sits 10 or 100 times (within 10^0.1) from the filer's median level is a slipped decimal: no clean instance
+   of the 15 filers sits there (three 2008–10 NVDA filings sit exactly 10^3 off, shares tagged in thousands, which
+   this rule leaves to the power-of-1000 checks). Stock splits move EPS and shares together and leave the level
+   alone. A term confirmed by an exact relation of its own filing (net income) is not blamed; of the others, the one
+   clearly farthest from its history is held, else all of them.
 7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
    is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
    the 15 filers below with the bound itself switched off:
@@ -409,7 +428,9 @@ set aside with a warning.
 
 **Alternatives.**
 - Quarantine every cross-filing disagreement: rejected, it hides restatements.
-- MAD per concept: rejected, genuine one-offs sit up to 10^3 from their neighbours.
+- MAD per concept (PROMPT §5.3's robust z-score): rejected for company facts, as genuine one-offs sit up to 10^3
+  from their neighbours; outliers are caught instead by the relations of rules 6 and 6a, which a slipped decimal
+  breaks. A slip in a line that is in no relation (and under the 10^2.5 flag) is not detected (see Limits).
 - A size bound on tax lines against the line's own history: measured and rejected (a genuine Meta tax line is 39× that
   yardstick, while Microsoft's GILTI ×1000 lands at 30×). Against total assets the same lines separate cleanly (rule 7).
 - One size bound for every line (100×, 10× when flagged): too loose; ×1000 tax and cash-flow lines landed at 1.4–8.2×
@@ -460,7 +481,7 @@ the newest filing of all 15 filers (both factors, rounds 12–13) and, through r
 (reviewer round 14 found them served for filers with 1–7 earlier filings before it). A whole filing mis-scaled in a
 company's very first filing has nothing in the response to be compared with, beyond the size bounds.
 
-**Limit (stated, not hidden).** The remaining misses are of three kinds:
+**Limit (stated, not hidden).** The remaining misses are of four kinds:
 - *Rate reconciliations the filing's own years cannot vouch for.* NVDA FY2026 does not close as tagged (15% off with
   the learned signs) and AAPL's does not either (the $10.2B EU state-aid charge uses Apple's own tag). AMZN's and JPM's
   have 13 lines, beyond the 12 whose signs are learned (the round-13 reviewer found one assignment closing 2 of 3
@@ -475,6 +496,9 @@ company's very first filing has nothing in the response to be compared with, bey
   Filers flip sign conventions between filings for many lines (OCI flows, hedges, allowances, treasury stock) in
   clean data, so a flipped sign there cannot be told from a convention change within this source; and a flip that
   moves an exact identity by less than its 1% tolerance is not distinguishable from rounding.
+- *Slipped decimals in lines outside the relations of rules 6 and 6a.* A line 10× or 100× off that no relation of
+  its filing contains, under the 10^2.5 flag of rule 3, is served: genuine moves of that size are common in such
+  lines (10 genuine 10^2–10^3 moves in the newest AMZN filings alone), so history cannot tell them apart.
 
 Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
 fundamentals into reports (STATUS). (P1 review rounds 6–12.)

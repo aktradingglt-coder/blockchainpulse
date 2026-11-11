@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -55,6 +56,10 @@ REQUIRED_COLUMNS = ("Date", "1 Mo", "3 Mo", "6 Mo", "1 Yr", "2 Yr", "5 Yr", "10 
 MIN_YEAR = 1990
 #: Possible range for a par yield in percent; anything outside is a bad print (quarantined).
 YIELD_RANGE = (-5.0, 30.0)
+#: Treasury prints every yield with two decimals; anything else (a number cut short, "4.") is not a published value.
+_YIELD_TEXT = re.compile(r"^-?\d+\.\d{2}$")
+#: A year's file runs from its first session, which New Year's Day and a weekend delay to the 4th of January at most.
+FIRST_SESSION_BY = 7
 #: Business-day calendar for gap checks and freshness (bond-market-only holidays show up as small gaps, never blocking).
 NYSE = ExchangeCalendar("XNYS")
 #: Consecutive publication days with an identical full curve that mean the source stopped updating.
@@ -177,7 +182,11 @@ def _read_file(body: bytes, *, expected_year: int) -> _File:
         # counts against the circuit breaker; a renamed tenor column is schema drift (csv_header check).
         raise ProviderDown("us_treasury: malformed response (no CSV header with a Date column)", provider="us_treasury")
     out = _File(missing_columns=[c for c in REQUIRED_COLUMNS if c not in header])
-    for row in reader:
+    rows = list(reader)
+    if rows and not _complete_row(rows[-1]):
+        # the body was cut off mid-row: its last fields are missing, or a number stops short ("4." for 4.45)
+        raise ProviderDown("us_treasury: truncated response (incomplete last row)", provider="us_treasury")
+    for row in rows:
         try:
             ts = datetime.strptime(row["Date"], "%m/%d/%Y").replace(tzinfo=UTC)
         except (KeyError, TypeError, ValueError):
@@ -195,7 +204,22 @@ def _read_file(body: bytes, *, expected_year: int) -> _File:
                 out.points.append(TreasuryYieldPoint(ts=ts, tenor=tenor, yield_pct=float(value)))
             except ValueError:
                 out.rejected += 1
+    first = min((d for d in out.raw_dates if d.year == expected_year), default=None)
+    if first is not None and first > datetime(expected_year, 1, FIRST_SESSION_BY, tzinfo=UTC):
+        # newest day first: a body cut off between rows loses the year's oldest days, so it starts after January's
+        # first session (the gap check sees only the requested window)
+        raise ProviderDown(
+            f"us_treasury: truncated response ({expected_year} file starts {first:%m/%d})", provider="us_treasury"
+        )
     return out
+
+
+def _complete_row(row: Mapping[str | None, object]) -> bool:
+    """Every column present (no short row, no spill-over) and the last field a whole published value or empty."""
+    if None in row or any(v is None for v in row.values()):
+        return False
+    last = str(list(row.values())[-1]).strip()
+    return not last or bool(_YIELD_TEXT.match(last))
 
 
 def _latest_full_curve(points: list[TreasuryYieldPoint]) -> datetime | None:

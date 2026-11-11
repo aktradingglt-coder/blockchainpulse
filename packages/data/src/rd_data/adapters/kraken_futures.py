@@ -352,10 +352,12 @@ class KrakenFuturesAdapter(BaseAdapter):
             {m.symbol for m in metrics if now - m.ts > SYMBOL_MAX_AGE or m.ts > raw.retrieved_at + FUTURE_SLACK}
         )
         diverged = _mark_index_divergence(metrics)
+        volume_off = _volume_inconsistent(parsed["tickers"], set(parsed["funding"]))
         quarantine_idx = sorted(
             out_of_range
             | {i for i, m in enumerate(metrics) if m.symbol in stale_symbols}
             | {i for i, m in enumerate(metrics) if m.symbol in diverged and m.metric in _MARK_DERIVED}
+            | {i for i, m in enumerate(metrics) if m.symbol in volume_off and m.metric == "volume_24h"}
         )
         usable = [m for i, m in enumerate(metrics) if i not in set(quarantine_idx)]
         requested = [x.strip() for x in str(request.params["symbols"]).split(",")]
@@ -363,6 +365,7 @@ class KrakenFuturesAdapter(BaseAdapter):
         extra_checks = (
             _warning(stale_symbols, f"older than {SYMBOL_MAX_AGE} or future-dated, quarantined", "stale_symbols"),
             _warning(diverged, f"mark and index more than {MAX_MARK_INDEX_GAP:.0%} apart quarantined", "mark_vs_index"),
+            _warning(volume_off, "24h volume x 24h VWAP differs from the quote volume, quarantined", "volume_vs_quote"),
             _warning(missing, "requested but not returned by the exchange", "missing_symbols"),
         )
         quality = with_schema_rejections(
@@ -404,6 +407,24 @@ class KrakenFuturesAdapter(BaseAdapter):
 
 #: Metrics computed from the mark price; quarantined with it when mark and index disagree.
 _MARK_DERIVED = frozenset({"mark_price", "index_price", "funding_rate"})
+#: A linear perpetual's quote volume is its contract volume x the 24h VWAP (to float precision on every PF_ ticker of
+#: the recording); allowed relative gap before the contract volume is taken to be mis-scaled.
+VOLUME_QUOTE_TOLERANCE = 1e-6
+
+
+def _volume_inconsistent(tickers: Mapping[str, Any], symbols: set[str]) -> list[str]:
+    """Linear (PF_) perpetuals whose 24h contract volume x 24h VWAP is not their 24h quote volume: one of the figures is
+    wrong, and the contract volume, the one served, is not shown on that evidence."""
+    out = []
+    for symbol in sorted(symbols):
+        info = tickers[symbol]["info"]
+        values = [as_float(info.get(k)) for k in ("vol24h", "vwap24h", "volumeQuote")]
+        if not str(info.get("symbol", "")).startswith("PF_") or any(v is None for v in values):
+            continue
+        volume, vwap, quote = (float(v) for v in values if v is not None)
+        if abs(volume * vwap - quote) > VOLUME_QUOTE_TOLERANCE * max(abs(quote), 1.0):
+            out.append(symbol)
+    return out
 
 
 def _mark_index_divergence(metrics: list[CryptoDerivativeMetric]) -> list[str]:

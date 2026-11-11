@@ -39,7 +39,7 @@ major findings fixed (ledger rounds 5–27); awaiting review round 24 (ledger ro
 | HTTP: host allow-list (SSRF guard), retries with full jitter + Retry-After, typed errors, redacted URLs | `test_http.py` |
 | Shared rate limits (atomic Lua token buckets), circuit breaker, response cache — on real Valkey | `test_resilience.py`, `tests/integration/test_data_redis.py` |
 | Freshness per §5.4 with exchange calendars; COT measured from release (D-027) | `test_freshness.py` |
-| QA checks catch seeded bad data (gaps, spikes, duplicates, non-monotonic, OHLC violations, rejected rows) | `test_quality.py` |
+| QA checks catch seeded bad data (gaps, spikes, duplicates, non-monotonic, OHLC violations, rejected rows; SEC company facts by the relations of D-036, whose stated limits apply) | `test_quality.py`, `test_hardening.py` |
 | Seeded bad data end to end through the adapters, mostly by corrupting real cassettes (bad prints, impossible values, NaN, wrong subject/series/year, renamed columns, malformed payloads, stale symbols) | `test_hardening.py` |
 | Provider circuit state on the status page | `/v1/status` → `providers`, `tests/integration/test_services.py` |
 | Adapters: CFTC (6 datasets), SEC EDGAR, US Treasury, EIA, Kraken Futures (CCXT), FRED (flag off), Twelve Data (flag off) | `test_adapters_unit.py`, `test_kraken_unit.py` |

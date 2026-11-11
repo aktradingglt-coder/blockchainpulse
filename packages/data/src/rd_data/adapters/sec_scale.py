@@ -266,6 +266,8 @@ _DISCONTINUED = (
 #: A sign-flip repair must close its relations to within this share of the largest term: reported figures are exact up
 #: to rounding, and a flip that merely lands inside ADDITIVITY_TOLERANCE is a coincidence, not evidence.
 FLIP_TOLERANCE = 0.001
+#: Single-fact rescales tried, exactly as sign flips are, on relations no power-of-1000 rescale explains.
+DECIMAL_FACTORS = (10.0, 100.0, 0.1, 0.01)
 _CAPITAL: tuple[tuple[_Term, ...], ...] = (
     (
         _term("CommonStockValue", coef=-1.0, optional=True),
@@ -527,6 +529,22 @@ CONVENTION_VARIANTS: tuple[tuple[_Term, ...], ...] = (
         _term("OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToNoncontrollingInterest", coef=1.0),
     ),
 )
+#: Relations that hold at a level of the filer's own rather than exactly, as (numerator, denominator) products: EPS x
+#: weighted shares = net income (to common stock: preferred dividends move the level, by up to 10^0.8 in 2008-10 bank
+#: filings of the calibration set), and cash is nearly all of cash including restricted cash (within 10^0.3). Stock
+#: splits move EPS and shares together and leave the level alone.
+RATIOS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("EarningsPerShareDiluted", "WeightedAverageNumberOfDilutedSharesOutstanding"), ("NetIncomeLoss",)),
+    (("EarningsPerShareBasic", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",)),
+    (("CashAndCashEquivalentsAtCarryingValue",), ("CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",)),
+)
+#: A ratio this many powers of 10 from the filer's usual level (within RATIO_TOLERANCE) is a slipped decimal; larger
+#: steps are powers of 1000 that the other checks own, and no clean instance sits within the tolerance of either step.
+RATIO_STEPS = frozenset({1, 2})
+RATIO_TOLERANCE = 0.1
+#: Instances needed to know a filer's usual level, and the smallest EPS used (cents rounding blurs a smaller one).
+MIN_RATIO_INSTANCES = 4
+MIN_RATIO_EPS = 0.10
 #: Statutory tax in the rate reconciliation = statutory rate x pre-tax income (whichever pre-tax total is reported).
 STATUTORY_RATE = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate"
 STATUTORY_AMOUNT = "IncomeTaxReconciliationIncomeTaxExpenseBenefitAtFederalStatutoryIncomeTaxRate"
@@ -649,6 +667,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     held |= _comparative_errors(records, logs)
     held |= _column_shifts(records, logs, neighbours)
     held |= _identity_errors(records, held, neighbours)
+    held |= _ratio_errors(records, held, neighbours)
     recent = _recent_accessions(records)
     for i, f in enumerate(records):
         step = neighbours.previous_step(i) if f.period_start is None and f.accession in recent else None
@@ -954,6 +973,11 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
         unexplained = [inst for inst in system if inst in broken and inst not in explained]
         if unexplained:
             system_broken = [inst for inst in system if inst in broken]
+            decimal, unexplained = _decimal_repair(
+                records, system, system_broken, unexplained, learned=set(learned), neighbours=neighbours
+            )
+            out |= decimal
+        if unexplained:
             out |= _sign_repair(
                 records, system, system_broken, unexplained, learned=set(learned), neighbours=neighbours
             )
@@ -1230,6 +1254,97 @@ def _repair(
     return held, explained
 
 
+def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _Neighbours) -> set[int]:
+    """Instances of RATIOS (one filing, one period) whose level sits a power of 10 or 100 from the filer's usual level
+    while none of their facts is held already. A term that an exact relation of its own filing confirms is not blamed
+    (net income, which identities close around); of the rest, history picks one (_ratio_blame)."""
+    index: dict[tuple[str, date | None, date], dict[str, int]] = {}
+    for i, f in enumerate(records):
+        index.setdefault((f.accession, f.period_start, f.period_end), {})[f.concept] = i
+    out: set[int] = set()
+    confirmed: set[int] | None = None  # found only when a ratio is off: the identities are costly to rebuild
+    for num, den in RATIOS:
+        levels: list[tuple[float, list[int]]] = []
+        for terms in index.values():
+            idx = [j for c in (*num, *den) if (j := terms.get(c)) is not None]
+            if len(idx) < len(num) + len(den) or any(records[i].value == 0 for i in idx):
+                continue
+            if num[0].startswith("EarningsPerShare") and abs(records[idx[0]].value) < MIN_RATIO_EPS:
+                continue
+            logs = [math.log10(abs(records[i].value)) for i in idx]
+            levels.append((sum(logs[: len(num)]) - sum(logs[len(num) :]), idx))
+        if len(levels) < MIN_RATIO_INSTANCES:
+            continue
+        usual = statistics.median(level for level, _ in levels)
+        for level, idx in levels:
+            step = round(level - usual)
+            if abs(step) not in RATIO_STEPS or abs(level - usual - step) > RATIO_TOLERANCE or held & set(idx):
+                continue
+            if confirmed is None:
+                confirmed = _confirmed(records)
+            out |= _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
+    return out
+
+
+def _confirmed(records: list[FundamentalFact]) -> set[int]:
+    """Facts of statement identities and footnote tables that close exactly as reported (signs learned from the filing
+    left out): a figure its own filing adds up around is not the one a ratio blames."""
+    tables, _, statements, _ = _instances(records)
+    return {k for inst in tables + statements if _exact(_contributions(records, inst)) for k, _ in inst}
+
+
+def _ratio_blame(neighbours: _Neighbours, records: list[FundamentalFact], candidates: list[int]) -> set[int]:
+    """The candidate that sits clearly farthest from its own history (by NEAR_POWER over the next one, every candidate
+    having history), else all of them: a figure the filing's own figures contradict is not served."""
+    if len(candidates) == 1:
+        return set(candidates)
+    own = frozenset({records[candidates[0]].accession})
+    found = sorted(((d, i) for i in candidates if (d := neighbours.distance(i, own)) is not None), reverse=True)
+    if len(found) == len(candidates) and found[0][0] - found[1][0] > NEAR_POWER:
+        return {found[0][1]}
+    return set(candidates)
+
+
+def _decimal_repair(
+    records: list[FundamentalFact],
+    system: list[_Instance],
+    broken: list[_Instance],
+    unexplained: list[_Instance],
+    *,
+    learned: AbstractSet[_Instance],
+    neighbours: _Neighbours,
+) -> tuple[set[int], list[_Instance]]:
+    """Broken relations no power-of-1000 rescale explains may be explained by a single fact typed a power of 10 or 100
+    off (a slipped decimal, a column keyed in the wrong unit): rescaling it closes the relation exactly (FLIP_TOLERANCE)
+    without breaking any relation of the system that closes exactly as reported. Of the facts whose rescale closes a
+    relation, those that sit that far from their own history are held; with no history to decide, every one of them is
+    held, as a figure the filing's own statements contradict is not served. Relations whose signs were learned from the
+    filing are not repaired this way (a coincidence among their many lines is too likely). Returns the facts held and
+    the relations still unexplained."""
+    terms = sorted({k for inst in system for k, _ in inst})
+    own = frozenset({records[terms[0]].accession})
+    fixes = [
+        (k, factor, fixed)
+        for k in terms
+        for factor in DECIMAL_FACTORS
+        if (fixed := _rescale_fixes(records, system, broken, learned, k=k, factor=factor))
+    ]
+    held: set[int] = set()
+    rest: list[_Instance] = []
+    for inst in unexplained:
+        candidates = [(k, factor) for k, factor, fixed in fixes if inst in fixed]
+        if not candidates or inst in learned:  # signs learned from the filing adapt to it: no evidence of a slip
+            rest.append(inst)
+            continue
+        off = {
+            k
+            for k, factor in candidates
+            if (d := neighbours.distance(k, own)) is not None and abs(d - abs(math.log10(factor))) <= NEAR_POWER
+        }
+        held |= off or {k for k, _ in candidates}
+    return held, rest
+
+
 def _sign_repair(
     records: list[FundamentalFact],
     system: list[_Instance],
@@ -1271,9 +1386,23 @@ def _flip_fixes(
 ) -> list[_Instance]:
     """The broken relations that flipping fact k closes exactly (each needing both sides), or none if the flip breaks a
     fixed relation that closes exactly as reported."""
+    return _rescale_fixes(records, system, broken, learned, k=k, factor=-1.0)
+
+
+def _rescale_fixes(
+    records: list[FundamentalFact],
+    system: list[_Instance],
+    broken: list[_Instance],
+    learned: AbstractSet[_Instance],
+    *,
+    k: int,
+    factor: float,
+) -> list[_Instance]:
+    """The broken relations that multiplying fact k by factor closes exactly (each needing both sides), or none if it
+    breaks a fixed relation that closes exactly as reported (one whose signs were learned from the filing excepted)."""
     closed = []
     for inst in system:
-        after = _contributions(records, inst, {k}, -1.0)
+        after = _contributions(records, inst, {k}, factor)
         if inst not in broken:
             vetoes = inst not in learned and _exact(_contributions(records, inst))
             if vetoes and not _balances(after):
