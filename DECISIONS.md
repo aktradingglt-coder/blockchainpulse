@@ -363,7 +363,8 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    far from their own history are held; with no history to decide, every one of them is. Relations whose signs were
    learned from the filing are not repaired this way (on clean data one JPM 2013 tax-benefit line closed so by
    coincidence).
-6a. *Ratios at the filer's own level.* EPS × weighted shares = net income (diluted and basic), and cash is nearly
+6a. *Ratios at the filer's own level.* EPS × weighted shares = net income (diluted and basic, and diluted EPS × basic
+   shares for filers that tag no diluted share count, as XOM), and cash is nearly
    all of cash including restricted cash, hold at a level of the filer's own rather than exactly (preferred dividends
    move EPS: up to 10^0.8 in 2008–10 bank filings; cash is within 10^0.3 of the total everywhere). An instance whose
    level sits 10 or 100 times (within 10^0.1) from the filer's median level is a slipped decimal: no clean instance

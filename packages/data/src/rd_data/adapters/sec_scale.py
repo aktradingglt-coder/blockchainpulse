@@ -536,6 +536,9 @@ CONVENTION_VARIANTS: tuple[tuple[_Term, ...], ...] = (
 RATIOS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("EarningsPerShareDiluted", "WeightedAverageNumberOfDilutedSharesOutstanding"), ("NetIncomeLoss",)),
     (("EarningsPerShareBasic", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",)),
+    # diluted EPS against basic shares (dilution moves the level by under 10^0.05), for filers that tag no diluted
+    # share count (XOM)
+    (("EarningsPerShareDiluted", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",)),
     (("CashAndCashEquivalentsAtCarryingValue",), ("CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",)),
 )
 #: A ratio this many powers of 10 from the filer's usual level (within RATIO_TOLERANCE) is a slipped decimal; larger
