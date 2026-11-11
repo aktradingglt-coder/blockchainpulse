@@ -364,14 +364,15 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    learned from the filing are not repaired this way (on clean data one JPM 2013 tax-benefit line closed so by
    coincidence).
 6a. *Ratios at the filer's own level.* EPS × weighted shares = net income (diluted and basic, and diluted EPS × basic
-   shares for filers that tag no diluted share count, as XOM), and cash is nearly
-   all of cash including restricted cash, hold at a level of the filer's own rather than exactly (preferred dividends
-   move EPS: up to 10^0.8 in 2008–10 bank filings; cash is within 10^0.3 of the total everywhere). An instance whose
-   level sits 10 or 100 times (within 10^0.1) from the filer's median level is a slipped decimal: no clean instance
-   of the 15 filers sits there (three 2008–10 NVDA filings sit exactly 10^3 off, shares tagged in thousands, which
-   this rule leaves to the power-of-1000 checks). Stock splits move EPS and shares together and leave the level
-   alone. A term confirmed by an exact relation of its own filing (net income) is not blamed; of the others, the one
-   clearly farthest from its history is held, else all of them.
+   shares for filers that tag no diluted share count, as XOM), and cash is nearly all of cash including restricted
+   cash (either total's tag), hold at a level of the filer's own rather than exactly. EPS: preferred dividends move a
+   bank's level by up to 10^1.5 (C, 2009), so an instance is a slipped decimal only when its level sits 10 or 100
+   times (within 10^0.1) from the filer's median level; no clean instance of the 15 filers sits there, EPS of any
+   size included (three 2008–10 NVDA filings sit exactly 10^3 off, shares tagged in thousands, which this rule leaves
+   to the power-of-1000 checks). Stock splits move EPS and shares together and leave the level alone. Cash: its share
+   of the total moves at most 10^0.27 from a filer's level in clean data (META, 2026), so any move of 10^0.5 or more
+   is a slip. A term confirmed by an exact relation of its own filing (net income, the cash total) is not blamed; of
+   the others, the one clearly farthest from its history is held, else all of them.
 7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
    is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
    the 15 filers below with the bound itself switched off:

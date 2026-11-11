@@ -533,21 +533,31 @@ CONVENTION_VARIANTS: tuple[tuple[_Term, ...], ...] = (
 #: weighted shares = net income (to common stock: preferred dividends move the level, by up to 10^0.8 in 2008-10 bank
 #: filings of the calibration set), and cash is nearly all of cash including restricted cash (within 10^0.3). Stock
 #: splits move EPS and shares together and leave the level alone.
-RATIOS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (("EarningsPerShareDiluted", "WeightedAverageNumberOfDilutedSharesOutstanding"), ("NetIncomeLoss",)),
-    (("EarningsPerShareBasic", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",)),
+#: Cash's share of cash including restricted cash moves at most 10^0.27 from a filer's usual level in clean data (META,
+#: 2026); a move this large is a slipped decimal in one of the two.
+CASH_SHARE_MOVE = 0.5
+RATIOS: tuple[tuple[tuple[str, ...], tuple[str, ...], float | None], ...] = (
+    (("EarningsPerShareDiluted", "WeightedAverageNumberOfDilutedSharesOutstanding"), ("NetIncomeLoss",), None),
+    (("EarningsPerShareBasic", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",), None),
     # diluted EPS against basic shares (dilution moves the level by under 10^0.05), for filers that tag no diluted
     # share count (XOM)
-    (("EarningsPerShareDiluted", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",)),
-    (("CashAndCashEquivalentsAtCarryingValue",), ("CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",)),
+    (("EarningsPerShareDiluted", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",), None),
+    *(
+        (("CashAndCashEquivalentsAtCarryingValue",), (total,), CASH_SHARE_MOVE)
+        for total in (
+            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroupAndDiscontinuedOperations",
+        )
+    ),
 )
-#: A ratio this many powers of 10 from the filer's usual level (within RATIO_TOLERANCE) is a slipped decimal; larger
-#: steps are powers of 1000 that the other checks own, and no clean instance sits within the tolerance of either step.
+#: An EPS ratio this many powers of 10 from the filer's usual level (within RATIO_TOLERANCE) is a slipped decimal:
+#: preferred dividends move a bank's level by up to 10^1.5 (C, 2009), but no clean instance sits within the tolerance of
+#: either step; larger steps are powers of 1000 that the other checks own. EPS of any size counts (cents rounding moves
+#: the level by 10^0.3 at most).
 RATIO_STEPS = frozenset({1, 2})
 RATIO_TOLERANCE = 0.1
-#: Instances needed to know a filer's usual level, and the smallest EPS used (cents rounding blurs a smaller one).
+#: Instances needed to know a filer's usual level.
 MIN_RATIO_INSTANCES = 4
-MIN_RATIO_EPS = 0.10
 #: Statutory tax in the rate reconciliation = statutory rate x pre-tax income (whichever pre-tax total is reported).
 STATUTORY_RATE = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate"
 STATUTORY_AMOUNT = "IncomeTaxReconciliationIncomeTaxExpenseBenefitAtFederalStatutoryIncomeTaxRate"
@@ -1266,13 +1276,11 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
         index.setdefault((f.accession, f.period_start, f.period_end), {})[f.concept] = i
     out: set[int] = set()
     confirmed: set[int] | None = None  # found only when a ratio is off: the identities are costly to rebuild
-    for num, den in RATIOS:
+    for num, den, min_move in RATIOS:
         levels: list[tuple[float, list[int]]] = []
         for terms in index.values():
             idx = [j for c in (*num, *den) if (j := terms.get(c)) is not None]
             if len(idx) < len(num) + len(den) or any(records[i].value == 0 for i in idx):
-                continue
-            if num[0].startswith("EarningsPerShare") and abs(records[idx[0]].value) < MIN_RATIO_EPS:
                 continue
             logs = [math.log10(abs(records[i].value)) for i in idx]
             levels.append((sum(logs[: len(num)]) - sum(logs[len(num) :]), idx))
@@ -1280,8 +1288,12 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
             continue
         usual = statistics.median(level for level, _ in levels)
         for level, idx in levels:
-            step = round(level - usual)
-            if abs(step) not in RATIO_STEPS or abs(level - usual - step) > RATIO_TOLERANCE or held & set(idx):
+            off = level - usual
+            if min_move is not None:
+                slipped = abs(off) >= min_move
+            else:
+                slipped = abs(round(off)) in RATIO_STEPS and abs(off - round(off)) <= RATIO_TOLERANCE
+            if not slipped or held & set(idx):
                 continue
             if confirmed is None:
                 confirmed = _confirmed(records)

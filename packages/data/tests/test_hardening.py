@@ -3565,6 +3565,24 @@ def test_eps_or_shares_a_decimal_off_net_income_is_held(seeded: str, factor: flo
     assert not clean
 
 
+@pytest.mark.parametrize("factor", [10.0, 0.1])
+def test_a_small_eps_a_decimal_off_net_income_is_held(factor: float) -> None:
+    """EPS of a few dimes, slipped a decimal to a few cents (or to dollars), is still held: cents rounding moves the
+    level by far less than a power of 10."""
+    shares = (3.20e9, 3.21e9, 3.22e9, 3.23e9, 3.24e9)
+    income = (0.9e9, 1.1e9, 1.0e9, 1.2e9, 1.0e9)
+    rows = {
+        "NetIncomeLoss": income,
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True)),
+    }
+    records = _seeded(rows, "EarningsPerShareDiluted", factor, (2021, 2022, 2023, 2024, 2025))
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("EarningsPerShareDiluted", 2025, "a")
+    }
+
+
 def test_a_stock_split_moves_eps_and_shares_together_and_holds_nothing() -> None:
     """A 10-for-1 split in the newest year: EPS and shares both move a power of 10 from their history, but their
     product still matches net income, so nothing is held."""
@@ -3580,11 +3598,22 @@ def test_a_stock_split_moves_eps_and_shares_together_and_holds_nothing() -> None
 
 
 @pytest.mark.parametrize("factor", [10.0, 0.1])
-def test_cash_a_decimal_off_cash_including_restricted_cash_is_held(factor: float) -> None:
-    """Cash is nearly all of cash including restricted cash; cash a power of 10 off that share is held."""
+@pytest.mark.parametrize(
+    "total",
+    [
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroupAndDiscontinuedOperations",
+    ],
+)
+@pytest.mark.parametrize("restricted_newest", [1e9, 31e9])
+def test_cash_a_decimal_off_cash_including_restricted_cash_is_held(
+    factor: float, total: str, restricted_newest: float
+) -> None:
+    """Cash is nearly all of cash including restricted cash (under either total's tag); cash a power of 10 off that
+    share is held, even where restricted cash has grown to a third of the total in the newest period (as Meta's did)."""
     rows = {
         "CashAndCashEquivalentsAtCarryingValue": (70e9, 78e9, 86e9, 73e9, 66e9),
-        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": (71e9, 79e9, 87e9, 74e9, 67e9),
+        total: (71e9, 79e9, 87e9, 74e9, 66e9 + restricted_newest),
     }
     records = _seeded(rows, "CashAndCashEquivalentsAtCarryingValue", factor, (2021, 2022, 2023, 2024, 2025))
     held, _ = sec_scale.scale_errors(records)
