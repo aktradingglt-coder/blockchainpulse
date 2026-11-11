@@ -3764,3 +3764,32 @@ def test_flows_keyed_a_decimal_off_beside_genuine_balances_are_held() -> None:
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
         (c, 2025, "a") for c in flows
     }
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1])
+def test_a_fast_growers_statement_keyed_a_decimal_off_is_held_by_its_eps(factor: float) -> None:
+    """A fast grower's genuine flows already sit 10^0.4 above their neighbours, so a statement keyed 10x off misses the
+    tight column rule; but EPS x shares no longer matches net income (whose identity still closes, as every line moved
+    together), and the flow column sits about that step off: the column is held (its EPS and shares with it, as a
+    mostly held column is held whole)."""
+    years = (2021, 2022, 2023, 2024, 2025)
+    grow = [10 ** (0.15 * y) for y in range(5)]
+    income = tuple(10e9 * g for g in grow)
+    shares = (1.0e9,) * 5
+    flows = {
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": tuple(
+            n * 1.25 for n in income
+        ),
+        "IncomeTaxExpenseBenefit": tuple(n * 0.25 for n in income),
+        "NetIncomeLoss": income,
+        **{f"Flow{k:02d}": tuple((1 + 0.1 * k) * 1e9 * g for g in grow) for k in range(12)},
+    }
+    per_share = {
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True)),
+    }
+    records = [*_seeded(flows, set(flows), factor, years), *_seeded(per_share, set(), 1.0, years)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in (*flows, *per_share)
+    }

@@ -724,6 +724,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     held |= _identity_errors(records, held, neighbours)
     held |= _ratio_errors(records, held, neighbours)
     held |= _part_bound_errors(records, held, neighbours)
+    held |= _twin_errors(records, held, neighbours)
     recent = _recent_accessions(records)
     for i, f in enumerate(records):
         step = neighbours.previous_step(i) if f.period_start is None and f.accession in recent else None
@@ -1366,14 +1367,38 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
             if (held | out) & set(idx):  # this check's own holds count: diluted EPS held carries basic EPS
                 rest = [i for i in idx if i not in held | out]
                 if _moved_together(records, idx, level - usual, min_move) and rest:
-                    blamed = _ratio_blame(neighbours, records, rest)
-                    # a tight ratio (cash, diluted EPS) pins the rest to the held term; EPS x shares needs history too
-                    out |= blamed if min_move is not None else {i for i in blamed if _far(neighbours, records, i)}
+                    if min_move is not None:  # a tight ratio (cash, diluted EPS) pins the rest to the held term
+                        out |= _ratio_blame(neighbours, records, rest)
+                    else:  # EPS or shares, whichever history clearly blames (shares sit on theirs)
+                        out |= _ratio_blame(neighbours, records, rest, margin=NEAR_POWER / 2, undecided=False)
             elif slipped:
                 if confirmed is None:
                     confirmed = _confirmed(records)
-                out |= _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
+                column = _slipped_column(records, neighbours, idx[-1], -(level - usual)) if min_move is None else []
+                # net income's identities close because its whole statement slipped with it: hold the statement
+                out |= set(column) or _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
     return out
+
+
+def _slipped_column(records: list[FundamentalFact], neighbours: _Neighbours, i: int, off: float) -> list[int]:
+    """The currency facts of fact i's filing, period end and kind (balances or flows), when their median step from
+    their history sits within 10^NEAR_POWER of off, the slip a ratio shows: the statement was keyed in the wrong unit
+    (its identities close, so they vouch for nothing), and a fast grower's genuine column already sits 10^0.4 above its
+    neighbours (NVDA), too far for the column rule (rule 11) alone."""
+    f = records[i]
+    column = [
+        j
+        for j, g in enumerate(records)
+        if g.accession == f.accession
+        and g.period_end == f.period_end
+        and (g.period_start is None) == (f.period_start is None)
+        and _CURRENCY.match(g.unit)
+        and g.taxonomy != "dei"
+    ]
+    steps = [d for j in column if (d := neighbours.level_step(j)) is not None]
+    if len(steps) < COLUMN_SHIFT_MIN or abs(statistics.median(steps) - off) > NEAR_POWER:
+        return []
+    return column
 
 
 def _all_off_by(neighbours: _Neighbours, records: list[FundamentalFact], group: Sequence[int], factor: float) -> bool:
@@ -1410,6 +1435,23 @@ def _part_bound_errors(records: list[FundamentalFact], held: set[int], neighbour
                         for c in _TWIN_TOTALS
                         if (j := terms.get(c)) is not None and records[j].value == records[t].value
                     }
+    return out
+
+
+def _twin_errors(records: list[FundamentalFact], held: set[int], neighbours: _Neighbours) -> set[int]:
+    """A held total's twin (assets, liabilities and equity) that equals it in the same filing and date and sits more
+    than 10^NEAR_POWER from its own history slipped with it."""
+    twins: dict[tuple[str, date], list[int]] = {}
+    for i, f in enumerate(records):
+        if f.concept in _TWIN_TOTALS and f.period_start is None and _CURRENCY.match(f.unit):
+            twins.setdefault((f.accession, f.period_end), []).append(i)
+    out: set[int] = set()
+    for idx in twins.values():
+        if len(idx) == 2 and records[idx[0]].value == records[idx[1]].value and len(held & set(idx)) == 1:
+            other = next(i for i in idx if i not in held)
+            d = neighbours.distance(other, frozenset({records[other].accession}))
+            if d is not None and d > NEAR_POWER:
+                out.add(other)
     return out
 
 
@@ -1450,11 +1492,6 @@ def _slipped(off: float, min_move: float | None) -> bool:
     return abs(round(off)) in RATIO_STEPS and abs(off - round(off)) <= RATIO_TOLERANCE
 
 
-def _far(neighbours: _Neighbours, records: list[FundamentalFact], i: int) -> bool:
-    d = neighbours.distance(i, frozenset({records[i].accession}))
-    return d is not None and d > NEAR_POWER
-
-
 def _confirmed(records: list[FundamentalFact]) -> set[int]:
     """Facts of statement identities and footnote tables that close exactly as reported (signs learned from the filing
     left out): a figure its own filing adds up around is not the one a ratio blames."""
@@ -1462,16 +1499,24 @@ def _confirmed(records: list[FundamentalFact]) -> set[int]:
     return {k for inst in tables + statements if _exact(_contributions(records, inst)) for k, _ in inst}
 
 
-def _ratio_blame(neighbours: _Neighbours, records: list[FundamentalFact], candidates: list[int]) -> set[int]:
-    """The candidate that sits clearly farthest from its own history (by NEAR_POWER over the next one, every candidate
-    having history), else all of them: a figure the filing's own figures contradict is not served."""
+def _ratio_blame(
+    neighbours: _Neighbours,
+    records: list[FundamentalFact],
+    candidates: list[int],
+    *,
+    margin: float = NEAR_POWER,
+    undecided: bool = True,
+) -> set[int]:
+    """The candidate that sits clearly farthest from its own history (by margin over the next one, every candidate
+    having history); else all of them (a figure the filing's own figures contradict is not served), or none when
+    ``undecided`` is false."""
     if len(candidates) == 1:
         return set(candidates)
     own = frozenset({records[candidates[0]].accession})
     found = sorted(((d, i) for i in candidates if (d := neighbours.distance(i, own)) is not None), reverse=True)
-    if len(found) == len(candidates) and found[0][0] - found[1][0] > NEAR_POWER:
+    if len(found) == len(candidates) and found[0][0] - found[1][0] > margin:
         return {found[0][1]}
-    return set(candidates)
+    return set(candidates) if undecided else set()
 
 
 def _decimal_repair(

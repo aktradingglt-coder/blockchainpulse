@@ -380,8 +380,12 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    is a slip. A term confirmed by an exact relation of its own filing (net income, the cash total) is not blamed; of
    the others, the one clearly farthest from its history is held, else all of them. An EPS instance at its usual
    level (within 10^0.3, EPS × shares of net income's sign) although one of its terms is held moved with that term
-   (net income and EPS slipped together): the other term that sits more than 10^0.5 from its history is held with
-   it. Looser, this held 29 genuine NVDA 2008–10 and META 2012 EPS facts next to held share counts and income.
+   (net income and EPS slipped together): of EPS and shares, the one history clearly blames (by 10^0.25 over the
+   other) is held with it. Looser, this held 29 genuine NVDA 2008–10 and META 2012 EPS facts next to held share
+   counts and income. When an EPS ratio slips while net income's identities close, and net income's whole flow
+   column sits within 10^0.5 of that step off its history, the statement was keyed in the wrong unit: the column is
+   held, not EPS (a fast grower's genuine column sits up to 10^0.4 above its neighbours, NVDA 2026, too far for the
+   column rule of rule 11 alone).
    Diluted EPS sits within 10^0.3 of basic EPS in clean data (cents rounding of small EPS), so a move of 10^0.5
    between them is a slip, and basic EPS beside a held diluted EPS it agrees with is held with it.
 6b. *Parts over their totals.* A never-negative part more than twice its never-negative total in one filing and
@@ -392,7 +396,8 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    of revenue over its costs and expenses; one BAC 2008 total of assets tagged 0) and genuine shares reach 0.84, so a
    decimal slip in either lands far past the bound. History blames one, else both are held; a held total takes the
    twin it equals (assets, liabilities and equity) with it, as no identity sees two totals slipped together where
-   neither has parts tagged that close.
+   neither has parts tagged that close. Whichever check holds one twin, the other, equal to it and more than 10^0.5
+   from its own history, is held too.
 7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
    is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
    the 15 filers below with the bound itself switched off:
