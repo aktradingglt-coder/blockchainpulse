@@ -4,8 +4,8 @@ _Last updated: 2026-11-11_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–23 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–27); awaiting review round 24 (ledger row 27 written).** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–24 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–28); awaiting review round 25 (ledger row 28 written).** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -160,6 +160,10 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   profit, GE, bank rate-reconciliation lines, META Q1 tax, AMZN cells); 21 JPM 2013–21 10-K systems exceed
   `MAX_IDENTITY_TERMS` since the NII identity (historical only); EIA and Twelve Data `{}` bodies do not open the
   breaker; Kraken open interest ×1000 from a single snapshot is served.
+- P2 (from P1 review round 24, minor): Kraken open interest from a single snapshot has no evidence to check against;
+  Kraken candles out of order are re-sorted without a provider-order warning, and a far-future candle is dropped
+  without a warning (the response is still labelled stale correctly); SEC slips in lines no relation closes (GE
+  revenue and cash, MMM operating cash flow) are served (D-036 limit).
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after
