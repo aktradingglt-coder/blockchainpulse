@@ -3695,3 +3695,72 @@ def test_a_column_keyed_a_decimal_off_is_held_whole(factor: float) -> None:
     }
     clean, _ = sec_scale.scale_errors(_seeded(base, set(base), 1.0, (2021, 2022, 2023, 2024, 2025)))
     assert not clean
+
+
+@pytest.mark.parametrize("factor", [0.1, 0.01])
+def test_twin_totals_a_decimal_off_their_own_part_are_held(factor: float) -> None:
+    """With no total liabilities or noncurrent assets tagged (as Amazon), assets and liabilities-and-equity slipped
+    together equal each other and break no identity; but current assets now exceed twice the total: both are held."""
+    rows = {  # synthetic round figures, not any filer's
+        "AssetsCurrent": (130e9, 140e9, 145e9, 150e9, 152e9),
+        "Assets": (350e9, 365e9, 373e9, 380e9, 383e9),
+        "LiabilitiesAndStockholdersEquity": (350e9, 365e9, 373e9, 380e9, 383e9),
+    }
+    seeded = {"Assets", "LiabilitiesAndStockholdersEquity"}
+    records = _seeded(rows, seeded, factor, (2021, 2022, 2023, 2024, 2025), instants=True)
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in seeded
+    }
+
+
+def test_a_cost_of_revenue_a_decimal_over_its_total_is_held() -> None:
+    """Cost of revenue is a never-negative part of costs and expenses; ten times over it, the cost is held."""
+    rows = {
+        "CostsAndExpenses": (72e9, 75e9, 79e9, 82e9, 78e9),
+        "CostOfRevenue": (40e9, 42e9, 44e9, 45e9, 43e9),
+    }
+    records = _seeded(rows, "CostOfRevenue", 10.0, (2021, 2022, 2023, 2024, 2025))
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        ("CostOfRevenue", 2025, "a")
+    }
+
+
+def test_net_income_and_both_eps_slipped_together_are_all_held() -> None:
+    """Net income and both EPS a decimal off: net income breaks its identity, diluted EPS moved with it, and basic
+    EPS sits with diluted EPS (within 10^0.3 of it in clean data), so all three are held; shares are not."""
+    shares = (1.00e9, 0.99e9, 0.98e9, 0.97e9, 0.96e9)
+    income = (10e9, 11e9, 12e9, 13e9, 14e9)
+    eps = tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True))
+    rows = {
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": tuple(
+            n + 3e9 for n in income
+        ),
+        "IncomeTaxExpenseBenefit": (3e9, 3e9, 3e9, 3e9, 3e9),
+        "NetIncomeLoss": income,
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": eps,
+        "EarningsPerShareBasic": tuple(e + 0.01 for e in eps),
+        # the rest of the statement, so three held facts are not most of the column
+        **{f"Line{k:02d}": tuple((1 + 0.1 * k) * 1e9 * (1.03**y) for y in range(5)) for k in range(6)},
+    }
+    seeded = {"NetIncomeLoss", "EarningsPerShareDiluted", "EarningsPerShareBasic"}
+    records = _seeded(rows, seeded, 0.1, (2021, 2022, 2023, 2024, 2025))
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in seeded
+    }
+
+
+def test_flows_keyed_a_decimal_off_beside_genuine_balances_are_held() -> None:
+    """The newest year's flows 10x off while its balances are genuine: flows and balances are separate columns (the
+    statements are keyed apart), so the flow column is held whole and the balances are served."""
+    flows = {f"Flow{k:02d}": tuple((1 + 0.1 * k) * 1e9 * (1.03**y) for y in range(5)) for k in range(12)}
+    balances = {f"Balance{k:02d}": tuple((2 + 0.1 * k) * 1e9 * (1.02**y) for y in range(5)) for k in range(12)}
+    years = (2021, 2022, 2023, 2024, 2025)
+    records = [*_seeded(flows, set(flows), 10.0, years), *_seeded(balances, set(), 1.0, years, instants=True)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in flows
+    }

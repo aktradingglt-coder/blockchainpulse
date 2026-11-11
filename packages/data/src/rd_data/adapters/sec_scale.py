@@ -544,12 +544,15 @@ CONVENTION_VARIANTS: tuple[tuple[_Term, ...], ...] = (
 #: Cash's share of cash including restricted cash moves at most 10^0.27 from a filer's usual level in clean data (META,
 #: 2026); a move this large is a slipped decimal in one of the two.
 CASH_SHARE_MOVE = 0.5
+EPS_DILUTION_MOVE = 0.5
 RATIOS: tuple[tuple[tuple[str, ...], tuple[str, ...], float | None], ...] = (
     (("EarningsPerShareDiluted", "WeightedAverageNumberOfDilutedSharesOutstanding"), ("NetIncomeLoss",), None),
     (("EarningsPerShareBasic", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",), None),
     # diluted EPS against basic shares (dilution moves the level by under 10^0.05), for filers that tag no diluted
     # share count (XOM)
     (("EarningsPerShareDiluted", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",), None),
+    # diluted EPS sits within 10^0.3 of basic EPS in clean data (cents rounding of small EPS; dilution itself <10^0.1)
+    (("EarningsPerShareDiluted",), ("EarningsPerShareBasic",), EPS_DILUTION_MOVE),
     *(
         (("CashAndCashEquivalentsAtCarryingValue",), (total,), CASH_SHARE_MOVE)
         for total in (
@@ -564,6 +567,35 @@ RATIOS: tuple[tuple[tuple[str, ...], tuple[str, ...], float | None], ...] = (
 #: the level by 10^0.3 at most).
 RATIO_STEPS = frozenset({1, 2})
 RATIO_TOLERANCE = 0.1
+#: Never-negative totals and never-negative parts of them. No clean part of the 15 filers exceeds its total by more
+#: than 6% (MMM's Q3-2022 cost of revenue over its costs and expenses; BAC tags one 2008 total of assets as 0), and
+#: genuine shares reach 0.84 (WFC deposits of liabilities), so a part over PART_BOUND times its total is a slip.
+_ASSET_PARTS = (
+    "AssetsCurrent",
+    "AssetsNoncurrent",
+    "CashAndCashEquivalentsAtCarryingValue",
+    "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    "PropertyPlantAndEquipmentNet",
+    "Goodwill",
+    "IntangibleAssetsNetExcludingGoodwill",
+    "InventoryNet",
+    "AccountsReceivableNetCurrent",
+    "LoansAndLeasesReceivableNetReportedAmount",
+    "FinancingReceivableExcludingAccruedInterestAfterAllowanceForCreditLoss",
+    "AvailableForSaleSecuritiesDebtSecurities",
+    "HeldToMaturitySecurities",
+)
+PART_BOUNDS: dict[str, tuple[str, ...]] = {
+    "Assets": _ASSET_PARTS,
+    "LiabilitiesAndStockholdersEquity": (*_ASSET_PARTS, "Deposits"),
+    "Liabilities": ("LiabilitiesCurrent", "AccountsPayableCurrent", "LongTermDebt", "Deposits"),
+    "AssetsCurrent": ("CashAndCashEquivalentsAtCarryingValue", "InventoryNet", "AccountsReceivableNetCurrent"),
+    "LiabilitiesCurrent": ("AccountsPayableCurrent",),
+    "CostsAndExpenses": ("CostOfRevenue", "CostOfGoodsAndServicesSold"),
+}
+PART_BOUND = 2.0
+#: Totals that equal each other in every balance sheet: a slip in one held by a part bound is the other's too.
+_TWIN_TOTALS = ("Assets", "LiabilitiesAndStockholdersEquity")
 #: Instances needed to know a filer's usual level.
 MIN_RATIO_INSTANCES = 4
 #: How close to its usual level an EPS instance must sit for a held term to have carried the others with it.
@@ -691,6 +723,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     held |= _column_shifts(records, logs, neighbours)
     held |= _identity_errors(records, held, neighbours)
     held |= _ratio_errors(records, held, neighbours)
+    held |= _part_bound_errors(records, held, neighbours)
     recent = _recent_accessions(records)
     for i, f in enumerate(records):
         step = neighbours.previous_step(i) if f.period_start is None and f.accession in recent else None
@@ -701,9 +734,9 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
     # A filing's column (its facts for one period end) that is mostly held is held whole: the scale was set for the
     # column, and the facts that slipped through the other checks share it.
-    column: dict[tuple[str, date], list[int]] = {}
-    for i, f in enumerate(records):
-        column.setdefault((f.accession, f.period_end), []).append(i)
+    column: dict[tuple[str, date, bool], list[int]] = {}
+    for i, f in enumerate(records):  # balances and flows apart, as their statements are keyed apart
+        column.setdefault((f.accession, f.period_end, f.period_start is None), []).append(i)
     for idx in column.values():
         hits = sum(i in held for i in idx)
         if hits >= COLUMN_MIN_HELD and hits / len(idx) >= FILING_SCALE_SHARE:
@@ -870,10 +903,11 @@ def _column_shifts(records: list[FundamentalFact], logs: list[float | None], nei
     from the neighbouring periods of its series: the scale was set for the whole statement (see COLUMN_SHIFT_MIN).
     Neighbours are medians of several periods, so one mis-scaled earlier column does not make the next, genuine one
     look shifted."""
-    columns: dict[tuple[str, date], list[int]] = {}
+    columns: dict[tuple[str, date, bool], list[int]] = {}
     for i, f in enumerate(records):
         if logs[i] is not None and _CURRENCY.match(f.unit) and f.taxonomy != "dei":
-            columns.setdefault((f.accession, f.period_end), []).append(i)
+            # balances and flows apart: the balance sheet and the other statements are keyed separately
+            columns.setdefault((f.accession, f.period_end, f.period_start is None), []).append(i)
     out: set[int] = set()
     for idx in columns.values():
         steps = [d for i in idx if (d := neighbours.level_step(i)) is not None]
@@ -1329,10 +1363,12 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
         usual = statistics.median(level for level, _ in levels)
         for level, idx in levels:
             slipped = _slipped(level - usual, min_move)
-            if held & set(idx):
-                rest = [i for i in idx if i not in held]
+            if (held | out) & set(idx):  # this check's own holds count: diluted EPS held carries basic EPS
+                rest = [i for i in idx if i not in held | out]
                 if _moved_together(records, idx, level - usual, min_move) and rest:
-                    out |= {i for i in _ratio_blame(neighbours, records, rest) if _far(neighbours, records, i)}
+                    blamed = _ratio_blame(neighbours, records, rest)
+                    # a tight ratio (cash, diluted EPS) pins the rest to the held term; EPS x shares needs history too
+                    out |= blamed if min_move is not None else {i for i in blamed if _far(neighbours, records, i)}
             elif slipped:
                 if confirmed is None:
                     confirmed = _confirmed(records)
@@ -1346,6 +1382,35 @@ def _all_off_by(neighbours: _Neighbours, records: list[FundamentalFact], group: 
     step = abs(math.log10(factor))
     found = [d for i in group if (d := neighbours.distance(i, frozenset({records[i].accession}))) is not None]
     return bool(found) and all(abs(d - step) <= NEAR_POWER for d in found)
+
+
+def _part_bound_errors(records: list[FundamentalFact], held: set[int], neighbours: _Neighbours) -> set[int]:
+    """A never-negative part more than PART_BOUND times its never-negative total (PART_BOUNDS) in one filing and
+    period: one of the two slipped (a total a decimal off with its twin, assets = liabilities and equity, still equal).
+    The one history clearly blames is held, else both; a held total takes the twin it equals with it."""
+    index: dict[tuple[str, date | None, date], dict[str, int]] = {}
+    for i, f in enumerate(records):
+        if _CURRENCY.match(f.unit):
+            index.setdefault((f.accession, f.period_start, f.period_end), {})[f.concept] = i
+    out: set[int] = set()
+    for terms in index.values():
+        for total, parts in PART_BOUNDS.items():
+            t = terms.get(total)
+            if t is None or t in held or records[t].value <= 0:
+                continue
+            for part in parts:
+                q = terms.get(part)
+                if q is None or q in held or records[q].value <= PART_BOUND * records[t].value:
+                    continue
+                blamed = _ratio_blame(neighbours, records, [t, q])
+                out |= blamed
+                if t in blamed:
+                    out |= {
+                        j
+                        for c in _TWIN_TOTALS
+                        if (j := terms.get(c)) is not None and records[j].value == records[t].value
+                    }
+    return out
 
 
 def _ratio_levels(
@@ -1366,9 +1431,12 @@ def _ratio_levels(
 
 
 def _moved_together(records: list[FundamentalFact], idx: list[int], off: float, min_move: float | None) -> bool:
-    """An EPS instance at its usual level (within RATIO_MOVED_TOGETHER) with EPS x shares of net income's sign: the
-    terms agree with each other, so a held one carried the rest with it."""
-    if min_move is not None or abs(off) > RATIO_MOVED_TOGETHER:
+    """An instance whose terms agree with each other, so a held one carried the rest with it: a tight ratio within its
+    move, or an EPS instance at its usual level (within RATIO_MOVED_TOGETHER) with EPS x shares of net income's
+    sign."""
+    if min_move is not None:
+        return abs(off) < min_move
+    if abs(off) > RATIO_MOVED_TOGETHER:
         return False
     eps, shares, income = (records[i].value for i in idx)
     return (eps * shares > 0) == (income > 0)

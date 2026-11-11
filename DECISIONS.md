@@ -382,6 +382,17 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    level (within 10^0.3, EPS × shares of net income's sign) although one of its terms is held moved with that term
    (net income and EPS slipped together): the other term that sits more than 10^0.5 from its history is held with
    it. Looser, this held 29 genuine NVDA 2008–10 and META 2012 EPS facts next to held share counts and income.
+   Diluted EPS sits within 10^0.3 of basic EPS in clean data (cents rounding of small EPS), so a move of 10^0.5
+   between them is a slip, and basic EPS beside a held diluted EPS it agrees with is held with it.
+6b. *Parts over their totals.* A never-negative part more than twice its never-negative total in one filing and
+   period (current assets, cash, PP&E, goodwill, intangibles, inventory, receivables, loans and securities of total
+   assets or of liabilities and equity; deposits, current liabilities, payables and long-term debt of total
+   liabilities; cash, inventory and receivables of current assets; payables of current liabilities; cost of revenue of
+   costs and expenses): one of the two slipped. No clean part exceeds its total by more than 6% (MMM's Q3-2022 cost
+   of revenue over its costs and expenses; one BAC 2008 total of assets tagged 0) and genuine shares reach 0.84, so a
+   decimal slip in either lands far past the bound. History blames one, else both are held; a held total takes the
+   twin it equals (assets, liabilities and equity) with it, as no identity sees two totals slipped together where
+   neither has parts tagged that close.
 7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
    is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
    the 15 filers below with the bound itself switched off:
@@ -425,8 +436,9 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
     the filing's own other periods within 400 days, and the column sits a power of 1000 from them (median within
     10^0.5, 60% of facts within 10^1), or, more tightly, a power of 10 or 100 (median within 10^0.3, 60% of facts
     within 10^0.5: no clean column comes near; the closest, a 2010 META comparative, has its median at 10^-0.57 with
-    52% of its facts within 10^0.5 of 10^-1). For a young filer this is often the only evidence; it adds no clean
-    holds.
+    52% of its facts within 10^0.5 of 10^-1). Balances and flows are separate columns, as the balance sheet and the
+    other statements are keyed apart (and a mostly held column is held whole on the same split). For a young filer
+    this is often the only evidence; it adds no clean holds.
 
 All checks run on every concept the company reports; a `concepts` filter narrows only what is returned, and the
 returned concepts alone date the response (a concept last reported years ago is as old as its last report).
@@ -450,8 +462,8 @@ set aside with a warning.
 - One size bound for every line (100×, 10× when flagged): too loose; ×1000 tax and cash-flow lines landed at 1.4–8.2×
   total assets and were served (round 12).
 - A step-from-last-year rule for flows: measured and rejected (10 genuine 10^2–10^3 moves in the newest AMZN filings).
-- A "part ≤ total" bound: measured and rejected. Genuine parts reach 815× their total when the other parts offset (GE,
-  Citi).
+- A "part ≤ total" bound for every line: measured and rejected. Genuine parts reach 815× their total when the other
+  parts offset (GE, Citi). Rule 6b keeps it only for never-negative parts of never-negative totals, at 2×.
 - A fixed-sign rate reconciliation: it closes in 50 of 360 clean instances, and once held genuine Apple facts by
   chance.
 
