@@ -266,7 +266,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-11-10, round 22) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-11-11, round 23) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -295,7 +295,11 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      tag) = operating + investing + financing (+ FX, under any of three tags, when reported); comprehensive income =
      net income + OCI (parent portion, or total); comprehensive income including NCI = profit + OCI, and = the
      parent's + the NCI's, and (for filers with no profit line) = net income + NCI share + OCI, in total (843 of 855
-     clean instances within 0.1%) or as the parent's and the NCI's (384 of 439); profit = net income + NCI share; income from continuing operations (or profit, or net
+     clean instances within 0.1%) or as the parent's and the NCI's (384 of 439); profit = net income + NCI share; net income = income from continuing operations + discontinued operations, the parent's
+     shares (355 of 437: C 149 of 149, MMM 32 of 32, GOOGL 11 of 11, GE 163 of 245); income from continuing operations
+     including NCI = the parent's + the NCI's share, of continuing operations (155 of 201: C 69 of 74, GE 86 of 127) or
+     tagged as the NCI's share of net income (288 of 406: C 149 of 149, GE 135 of 233, MMM 4 of 24); income from
+     continuing operations (or profit, or net
      income) = pre-tax income − tax, with equity-method income added after tax where the pre-tax line excludes it;
      pre-tax income = revenue − costs and expenses; operating income = gross profit − operating expenses, and =
      revenue − costs and expenses; a bank's revenue = net interest income + noninterest income (588 of 588 clean
@@ -305,13 +309,14 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      filing); a bank's net interest income = interest income − interest expense (892 of 892: JPM 227, WFC 225, BAC
      225, C 215; it applies at no other filer); net interest income after the provision = net interest income −
      provision (with the total provision 370 of 478: 365 of 365 at JPM and WFC, 5 of 113 at C; with the loan-loss
-     provision alone 178 of 198: 176 of 176 at C, 2 of 22 at JPM; an instance that does not close is left alone); revenue = contract revenue + other revenue (90 of 90, one filer); liabilities and equity
+     provision alone 178 of 198: 176 of 176 at C, 2 of 22 at JPM; with the loans' credit-loss expense, as C tags its
+     provision since CECL, 42 of 75: 39 of 39 at C, 3 of 36 at JPM; an instance that does not close is left alone); revenue = contract revenue + other revenue (90 of 90, one filer); liabilities and equity
      = liabilities + equity (including NCI, or the parent's and the NCI apart) + temporary equity where reported (in
      total, or the parent's and the redeemable NCI apart; clean instances closing per variant: 1,710 and 1,736 of
      1,762 with total equity, 849 and 889 of 889 with the parent's and the NCI apart); equity including NCI =
      the parent's + NCI (934 of 935); equity = common stock + paid-in capital (or the two as one line, or, for a
      filing with no paid-in-capital line, no-par common stock alone, as XOM tags it) + preferred (at par, or
-     including its paid-in capital as JPM and BAC tag it) − treasury stock + AOCI + retained earnings (1,195 of 1,357
+     including its paid-in capital as JPM and BAC tag it) − treasury stock + AOCI + retained earnings (1,195 of 1,347
      with the lines apart; 305 of 394 with one line; AMZN 138 of 138, JPM 130 of 140, C 132 of 132; WFC (21 of 138)
      and most BAC filings (8 of 96) do not close). With treasury stock tagged as a negative amount (a convention filers do
      use: GE re-tagged it so in 2015) the same relation is kept as a veto only: where it closes exactly as reported,
@@ -373,13 +378,14 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
 10. *Impossible signs.* A negative value of a balance or total that cannot be negative is held: assets, liabilities,
     their current parts, liabilities and equity, cash, PP&E, goodwill, intangibles, inventory, receivables, payables,
     long-term debt, contract revenue, cost of revenue and of goods sold, a bank's interest income and noninterest
-    expense, common stock at par and share counts (27 concepts; of 33,433 clean facts in 10-K and 10-Q filings,
+    expense, common stock at par and share counts (27 concepts; of 33,433 clean facts in 10-K and 10-Q filings and their amendments (33,219 and 214),
     counted in every taxonomy before the adapter's own filters, one is negative: a
     Citi Q4-2020 cost of revenue of −$46M, held with its annual figure;
     total `Revenues` is left out, as asset managers can report it negative). For headline totals (net, operating and
     pre-tax income, tax expense, net cash flows, revenue, a bank's net revenue, cost of revenue, operating expenses,
-    comprehensive income) and equity balances (equity, equity including NCI, retained earnings, AOCI: no clean
-    period of these is reported with opposite signs by two filings),
+    comprehensive income) and equity balances (equity, equity including NCI, retained earnings, AOCI: where two clean
+    filings report one period with opposite signs, they report different amounts, a restatement this rule ignores, as
+    AOCI at AAPL 2008 and XOM 2011),
     filings that report the same amount with opposite signs, and half-year or year-to-date sums that one filing's
     flip closes, are held on the side that one filing alone reports or that opposes most of its neighbouring periods'
     signs; undecided cases are left alone. Other lines are not sign-checked across filings: their sign conventions

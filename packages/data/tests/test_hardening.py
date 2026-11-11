@@ -3374,3 +3374,65 @@ def test_a_banks_interest_income_cannot_be_negative() -> None:
         records = _filing([(concept, 2025, -50e9)])
         held, _ = sec_scale.scale_errors(records)
         assert held == {0}
+
+
+# ------------------------------------------------------------------------------------- review round 23 (P1)
+
+
+@pytest.mark.parametrize("discontinued", [True, False])
+def test_a_flipped_parent_income_from_continuing_operations_is_held(discontinued: bool) -> None:
+    """Where the filer also tags continuing operations including the NCI (C, GE, MMM), the parent's line is in no
+    pre-tax identity; net income = continuing + discontinued operations and continuing including the NCI = the parent's
+    share + the NCI's share close exactly, so a flipped parent line is held."""
+    rows = {  # synthetic round figures, not any filer's
+        "IncomeLossFromContinuingOperations": (14e9, 15e9, 16e9),
+        "NetIncomeLossAttributableToNoncontrollingInterest": (1e8, 2e8, 3e8),
+        "IncomeLossFromContinuingOperationsIncludingPortionAttributableToNoncontrollingInterest": (
+            14.1e9,
+            15.2e9,
+            16.3e9,
+        ),
+        "NetIncomeLoss": (13.9e9, 14.8e9, 15.7e9) if discontinued else (14e9, 15e9, 16e9),
+    }
+    if discontinued:
+        rows["IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToReportingEntity"] = (-1e8, -2e8, -3e8)
+    flipped = "IncomeLossFromContinuingOperations"
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, y, v * (-1 if (c == flipped and y == 2025) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    earlier = [
+        (c, y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (flipped, 2025, "a")
+    }
+
+
+def test_a_flipped_net_interest_income_after_a_cecl_era_provision_is_held() -> None:
+    """Since CECL, C tags its loans' provision as their credit-loss expense: net interest income after the provision =
+    net interest income - that expense closes exactly, so a flipped after-provision line is held."""
+    rows = {  # synthetic round figures, not any bank's
+        "InterestIncomeExpenseNet": (54e9, 55e9, 56e9),
+        "FinancingReceivableExcludingAccruedInterestCreditLossExpenseReversal": (6e9, 7e9, 8e9),
+        "InterestIncomeExpenseAfterProvisionForLoanLoss": (48e9, 48e9, 48e9),
+    }
+    flipped = "InterestIncomeExpenseAfterProvisionForLoanLoss"
+    years = (2023, 2024, 2025)
+    facts = [
+        (c, y, v * (-1 if (c == flipped and y == 2025) else 1))
+        for c, vs in rows.items()
+        for y, v in zip(years, vs, strict=True)
+    ]
+    earlier = [
+        (c, y, v) for c, vs in rows.items() for y, v in zip((2022, 2023, 2024), (vs[0], vs[0], vs[1]), strict=True)
+    ]
+    records = [*_filing(earlier, accession="earlier"), *_filing(facts)]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (flipped, 2025, "a")
+    }

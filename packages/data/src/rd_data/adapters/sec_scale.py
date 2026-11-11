@@ -259,6 +259,10 @@ _AFTER_TAX = (
     "ProfitLoss",
     "NetIncomeLoss",
 )
+_DISCONTINUED = (
+    "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToReportingEntity",
+    "IncomeLossFromDiscontinuedOperationsNetOfTax",
+)
 #: A sign-flip repair must close its relations to within this share of the largest term: reported figures are exact up
 #: to rounding, and a flip that merely lands inside ADDITIVITY_TOLERANCE is a coincidence, not evidence.
 FLIP_TOLERANCE = 0.001
@@ -348,6 +352,24 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         _term("NetIncomeLoss", coef=-1.0),
         _term("NetIncomeLossAttributableToNoncontrollingInterest", coef=-1.0),
     ),
+    (  # net income = income from continuing operations + discontinued operations (the parent's shares)
+        _term("NetIncomeLoss", coef=1.0),
+        _term("IncomeLossFromContinuingOperations", coef=-1.0),
+        _term(*_DISCONTINUED, coef=-1.0, optional=True),
+    ),
+    # income from continuing operations including NCI = the parent's share + the NCI's share (of continuing operations,
+    # or tagged as the NCI's share of net income)
+    *(
+        (
+            _term("IncomeLossFromContinuingOperationsIncludingPortionAttributableToNoncontrollingInterest", coef=1.0),
+            _term("IncomeLossFromContinuingOperations", coef=-1.0),
+            _term(nci, coef=-1.0),
+        )
+        for nci in (
+            "IncomeLossFromContinuingOperationsAttributableToNoncontrollingEntity",
+            "NetIncomeLossAttributableToNoncontrollingInterest",
+        )
+    ),
     (  # income from continuing operations (or net income) = pre-tax income (equity-method income included) - tax
         _term(*_AFTER_TAX, coef=1.0),
         _term("IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest", coef=-1.0),
@@ -424,14 +446,18 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         )
     ),
     # net interest income after the provision = net interest income - the provision (in total at JPM and WFC, for loan
-    # losses alone at C)
+    # losses alone at C: before CECL as ProvisionForLoanLossesExpensed, since as the loans' credit-loss expense)
     *(
         (
             _term("InterestIncomeExpenseAfterProvisionForLoanLoss", coef=1.0),
             _term("InterestIncomeExpenseNet", coef=-1.0),
             _term(provision, coef=1.0),
         )
-        for provision in ("ProvisionForLoanLeaseAndOtherLosses", "ProvisionForLoanLossesExpensed")
+        for provision in (
+            "ProvisionForLoanLeaseAndOtherLosses",
+            "ProvisionForLoanLossesExpensed",
+            "FinancingReceivableExcludingAccruedInterestCreditLossExpenseReversal",
+        )
     ),
     (
         _term("Revenues", coef=1.0),

@@ -1,11 +1,11 @@
 # STATUS.md
 
-_Last updated: 2026-11-10_
+_Last updated: 2026-11-11_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–22 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–26); awaiting review round 23 (ledger row 26 written).** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–23 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–27); awaiting review round 24 (ledger row 27 written).** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -152,6 +152,14 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   identity; BRK and GE costs-and-expenses, GE revenue and BRK provision have no exact relation; EPS flips cannot be
   made exact (EPS and net income differ in sign in 14 of 3,654 clean pairs); bank historical snapshots withhold some
   genuine then-newest facts (JPM 36 facts on 13 of 69 dates, WFC 28 on 15 of 69), unchanged since round 20.
+- P2 (from P1 review round 23, minor): treasury-stock flips are served at main-convention filers (veto-only
+  convention); equity lines with no closing relation (BAC and GOOGL retained earnings, BAC/GOOGL capital, BAC AOCI)
+  and sub-1% AOCI and NCI flips are served flipped; lines in incomplete or non-closing tables (current tax parts,
+  taxes paid without a foreign line, SG&A parts, FX on cash, OCI parts, BRK/GE costs, GE revenue, MMM cash flows,
+  XOM interest expense, pre-tax foreign) are served flipped; a held flip withholds some genuine siblings (AAPL gross
+  profit, GE, bank rate-reconciliation lines, META Q1 tax, AMZN cells); 21 JPM 2013–21 10-K systems exceed
+  `MAX_IDENTITY_TERMS` since the NII identity (historical only); EIA and Twelve Data `{}` bodies do not open the
+  breaker; Kraken open interest ×1000 from a single snapshot is served.
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after
