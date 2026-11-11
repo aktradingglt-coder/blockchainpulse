@@ -538,19 +538,23 @@ CONVENTION_VARIANTS: tuple[tuple[_Term, ...], ...] = (
     ),
 )
 #: Relations that hold at a level of the filer's own rather than exactly, as (numerator, denominator) products: EPS x
-#: weighted shares = net income (to common stock: preferred dividends move the level, by up to 10^0.8 in 2008-10 bank
-#: filings of the calibration set), and cash is nearly all of cash including restricted cash (within 10^0.3). Stock
-#: splits move EPS and shares together and leave the level alone.
+#: weighted shares = net income to common stock, and cash is nearly all of cash including restricted cash (within
+#: 10^0.3). Stock splits move EPS and shares together and leave the level alone. A term may name alternatives, the first
+#: the filing reports counting: income available to common stock where tagged, else net income, which preferred
+#: dividends move a power of 10 from EPS x shares in a lean year (BAC 2011: $1.4bn of net income, $0.01 a share).
 #: Cash's share of cash including restricted cash moves at most 10^0.27 from a filer's usual level in clean data (META,
 #: 2026); a move this large is a slipped decimal in one of the two.
 CASH_SHARE_MOVE = 0.5
 EPS_DILUTION_MOVE = 0.5
-RATIOS: tuple[tuple[tuple[str, ...], tuple[str, ...], float | None], ...] = (
-    (("EarningsPerShareDiluted", "WeightedAverageNumberOfDilutedSharesOutstanding"), ("NetIncomeLoss",), None),
-    (("EarningsPerShareBasic", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",), None),
+_TO_COMMON = "NetIncomeLossAvailableToCommonStockholders"
+_DILUTED_INCOME = (f"{_TO_COMMON}Diluted", f"{_TO_COMMON}Basic", "NetIncomeLoss")
+_BASIC_INCOME = (f"{_TO_COMMON}Basic", "NetIncomeLoss")
+RATIOS: tuple[tuple[tuple[str | tuple[str, ...], ...], tuple[str | tuple[str, ...], ...], float | None], ...] = (
+    (("EarningsPerShareDiluted", "WeightedAverageNumberOfDilutedSharesOutstanding"), (_DILUTED_INCOME,), None),
+    (("EarningsPerShareBasic", "WeightedAverageNumberOfSharesOutstandingBasic"), (_BASIC_INCOME,), None),
     # diluted EPS against basic shares (dilution moves the level by under 10^0.05), for filers that tag no diluted
     # share count (XOM)
-    (("EarningsPerShareDiluted", "WeightedAverageNumberOfSharesOutstandingBasic"), ("NetIncomeLoss",), None),
+    (("EarningsPerShareDiluted", "WeightedAverageNumberOfSharesOutstandingBasic"), (_DILUTED_INCOME,), None),
     # diluted EPS sits within 10^0.3 of basic EPS in clean data (cents rounding of small EPS; dilution itself <10^0.1)
     (("EarningsPerShareDiluted",), ("EarningsPerShareBasic",), EPS_DILUTION_MOVE),
     *(
@@ -562,9 +566,11 @@ RATIOS: tuple[tuple[tuple[str, ...], tuple[str, ...], float | None], ...] = (
     ),
 )
 #: An EPS ratio this many powers of 10 from the filer's usual level (within RATIO_TOLERANCE) is a slipped decimal:
-#: preferred dividends move a bank's level by up to 10^1.5 (C, 2009), but no clean instance sits within the tolerance of
-#: either step; larger steps are powers of 1000 that the other checks own. EPS of any size counts (cents rounding moves
-#: the level by 10^0.3 at most).
+#: preferred dividends still move the level of a bank that tags no income to common stock by up to 10^1.5 (C, 2009),
+#: but no clean instance of the calibration set sits within the tolerance of either step (BAC 2011, 10^-1.09 against
+#: net income in the history its own 10-K had, sits at 10^0.09 against income to common); larger steps are powers of
+#: 1000 that the other checks own.
+#: EPS of any size counts (cents rounding moves the level by 10^0.3 at most).
 RATIO_STEPS = frozenset({1, 2})
 RATIO_TOLERANCE = 0.1
 #: Never-negative totals and never-negative parts of them. No clean part of the 15 filers exceeds its total by more
@@ -1465,18 +1471,24 @@ def _twin_errors(records: list[FundamentalFact], held: set[int], neighbours: _Ne
 def _ratio_levels(
     records: list[FundamentalFact],
     index: dict[tuple[str, date | None, date], dict[str, int]],
-    num: tuple[str, ...],
-    den: tuple[str, ...],
+    num: tuple[str | tuple[str, ...], ...],
+    den: tuple[str | tuple[str, ...], ...],
 ) -> list[tuple[float, list[int]]]:
-    """Each filing and period reporting every term: log10 |numerator product / denominator product|, and the terms."""
+    """Each filing and period reporting every term (the first alternative it reports, for a term naming several):
+    log10 |numerator product / denominator product|, and the terms."""
     levels: list[tuple[float, list[int]]] = []
     for terms in index.values():
-        idx = [j for c in (*num, *den) if (j := terms.get(c)) is not None]
+        found = (next((terms[c] for c in alts if c in terms), None) for alts in map(_alternatives, (*num, *den)))
+        idx = [j for j in found if j is not None]
         if len(idx) < len(num) + len(den) or any(records[i].value == 0 for i in idx):
             continue
         logs = [math.log10(abs(records[i].value)) for i in idx]
         levels.append((sum(logs[: len(num)]) - sum(logs[len(num) :]), idx))
     return levels
+
+
+def _alternatives(term: str | tuple[str, ...]) -> tuple[str, ...]:
+    return (term,) if isinstance(term, str) else term
 
 
 def _moved_together(records: list[FundamentalFact], idx: list[int], off: float, min_move: float | None) -> bool:

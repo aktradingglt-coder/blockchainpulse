@@ -3608,6 +3608,26 @@ def test_a_stock_split_moves_eps_and_shares_together_and_holds_nothing() -> None
     assert not held
 
 
+@pytest.mark.parametrize(("newest", "factor"), [(1.0e9, 1.0), (15e9, 10.0), (15e9, 0.1)])
+def test_eps_is_weighed_against_income_to_common_stock_where_tagged(newest: float, factor: float) -> None:
+    """A bank whose preferred dividends take nearly all of a lean year's net income (as at BAC in 2011, $0.01 a share
+    on $1.4bn): EPS x shares sits a power of 10 under net income but matches income available to common stock, so
+    nothing is held; in an ordinary year, EPS a decimal off that income still is."""
+    shares = (10e9, 10e9, 10e9, 10e9, 10e9)
+    income = (14e9, 15e9, 16e9, 15e9, newest)  # synthetic round figures, not any filer's
+    to_common = tuple(n - 0.9e9 for n in income)
+    rows = {
+        "NetIncomeLoss": income,
+        "NetIncomeLossAvailableToCommonStockholdersBasic": to_common,
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(to_common, shares, strict=True)),
+    }
+    records = _seeded(rows, "EarningsPerShareDiluted", factor, (2021, 2022, 2023, 2024, 2025))
+    held, _ = sec_scale.scale_errors(records)
+    want = set() if factor == 1.0 else {("EarningsPerShareDiluted", 2025, "a")}
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == want
+
+
 @pytest.mark.parametrize("factor", [10.0, 0.1])
 @pytest.mark.parametrize(
     "total",

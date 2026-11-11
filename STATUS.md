@@ -4,8 +4,8 @@ _Last updated: 2026-11-11_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–24 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–28); awaiting review round 25 (ledger row 28 written).** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–25 returned ONE MORE PASS; all
+major findings fixed (ledger rounds 5–29); awaiting review round 26 (ledger row 29 written).** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -164,6 +164,12 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   Kraken candles out of order are re-sorted without a provider-order warning, and a far-future candle is dropped
   without a warning (the response is still labelled stale correctly); SEC slips in lines no relation closes (GE
   revenue and cash, MMM operating cash flow) are served (D-036 limit).
+- P2 (from P1 review round 25, minor): EPS sign flips are served (a plain sign rule would hold GE's genuine
+  opposite-sign instances; a level-aware rule is needed); the cash-share and EPS-step ratio bounds of D-036 rule 6a
+  were measured on 15 large filers only, so an escrow-heavy filer's genuine cash or a preferred-heavy filer that tags
+  no income to common stock could be withheld (fails closed); FRED copyright detection is a substring match that the
+  schema-derived cassette's own notes trip (fails closed: `internal_only`); Treasury CSVs with CRLF line ends,
+  trailing blank lines or no final newline are served rather than refused as possibly truncated.
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after

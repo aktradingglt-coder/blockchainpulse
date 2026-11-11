@@ -369,12 +369,15 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    but each breaks its own statement identity), and history blames a side by half the step. Every fact of such a
    group that has history must sit about the step from it (within 10^0.5): without that, groups of small lines whose
    rescale happened to land inside the 0.1% tolerance of a large relation held 31 genuine JPM 2009 and GE facts.
-6a. *Ratios at the filer's own level.* EPS × weighted shares = net income (diluted and basic, and diluted EPS × basic
-   shares for filers that tag no diluted share count, as XOM), and cash is nearly all of cash including restricted
-   cash (either total's tag), hold at a level of the filer's own rather than exactly. EPS: preferred dividends move a
-   bank's level by up to 10^1.5 (C, 2009), so an instance is a slipped decimal only when its level sits 10 or 100
-   times (within 10^0.1) from the filer's median level; no clean instance of the 15 filers sits there, EPS of any
-   size included (three 2008–10 NVDA filings sit exactly 10^3 off, shares tagged in thousands, which this rule leaves
+6a. *Ratios at the filer's own level.* EPS × weighted shares = income to common stock (diluted and basic, and
+   diluted EPS × basic shares for filers that tag no diluted share count, as XOM; income available to common stock
+   where the filing tags it, else net income), and cash is nearly all of cash including restricted cash (either
+   total's tag), hold at a level of the filer's own rather than exactly. EPS: preferred dividends still move the level
+   of a bank that tags no income to common stock by up to 10^1.5 (C, 2009), so an instance is a slipped decimal only
+   when its level sits 10 or 100 times (within 10^0.1) from the filer's median level; no clean instance of the 15
+   filers sits there, EPS of any size included. Against net income, BAC's genuine FY2011 EPS ($0.01 on $1.4B of net
+   income, nearly all of it preferred dividends) sat 10^-1.09 from the level its 2012 10-K's history showed and was
+   held in the 2012–14 10-Ks; against income to common stock it sits at 10^0.09 (round 26 regression check) (three 2008–10 NVDA filings sit exactly 10^3 off, shares tagged in thousands, which this rule leaves
    to the power-of-1000 checks). Stock splits move EPS and shares together and leave the level alone. Cash: its share
    of the total moves at most 10^0.27 from a filer's level in clean data (META, 2026), so any move of 10^0.5 or more
    is a slip. A term confirmed by an exact relation of its own filing (net income, the cash total) is not blamed; of
@@ -532,7 +535,11 @@ company's very first filing has nothing in the response to be compared with, bey
   lines (10 genuine 10^2–10^3 moves in the newest AMZN filings alone), so history cannot tell them apart. Measured
   on the newest filing's current cells of 11 headline lines at all 15 filers (×10, ÷10, ×100: 462 seeds), 456 are
   held; the 6 served are GE revenue, GE cash including restricted cash and MMM operating cash flow, lines that no
-  relation closes in those filings (round 24).
+  relation closes in those filings (round 24). Slips across several facts or a whole column are held through the
+  same relations and rule 11: of 124 seeded groups at the 15 filers (assets with liabilities and equity, revenue with
+  cost of revenue, net income with one or both EPS, net income with comprehensive income, ×10 or ÷10), 123 are held,
+  and 120 of 120 whole current columns (all facts or flows only, ×10, ÷10, ×100, ÷100); the one served is GE's
+  comparative revenue, the GE revenue line above (round 25).
 
 Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
 fundamentals into reports (STATUS). (P1 review rounds 6–12.)
