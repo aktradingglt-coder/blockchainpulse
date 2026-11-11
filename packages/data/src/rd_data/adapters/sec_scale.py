@@ -1365,6 +1365,13 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
         for level, idx in levels:
             slipped = _slipped(level - usual, min_move)
             if (held | out) & set(idx):  # this check's own holds count: diluted EPS held carries basic EPS
+                if (
+                    slipped
+                    and min_move is None
+                    and (column := _slipped_column(records, neighbours, idx[-1], -(level - usual)))
+                ):
+                    out |= set(column)  # a size bound held net income first; its statement slipped with it
+                    continue
                 rest = [i for i in idx if i not in held | out]
                 if _moved_together(records, idx, level - usual, min_move) and rest:
                     if min_move is not None:  # a tight ratio (cash, diluted EPS) pins the rest to the held term

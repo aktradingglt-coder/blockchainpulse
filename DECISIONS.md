@@ -384,8 +384,8 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    other) is held with it. Looser, this held 29 genuine NVDA 2008–10 and META 2012 EPS facts next to held share
    counts and income. When an EPS ratio slips while net income's identities close, and net income's whole flow
    column sits within 10^0.5 of that step off its history, the statement was keyed in the wrong unit: the column is
-   held, not EPS (a fast grower's genuine column sits up to 10^0.4 above its neighbours, NVDA 2026, too far for the
-   column rule of rule 11 alone).
+   held, not EPS, also when a size bound held net income first (a fast grower's genuine column sits up to 10^0.4
+   above its neighbours, NVDA 2026, too far for the column rule of rule 11 alone).
    Diluted EPS sits within 10^0.3 of basic EPS in clean data (cents rounding of small EPS), so a move of 10^0.5
    between them is a slip, and basic EPS beside a held diluted EPS it agrees with is held with it.
 6b. *Parts over their totals.* A never-negative part more than twice its never-negative total in one filing and
