@@ -54,6 +54,11 @@ COLUMN_MIN_HELD = 3
 #: that way in clean data; for a young filer it is often the only evidence there is.
 COLUMN_SHIFT_MIN = 10
 COLUMN_SHIFT_SHARE = 0.6
+#: A column a power of 10 or 100 off: its median step within 10^COLUMN_DECIMAL_NEAR of the power, and
+#: COLUMN_SHIFT_SHARE of its steps within 10^NEAR_POWER. No clean column of the calibration set comes near (the closest,
+#: a 2010 META comparative, has a median step of 10^-0.57 with 52% of its steps within 10^0.5 of 10^-1).
+COLUMN_DECIMAL_STEPS = frozenset({1, 2})
+COLUMN_DECIMAL_NEAR = 0.3
 PREVIOUS_WINDOW_DAYS = 400
 #: A currency fact larger than this multiple of the company's own total assets is held. Across about 400,000 clean
 #: us-gaap facts of 15 large filers, outside revenue and cost lines, the largest ratio is 1.5 (XOM gross PP&E); the only
@@ -268,6 +273,9 @@ _DISCONTINUED = (
 FLIP_TOLERANCE = 0.001
 #: Single-fact rescales tried, exactly as sign flips are, on relations no power-of-1000 rescale explains.
 DECIMAL_FACTORS = (10.0, 100.0, 0.1, 0.01)
+#: Group rescales tried by _repair, each with whether the repaired relations must close exactly (FLIP_TOLERANCE).
+POWER_RESCALES: tuple[tuple[float, bool], ...] = tuple((1000.0**k, False) for k in (-2, -1, 1, 2))
+DECIMAL_RESCALES: tuple[tuple[float, bool], ...] = tuple((factor, True) for factor in DECIMAL_FACTORS)
 _CAPITAL: tuple[tuple[_Term, ...], ...] = (
     (
         _term("CommonStockValue", coef=-1.0, optional=True),
@@ -558,6 +566,8 @@ RATIO_STEPS = frozenset({1, 2})
 RATIO_TOLERANCE = 0.1
 #: Instances needed to know a filer's usual level.
 MIN_RATIO_INSTANCES = 4
+#: How close to its usual level an EPS instance must sit for a held term to have carried the others with it.
+RATIO_MOVED_TOGETHER = 0.3
 #: Statutory tax in the rate reconciliation = statutory rate x pre-tax income (whichever pre-tax total is reported).
 STATUTORY_RATE = "EffectiveIncomeTaxRateReconciliationAtFederalStatutoryIncomeTaxRate"
 STATUTORY_AMOUNT = "IncomeTaxReconciliationIncomeTaxExpenseBenefitAtFederalStatutoryIncomeTaxRate"
@@ -856,9 +866,10 @@ def _recent_accessions(records: list[FundamentalFact]) -> set[str]:
 
 
 def _column_shifts(records: list[FundamentalFact], logs: list[float | None], neighbours: _Neighbours) -> set[int]:
-    """A filing's column for one date (its currency facts) that sits a power of 1000 from the neighbouring periods of
-    its series: the scale was set for the whole statement (see COLUMN_SHIFT_MIN). Neighbours are medians of several
-    periods, so one mis-scaled earlier column does not make the next, genuine one look shifted."""
+    """A filing's column for one date (its currency facts) that sits a power of 1000 (or, more tightly, of 10 or 100)
+    from the neighbouring periods of its series: the scale was set for the whole statement (see COLUMN_SHIFT_MIN).
+    Neighbours are medians of several periods, so one mis-scaled earlier column does not make the next, genuine one
+    look shifted."""
     columns: dict[tuple[str, date], list[int]] = {}
     for i, f in enumerate(records):
         if logs[i] is not None and _CURRENCY.match(f.unit) and f.taxonomy != "dei":
@@ -869,10 +880,13 @@ def _column_shifts(records: list[FundamentalFact], logs: list[float | None], nei
         if len(steps) < COLUMN_SHIFT_MIN:
             continue
         centre = statistics.median(steps)
-        power = round(centre / 3)
-        if power == 0 or abs(centre - 3 * power) > NEAR_POWER:
+        if round(centre / 3) and abs(centre - 3 * round(centre / 3)) <= NEAR_POWER:
+            target, within = 3 * round(centre / 3), 1.0
+        elif abs(round(centre)) in COLUMN_DECIMAL_STEPS and abs(centre - round(centre)) <= COLUMN_DECIMAL_NEAR:
+            target, within = round(centre), NEAR_POWER  # a column keyed a power of 10 or 100 off
+        else:
             continue
-        if sum(abs(d - 3 * power) <= 1 for d in steps) >= COLUMN_SHIFT_SHARE * len(steps):
+        if sum(abs(d - target) <= within for d in steps) >= COLUMN_SHIFT_SHARE * len(steps):
             out.update(idx)
     return out
 
@@ -980,6 +994,21 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     for system in [*_systems(footnotes), *_systems(statements + vetoes)]:
         if any(inst in broken for inst in system):
             held_here, fixed = _repair(records, system, [inst for inst in system if inst in broken], neighbours)
+            out |= held_here
+            explained |= fixed
+    # Several facts a power of 10 or 100 off together (a statement partly keyed in the wrong unit): statements and
+    # footnote tables joined, as a total another table confirms (assets = liabilities and equity) may have slipped with
+    # it; signs learned from the filing are left out. A single slipped fact is _decimal_repair's.
+    for system in _systems(tables + statements + vetoes):
+        if any(inst in broken and inst not in explained for inst in system):
+            held_here, fixed = _repair(
+                records,
+                system,
+                [inst for inst in system if inst in broken],
+                neighbours,
+                factors=DECIMAL_RESCALES,
+                min_size=2,
+            )
             out |= held_here
             explained |= fixed
     for system in _systems(instances + conventions):  # conventions only veto: never broken, never repaired
@@ -1235,34 +1264,49 @@ def _systems(instances: list[_Instance]) -> list[list[_Instance]]:
 
 
 def _repair(
-    records: list[FundamentalFact], system: list[_Instance], broken: list[_Instance], neighbours: _Neighbours
+    records: list[FundamentalFact],
+    system: list[_Instance],
+    broken: list[_Instance],
+    neighbours: _Neighbours,
+    *,
+    factors: Sequence[tuple[float, bool]] = POWER_RESCALES,
+    min_size: int = 1,
 ) -> tuple[set[int], set[_Instance]]:
     """Find groups of facts whose power-of-1000 rescale makes broken relations close without breaking any that closed;
     blame one side of each (_blame). Relations that no rescale closes (a filer's own tagging) are left alone. When the
     history cannot decide, the facts of the relations that rescale would close are held. Returns the facts held and the
-    broken relations some rescale explains."""
+    broken relations some rescale explains. ``factors`` lists each rescale tried and whether it must close its relations
+    exactly: a group a power of 10 or 100 off (part of a statement keyed in the wrong unit, DECIMAL_RESCALES) must, as
+    a single slipped fact's must (_decimal_repair), and history then blames a side by half the step."""
     terms = sorted({k for inst in system for k, _ in inst})
     largest = len(terms) // 2 if len(terms) <= MAX_IDENTITY_TERMS else MAX_GROUP_IN_LARGE_SYSTEM
     own = frozenset({records[terms[0]].accession})
     held: set[int] = set()
     explained: set[_Instance] = set()
     repairs: list[set[int]] = []
-    for size in range(1, largest + 1):
+    for size in range(min_size, largest + 1):
         for group in itertools.combinations(terms, size):
             rest = [k for k in terms if k not in group]
             if size * 2 == len(terms) and rest < list(group):
                 continue  # an even split is the same pair seen from the other side
             if any(found <= set(group) for found in repairs):
                 continue  # only minimal repairs: adding a line too small to matter repairs nothing new
-            fixed = next(
-                (f for k in (-2, -1, 1, 2) if (f := _fixed(records, system, broken, set(group), 1000.0**k))), []
+            fixed, used = next(
+                (
+                    (f, factor)
+                    for factor, exact in factors
+                    if (not exact or _all_off_by(neighbours, records, group, factor))
+                    and (f := _fixed(records, system, broken, set(group), factor, exact=exact))
+                ),
+                ([], 1000.0),
             )
             if not fixed:
                 continue
             repairs.append(set(group))
             explained.update(fixed)
             involved = {k for inst in fixed for k, _ in inst}
-            blamed = _blame(neighbours, list(group), [k for k in rest if k in involved], own)
+            margin = min(DECISIVE_MARGIN, abs(math.log10(used)) / 2)
+            blamed = _blame(neighbours, list(group), [k for k in rest if k in involved], own, margin)
             held |= set(blamed) & involved if blamed is not None else involved
     return held, explained
 
@@ -1270,35 +1314,77 @@ def _repair(
 def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _Neighbours) -> set[int]:
     """Instances of RATIOS (one filing, one period) whose level sits a power of 10 or 100 from the filer's usual level
     while none of their facts is held already. A term that an exact relation of its own filing confirms is not blamed
-    (net income, which identities close around); of the rest, history picks one (_ratio_blame)."""
+    (net income, which identities close around); of the rest, history picks one (_ratio_blame). An instance whose
+    level is usual although one of its terms is held moved with that term (net income and EPS slipped together): the
+    term among the rest that sits more than 10^NEAR_POWER from its history (half a slipped decimal) is held with it."""
     index: dict[tuple[str, date | None, date], dict[str, int]] = {}
     for i, f in enumerate(records):
         index.setdefault((f.accession, f.period_start, f.period_end), {})[f.concept] = i
     out: set[int] = set()
     confirmed: set[int] | None = None  # found only when a ratio is off: the identities are costly to rebuild
     for num, den, min_move in RATIOS:
-        levels: list[tuple[float, list[int]]] = []
-        for terms in index.values():
-            idx = [j for c in (*num, *den) if (j := terms.get(c)) is not None]
-            if len(idx) < len(num) + len(den) or any(records[i].value == 0 for i in idx):
-                continue
-            logs = [math.log10(abs(records[i].value)) for i in idx]
-            levels.append((sum(logs[: len(num)]) - sum(logs[len(num) :]), idx))
+        levels = _ratio_levels(records, index, num, den)
         if len(levels) < MIN_RATIO_INSTANCES:
             continue
         usual = statistics.median(level for level, _ in levels)
         for level, idx in levels:
-            off = level - usual
-            if min_move is not None:
-                slipped = abs(off) >= min_move
-            else:
-                slipped = abs(round(off)) in RATIO_STEPS and abs(off - round(off)) <= RATIO_TOLERANCE
-            if not slipped or held & set(idx):
-                continue
-            if confirmed is None:
-                confirmed = _confirmed(records)
-            out |= _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
+            slipped = _slipped(level - usual, min_move)
+            if held & set(idx):
+                rest = [i for i in idx if i not in held]
+                if _moved_together(records, idx, level - usual, min_move) and rest:
+                    out |= {i for i in _ratio_blame(neighbours, records, rest) if _far(neighbours, records, i)}
+            elif slipped:
+                if confirmed is None:
+                    confirmed = _confirmed(records)
+                out |= _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
     return out
+
+
+def _all_off_by(neighbours: _Neighbours, records: list[FundamentalFact], group: Sequence[int], factor: float) -> bool:
+    """Every fact of the group that has history sits about the step from it (within 10^NEAR_POWER), and one has: a
+    group of small lines whose rescale happens to land inside the exact tolerance of a large relation is no slip."""
+    step = abs(math.log10(factor))
+    found = [d for i in group if (d := neighbours.distance(i, frozenset({records[i].accession}))) is not None]
+    return bool(found) and all(abs(d - step) <= NEAR_POWER for d in found)
+
+
+def _ratio_levels(
+    records: list[FundamentalFact],
+    index: dict[tuple[str, date | None, date], dict[str, int]],
+    num: tuple[str, ...],
+    den: tuple[str, ...],
+) -> list[tuple[float, list[int]]]:
+    """Each filing and period reporting every term: log10 |numerator product / denominator product|, and the terms."""
+    levels: list[tuple[float, list[int]]] = []
+    for terms in index.values():
+        idx = [j for c in (*num, *den) if (j := terms.get(c)) is not None]
+        if len(idx) < len(num) + len(den) or any(records[i].value == 0 for i in idx):
+            continue
+        logs = [math.log10(abs(records[i].value)) for i in idx]
+        levels.append((sum(logs[: len(num)]) - sum(logs[len(num) :]), idx))
+    return levels
+
+
+def _moved_together(records: list[FundamentalFact], idx: list[int], off: float, min_move: float | None) -> bool:
+    """An EPS instance at its usual level (within RATIO_MOVED_TOGETHER) with EPS x shares of net income's sign: the
+    terms agree with each other, so a held one carried the rest with it."""
+    if min_move is not None or abs(off) > RATIO_MOVED_TOGETHER:
+        return False
+    eps, shares, income = (records[i].value for i in idx)
+    return (eps * shares > 0) == (income > 0)
+
+
+def _slipped(off: float, min_move: float | None) -> bool:
+    """Whether a ratio's distance from its usual level is a slip: any move of min_move or more, or else a step of 10 or
+    100 (RATIO_STEPS, within RATIO_TOLERANCE)."""
+    if min_move is not None:
+        return abs(off) >= min_move
+    return abs(round(off)) in RATIO_STEPS and abs(off - round(off)) <= RATIO_TOLERANCE
+
+
+def _far(neighbours: _Neighbours, records: list[FundamentalFact], i: int) -> bool:
+    d = neighbours.distance(i, frozenset({records[i].accession}))
+    return d is not None and d > NEAR_POWER
 
 
 def _confirmed(records: list[FundamentalFact]) -> set[int]:
@@ -1428,7 +1514,13 @@ def _rescale_fixes(
 
 
 def _fixed(
-    records: list[FundamentalFact], system: list[_Instance], broken: list[_Instance], group: set[int], factor: float
+    records: list[FundamentalFact],
+    system: list[_Instance],
+    broken: list[_Instance],
+    group: set[int],
+    factor: float,
+    *,
+    exact: bool = False,
 ) -> list[_Instance]:
     """The broken relations this rescale closes (each needing every term), or none if it breaks a closed one (a
     relation that closes exactly as reported must stay exact)."""
@@ -1439,7 +1531,9 @@ def _fixed(
             exact = _exact(_contributions(records, inst))
             if not (_exact(contributions) if exact else _balances(contributions)):
                 return []
-        elif _closes_with_both_sides(contributions, [k in group for k, _ in inst]):
+        elif _closes_with_both_sides(contributions, [k in group for k, _ in inst]) and (
+            not exact or _exact(contributions)
+        ):
             closed.append(inst)
     return closed
 
@@ -1458,13 +1552,15 @@ def _closes_with_both_sides(contributions: Sequence[float], rescaled: Sequence[b
     return without_group > floor and without_rest > floor
 
 
-def _blame(neighbours: _Neighbours, one: list[int], other: list[int], own: frozenset[str]) -> list[int] | None:
+def _blame(
+    neighbours: _Neighbours, one: list[int], other: list[int], own: frozenset[str], margin: float = DECISIVE_MARGIN
+) -> list[int] | None:
     """Which of two groups is mis-scaled, judged by how far each sits from its own earlier periods (as other filings
     report them; members with no history are left out of the mean). A group with no history at all is blamed when the
     other side sits well within its history (under 10^CONSISTENT_DISTANCE), and cleared when the other side is far."""
     a, b = _known_mean(neighbours, one, own), _known_mean(neighbours, other, own)
     if a is not None and b is not None:
-        if abs(a - b) >= DECISIVE_MARGIN:
+        if abs(a - b) >= margin:
             return one if a > b else other
         return None
     if a is None and b is None:

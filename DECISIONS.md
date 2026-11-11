@@ -229,10 +229,11 @@ terms allow display but forbid derived data, which the three-tag model could not
   engineering ceilings, not market data shown to users; refine against EIA's *Working and Shell Storage Capacity*
   report when the host is reachable. A series mixing units is refused.
 - Kraken perpetuals: prices > 0, open interest and volume ≥ 0, funding within ±1% per hourly interval, and mark within
-  10% of index (otherwise mark, index and the funding derived from the mark are quarantined). A linear (PF_)
-  perpetual's 24h contract volume × 24h VWAP must equal its 24h quote volume (within 10^-6; it holds to float
-  precision on every PF_ ticker of the recording), else the volume is quarantined (P1 review round 24). A requested
-  symbol the exchange did not return is reported.
+  10% of index (otherwise mark, index and the funding derived from the mark are quarantined). A perpetual's 24h
+  contract volume must match its 24h quote volume (within 10^-6): × the 24h VWAP for a linear (PF_) contract, equal
+  for an inverse (PI_) one, whose contract is worth one quote unit; both hold to float precision on every ticker of
+  the recording; else the volume is quarantined (P1 review rounds 24–25). A requested symbol the exchange did not
+  return is reported.
 - Treasury yield-curve CSV: a body cut off is refused as an outage — a last row with missing fields or a number cut
   short (Treasury prints every yield with two decimals), or a year's file that starts after the 7th of January (the
   file runs newest first, so a cut between rows loses the year's oldest days) (P1 review round 24).
@@ -271,7 +272,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-11-11, round 24) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-11-11, round 25) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -362,7 +363,12 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    relation that closes exactly as reported explains it. The facts whose rescale closes it and that sit about that
    far from their own history are held; with no history to decide, every one of them is. Relations whose signs were
    learned from the filing are not repaired this way (on clean data one JPM 2013 tax-benefit line closed so by
-   coincidence).
+   coincidence). Several facts slipped together (two totals, a revenue and its cost) are found by the same group
+   search as power-of-1000 rescales, with steps of 10 and 100 that must close exactly; it runs over statement
+   identities and footnote tables joined (a pair such as assets and liabilities-and-equity still equal each other,
+   but each breaks its own statement identity), and history blames a side by half the step. Every fact of such a
+   group that has history must sit about the step from it (within 10^0.5): without that, groups of small lines whose
+   rescale happened to land inside the 0.1% tolerance of a large relation held 31 genuine JPM 2009 and GE facts.
 6a. *Ratios at the filer's own level.* EPS × weighted shares = net income (diluted and basic, and diluted EPS × basic
    shares for filers that tag no diluted share count, as XOM), and cash is nearly all of cash including restricted
    cash (either total's tag), hold at a level of the filer's own rather than exactly. EPS: preferred dividends move a
@@ -372,7 +378,10 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    to the power-of-1000 checks). Stock splits move EPS and shares together and leave the level alone. Cash: its share
    of the total moves at most 10^0.27 from a filer's level in clean data (META, 2026), so any move of 10^0.5 or more
    is a slip. A term confirmed by an exact relation of its own filing (net income, the cash total) is not blamed; of
-   the others, the one clearly farthest from its history is held, else all of them.
+   the others, the one clearly farthest from its history is held, else all of them. An EPS instance at its usual
+   level (within 10^0.3, EPS × shares of net income's sign) although one of its terms is held moved with that term
+   (net income and EPS slipped together): the other term that sits more than 10^0.5 from its history is held with
+   it. Looser, this held 29 genuine NVDA 2008–10 and META 2012 EPS facts next to held share counts and income.
 7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
    is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
    the 15 filers below with the bound itself switched off:
@@ -414,7 +423,10 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
 11. *Shifted columns.* A filing's column for one date is held whole when at least 10 of its currency facts can be
     compared with the same periods in other filings, their neighbouring periods, or (a line no other filing reports)
     the filing's own other periods within 400 days, and the column sits a power of 1000 from them (median within
-    10^0.5, 60% of facts within 10^1). For a young filer this is often the only evidence; it adds no clean holds.
+    10^0.5, 60% of facts within 10^1), or, more tightly, a power of 10 or 100 (median within 10^0.3, 60% of facts
+    within 10^0.5: no clean column comes near; the closest, a 2010 META comparative, has its median at 10^-0.57 with
+    52% of its facts within 10^0.5 of 10^-1). For a young filer this is often the only evidence; it adds no clean
+    holds.
 
 All checks run on every concept the company reports; a `concepts` filter narrows only what is returned, and the
 returned concepts alone date the response (a concept last reported years ago is as old as its last report).

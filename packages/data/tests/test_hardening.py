@@ -262,11 +262,13 @@ def _ticker_edit(symbol: str, edit: Callable[[dict[str, Any]], None]) -> Mutator
     return apply
 
 
-async def _derivatives(edit: Callable[[dict[str, Any]], None], symbol: str = "PF_XBTUSD") -> DataResponse:
+async def _derivatives(
+    edit: Callable[[dict[str, Any]], None], symbol: str = "PF_XBTUSD", symbols: str | None = None
+) -> DataResponse:
     request = _plan(KrakenFuturesAdapter, RequestKind.CRYPTO_DERIVATIVES)
     cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request))
     mutate = {i: _ticker_edit(symbol, edit) for i in range(len(cassette.interactions))}
-    return await _replay(KrakenFuturesAdapter, request, mutate)
+    return await _replay(KrakenFuturesAdapter, request, mutate, params={"symbols": symbols} if symbols else None)
 
 
 async def test_negative_open_interest_and_mark_price_are_quarantined() -> None:
@@ -3465,19 +3467,22 @@ async def test_a_truncated_treasury_file_is_refused_at_every_cut() -> None:
 
 
 @pytest.mark.parametrize("factor", [1000.0, 0.001, 3.0, 1 / 3])
-async def test_a_mis_scaled_24h_volume_breaks_the_quote_volume_and_is_quarantined(factor: float) -> None:
-    """A linear perpetual's quote volume is its contract volume x the 24h VWAP; a contract volume off by any factor
-    breaks that and is quarantined, while the clean ticker's volume is served."""
+@pytest.mark.parametrize(("ticker", "symbols"), [("PF_XBTUSD", None), ("PI_XBTUSD", "BTC/USD:BTC,ETH/USD:ETH")])
+async def test_a_mis_scaled_24h_volume_breaks_the_quote_volume_and_is_quarantined(
+    factor: float, ticker: str, symbols: str | None
+) -> None:
+    """A linear perpetual's quote volume is its contract volume x the 24h VWAP, an inverse one's is its contract volume;
+    a contract volume off by any factor breaks that and is quarantined, while the clean ticker's volume is served."""
 
     def seed(t: dict[str, Any]) -> None:
         t["vol24h"] *= factor
 
-    clean = await _derivatives(lambda _t: None)
+    clean = await _derivatives(lambda _t: None, ticker, symbols)
     assert any(
         isinstance(m, CryptoDerivativeMetric) and m.symbol.startswith("BTC") and m.metric == "volume_24h"
         for m in clean.records
     )
-    resp = await _derivatives(seed)
+    resp = await _derivatives(seed, ticker, symbols)
     volumes = [m for m in resp.records if isinstance(m, CryptoDerivativeMetric) and m.metric == "volume_24h"]
     held = [m for m in resp.quarantined if isinstance(m, CryptoDerivativeMetric) and m.metric == "volume_24h"]
     assert len(held) == 1
@@ -3498,14 +3503,20 @@ def _with_units(records: list[FundamentalFact]) -> list[FundamentalFact]:
 
 
 def _seeded(
-    rows: Mapping[str, Sequence[float]], seeded: str, factor: float, years: tuple[int, ...]
+    rows: Mapping[str, Sequence[float]],
+    seeded: str | set[str],
+    factor: float,
+    years: tuple[int, ...],
+    *,
+    instants: bool | None = None,
 ) -> list[FundamentalFact]:
-    """Filing "a" reports the last three years (the newest, for the seeded concept, times factor); filing "earlier"
-    the years before; instants are given as negative years, as _filing reads them."""
+    """Filing "a" reports the last three years (the newest, for the seeded concepts, times factor); filing "earlier"
+    the years before; instants (cash, unless ``instants`` says) are given as negative years, as _filing reads them."""
     newest = years[-1]
-    sign = -1 if any(c.startswith("Cash") for c in rows) else 1
+    picked = {seeded} if isinstance(seeded, str) else seeded
+    sign = -1 if (instants if instants is not None else any(c.startswith("Cash") for c in rows)) else 1
     facts = [
-        (c, sign * y, v * (factor if (c == seeded and y == newest) else 1))
+        (c, sign * y, v * (factor if (c in picked and y == newest) else 1))
         for c, vs in rows.items()
         for y, v in zip(years[-3:], vs[-3:], strict=True)
     ]
@@ -3620,3 +3631,67 @@ def test_cash_a_decimal_off_cash_including_restricted_cash_is_held(
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
         ("CashAndCashEquivalentsAtCarryingValue", 2025, "a")
     }
+
+
+# ------------------------------------------------------------------------------------- review round 25 (P1)
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1, 100.0, 0.01])
+def test_totals_slipped_a_decimal_together_are_held(factor: float) -> None:
+    """Assets and liabilities-and-equity a decimal off together still equal each other, but each breaks its own
+    statement identity (current + noncurrent assets; liabilities + equity): the pair is held, and nothing else."""
+    rows = {  # synthetic round figures, not any filer's
+        "AssetsCurrent": (130e9, 140e9, 145e9, 150e9, 152e9),
+        "AssetsNoncurrent": (220e9, 225e9, 228e9, 230e9, 231e9),
+        "Assets": (350e9, 365e9, 373e9, 380e9, 383e9),
+        "Liabilities": (260e9, 270e9, 272e9, 276e9, 276e9),
+        "StockholdersEquity": (90e9, 95e9, 101e9, 104e9, 107e9),
+        "LiabilitiesAndStockholdersEquity": (350e9, 365e9, 373e9, 380e9, 383e9),
+    }
+    seeded = {"Assets", "LiabilitiesAndStockholdersEquity"}
+    records = _seeded(rows, seeded, factor, (2021, 2022, 2023, 2024, 2025), instants=True)
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in seeded
+    }
+    clean, _ = sec_scale.scale_errors(_seeded(rows, seeded, 1.0, (2021, 2022, 2023, 2024, 2025), instants=True))
+    assert not clean
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1])
+def test_net_income_and_eps_slipped_together_are_both_held(factor: float) -> None:
+    """Net income a decimal off breaks pre-tax income - tax = net income and is held; EPS slipped with it still matches
+    it, and so moved with it: EPS, far from its own history, is held too, while the share count is not."""
+    shares = (1.00e9, 0.99e9, 0.98e9, 0.97e9, 0.96e9)
+    income = (10e9, 11e9, 12e9, 13e9, 14e9)
+    rows = {
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": tuple(
+            n + t for n, t in zip(income, (2e9, 2e9, 3e9, 3e9, 3e9), strict=True)
+        ),
+        "IncomeTaxExpenseBenefit": (2e9, 2e9, 3e9, 3e9, 3e9),
+        "NetIncomeLoss": income,
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True)),
+    }
+    seeded = {"NetIncomeLoss", "EarningsPerShareDiluted"}
+    records = _seeded(rows, seeded, factor, (2021, 2022, 2023, 2024, 2025))
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in seeded
+    }
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1, 100.0, 0.01])
+def test_a_column_keyed_a_decimal_off_is_held_whole(factor: float) -> None:
+    """Every currency fact of the newest column 10x or 100x off its history (the statement keyed in the wrong unit,
+    so its identities still close): the column is held whole, and nothing of the earlier columns."""
+    base = {  # synthetic figures, not any filer's: a dozen unrelated lines, so no identity sees the slip
+        f"Line{k:02d}": tuple((1 + 0.1 * k) * 1e9 * (1.03**y) for y in range(5)) for k in range(12)
+    }
+    records = _seeded(base, set(base), factor, (2021, 2022, 2023, 2024, 2025))
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in base
+    }
+    clean, _ = sec_scale.scale_errors(_seeded(base, set(base), 1.0, (2021, 2022, 2023, 2024, 2025)))
+    assert not clean

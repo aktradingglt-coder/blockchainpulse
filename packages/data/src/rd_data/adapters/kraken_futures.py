@@ -407,22 +407,25 @@ class KrakenFuturesAdapter(BaseAdapter):
 
 #: Metrics computed from the mark price; quarantined with it when mark and index disagree.
 _MARK_DERIVED = frozenset({"mark_price", "index_price", "funding_rate"})
-#: A linear perpetual's quote volume is its contract volume x the 24h VWAP (to float precision on every PF_ ticker of
-#: the recording); allowed relative gap before the contract volume is taken to be mis-scaled.
+#: A linear perpetual's quote volume is its contract volume x the 24h VWAP; an inverse perpetual's contract is worth one
+#: quote unit, so its quote volume is its contract volume (both to float precision on every PF_ and PI_ ticker of the
+#: recording). Allowed relative gap before the contract volume is taken to be mis-scaled.
 VOLUME_QUOTE_TOLERANCE = 1e-6
 
 
 def _volume_inconsistent(tickers: Mapping[str, Any], symbols: set[str]) -> list[str]:
-    """Linear (PF_) perpetuals whose 24h contract volume x 24h VWAP is not their 24h quote volume: one of the figures is
-    wrong, and the contract volume, the one served, is not shown on that evidence."""
+    """Perpetuals whose 24h contract volume breaks its relation to the 24h quote volume (x VWAP for linear PF_, equal
+    for inverse PI_): one of the figures is wrong, and the contract volume, the one served, is not shown on that
+    evidence."""
     out = []
     for symbol in sorted(symbols):
         info = tickers[symbol]["info"]
-        values = [as_float(info.get(k)) for k in ("vol24h", "vwap24h", "volumeQuote")]
-        if not str(info.get("symbol", "")).startswith("PF_") or any(v is None for v in values):
+        kind = str(info.get("symbol", ""))[:3]
+        volume, quote = as_float(info.get("vol24h")), as_float(info.get("volumeQuote"))
+        price = {"PF_": as_float(info.get("vwap24h")), "PI_": 1.0}.get(kind)
+        if volume is None or quote is None or price is None:
             continue
-        volume, vwap, quote = (float(v) for v in values if v is not None)
-        if abs(volume * vwap - quote) > VOLUME_QUOTE_TOLERANCE * max(abs(quote), 1.0):
+        if abs(volume * price - quote) > VOLUME_QUOTE_TOLERANCE * max(abs(quote), 1.0):
             out.append(symbol)
     return out
 
