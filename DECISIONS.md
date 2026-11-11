@@ -500,7 +500,10 @@ company's very first filing has nothing in the response to be compared with, bey
   moves an exact identity by less than its 1% tolerance is not distinguishable from rounding.
 - *Slipped decimals in lines outside the relations of rules 6 and 6a.* A line 10× or 100× off that no relation of
   its filing contains, under the 10^2.5 flag of rule 3, is served: genuine moves of that size are common in such
-  lines (10 genuine 10^2–10^3 moves in the newest AMZN filings alone), so history cannot tell them apart.
+  lines (10 genuine 10^2–10^3 moves in the newest AMZN filings alone), so history cannot tell them apart. Measured
+  on the newest filing's current cells of 11 headline lines at all 15 filers (×10, ÷10, ×100: 462 seeds), 456 are
+  held; the 6 served are GE revenue, GE cash including restricted cash and MMM operating cash flow, lines that no
+  relation closes in those filings (round 24).
 
 Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
 fundamentals into reports (STATUS). (P1 review rounds 6–12.)
