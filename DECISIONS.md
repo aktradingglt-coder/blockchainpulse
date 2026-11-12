@@ -234,9 +234,18 @@ terms allow display but forbid derived data, which the three-tag model could not
   for an inverse (PI_) one, whose contract is worth one quote unit; both hold to float precision on every ticker of
   the recording; else the volume is quarantined (P1 review rounds 24–25). A requested symbol the exchange did not
   return is reported.
+- Bars (every source): a high more than 3× the bar's larger of open and close, or a low under a third of the smaller,
+  is a bad print even when every bar shares it (a column keyed in the wrong unit, which the field's own series cannot
+  show): the recorded Kraken bars' widest wicks are +3.0% and −4.5%; a genuine flash-crash wick beyond 3× would be
+  withheld, not served (fails closed) (P1 review round 26). A response whose every bar is quarantined is refused.
 - Treasury yield-curve CSV: a body cut off is refused as an outage — a last row with missing fields or a number cut
   short (Treasury prints every yield with two decimals), or a year's file that starts after the 7th of January (the
-  file runs newest first, so a cut between rows loses the year's oldest days) (P1 review round 24).
+  file runs newest first, so a cut between rows loses the year's oldest days) (P1 review round 24). A tenor's yield
+  more than 1.0 percentage point outside the band its neighbouring tenors draw that day (an end tenor: farther from
+  the nearer neighbour than the two nearest differ, by more than 1.0) is quarantined, even when every day's value of
+  that tenor shares it (the 10-year divided by 10, the 2-year doubled). Measured only on the recorded 2026 file (201
+  days): genuine curves stay within 0.08 of the band; the Treasury host is not reachable from the build environment
+  for a longer calibration (STATUS) (P1 review round 26).
 - COT: both the long and the short side (with spreading) must sum to open interest; rows for another market are
   rejected.
 - Corporate actions: an unexplained split-ratio jump blocks the series only when split dates come from a
@@ -369,6 +378,27 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    but each breaks its own statement identity), and history blames a side by half the step. Every fact of such a
    group that has history must sit about the step from it (within 10^0.5): without that, groups of small lines whose
    rescale happened to land inside the 0.1% tolerance of a large relation held 31 genuine JPM 2009 and GE facts.
+   A whole statement keyed 10× or 100× off, or with every sign reversed, inside a column that is otherwise genuine
+   (an income or cash-flow statement is 30–50% of its flow column, so the column's median does not move) is too large
+   for that group search. It is grown from a term of a broken relation along the relations that close exactly as
+   reported (their terms add up with it, so they share its scale or sign); 60% of the grown facts with history must
+   sit the step off it (within 10^0.5) or, for a flip, have the opposite sign to it; the period's other facts that
+   moved too, and are tied by no relation that closes as reported to a fact left out, join it. The statement is held
+   when rescaling or flipping it closes the broken relation exactly (within 0.1%), needing both sides. Flips are tried
+   only for a flow statement against balances it does not contain (the change in cash against closing minus opening
+   cash): tables and rollforwards change sign conventions between filings in clean data, and trying flips there held
+   231 genuine C, GE and TSLA facts. A slipped cash-flow statement also takes its period's cash-flow lines by element
+   name (proceeds, payments, repayments, working-capital changes), which swing so far on their own that a slipped one
+   can sit on its history (XOM debt repayments genuinely 10^1.0 above theirs). This search runs before the smaller
+   groups, which could otherwise split the statement (two balances close a cash change across two years).
+   A broken relation that nothing above explains, in a relation the filer's other filings close (at least four other
+   instances, 95% of them within 1%), shows a figure entered wrong by some other factor (assets ×1.5 beside
+   liabilities and equity), but it cannot be told from the filer's own tagging of that period: holding such breaks
+   held 201 more genuine facts on clean data (GOOGL's newest equity components, JPM 2009 totals, BRK comprehensive
+   income). Its facts in the
+   four most recent filings are flagged instead (kept, and named in the quality report for review); on clean data
+   the flag marks 19 recent facts at 2 of the 15 filers (MMM cash-flow totals beside a disposal-group line, GOOGL's
+   newest equity components) (P1 review round 26).
 6a. *Ratios at the filer's own level.* EPS × weighted shares = income to common stock (diluted and basic, and
    diluted EPS × basic shares for filers that tag no diluted share count, as XOM; income available to common stock
    where the filing tags it, else net income), and cash is nearly all of cash including restricted cash (either
@@ -464,7 +494,8 @@ set aside with a warning.
 - Quarantine every cross-filing disagreement: rejected, it hides restatements.
 - MAD per concept (PROMPT §5.3's robust z-score): rejected for company facts, as genuine one-offs sit up to 10^3
   from their neighbours; outliers are caught instead by the relations of rules 6 and 6a, which a slipped decimal
-  breaks. A slip in a line that is in no relation (and under the 10^2.5 flag) is not detected (see Limits).
+  breaks (held where a rescale or flip explains the break; flagged for review where nothing does, rule 6). A slip in
+  a line that is in no relation (and under the 10^2.5 flag) is not detected (see Limits).
 - A size bound on tax lines against the line's own history: measured and rejected (a genuine Meta tax line is 39× that
   yardstick, while Microsoft's GILTI ×1000 lands at 30×). Against total assets the same lines separate cleanly (rule 7).
 - One size bound for every line (100×, 10× when flagged): too loose; ×1000 tax and cash-flow lines landed at 1.4–8.2×

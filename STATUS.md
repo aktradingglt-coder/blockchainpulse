@@ -127,8 +127,8 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   report layer. EPS sign flips are served (an EPS-vs-net-income sign check would hold genuine data in 28 of 3,600
   clean pairs; use net income to common shareholders). Flips with no exact relation in the response (CostOfRevenue
   without a gross-profit line; GE revenue) remain.
-- P2 (from P1 review round 17, minor): EPS entered x100 or /100 is served (x1000 is held); EPS = net income / diluted
-  shares is only approximate (closes within 2% for non-banks, not for banks). Revenue = contract + other revenue is
+- P2 (from P1 review round 17, minor; EPS x100 and /100 are held since round 24, D-036 rule 6a): EPS = net income /
+  diluted shares is only approximate (closes within 2% for non-banks, not for banks). Revenue = contract + other revenue is
   calibrated on one filer (BRK); a relation that does not close is left alone.
 - P2 (from P1 review round 18, minor): a sign flip that moves an exact identity by less than the 1% "broken"
   tolerance is served (BRK's minority interest, 0.6% of equity; TSLA's redeemable NCI); measure a per-relation
@@ -170,6 +170,11 @@ Owner-facing list: `docs/OWNER_LAUNCH_CHECKLIST.md`.
   no income to common stock could be withheld (fails closed); FRED copyright detection is a substring match that the
   schema-derived cassette's own notes trip (fails closed: `internal_only`); Treasury CSVs with CRLF line ends,
   trailing blank lines or no final newline are served rather than refused as possibly truncated.
+- P2 (from P1 review round 26): the Treasury curve-shape bound (1.0 point off the neighbouring tenors, D-033) is
+  measured on the recorded 2026 file only, as the Treasury host is not reachable from the build environment; measure
+  it on 1990–present before P3 relies on it. The Kraken wick bound (3×) is set from 60 recorded bars. A figure off by
+  a factor no rescale or flip explains is flagged for review, not held (D-036 rule 6); cash-flow lines that no
+  relation contains are taken with a slipped cash-flow statement by element name.
 - Before wider SEC coverage (from P1 review round 12): the size tiers of D-036 were measured on 15 large filers; the
   20× bound on revenue and cost lines is set for low-margin distributors and traders that were not measured.
 - P3 (from P1 review round 8, minor): report `indices` refer to the records QA saw, not to the records returned after

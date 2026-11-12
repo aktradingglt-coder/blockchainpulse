@@ -326,7 +326,8 @@ class SecEdgarAdapter(BaseAdapter):
                 "scale_outliers",
                 passed=not flagged,
                 blocking=False,
-                detail=f"{len(flagged)} recent fact(s) unusually far from their neighbouring periods, kept for review"
+                detail=f"{len(flagged)} recent fact(s) unusually far from their neighbouring periods or in a relation"
+                " their filing breaks although the company's other filings close it, kept for review"
                 if flagged
                 else "ok",
                 indices=tuple(sorted(flagged)),

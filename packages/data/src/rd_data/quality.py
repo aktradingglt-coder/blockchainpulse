@@ -205,6 +205,10 @@ LONG_BAD_RUN = 5
 IMPLAUSIBLE_LOG_MOVE = math.log(10.0)
 #: A week-on-week open-interest move beyond x3 (or /3) is a corrupted row, not an expiry roll.
 OI_IMPLAUSIBLE_LOG_MOVE = math.log(3.0)
+#: A high this many times the bar's larger of open and close, or a low this fraction of the smaller, is a bad print
+#: even when every bar's high or low shares it (a column keyed in the wrong unit): the widest genuine wicks of the
+#: recorded Kraken bars are +3.0% and -4.5% (a genuine flash-crash wick beyond the bound is withheld: fails closed).
+WICK_BOUND = 3.0
 
 
 @dataclass(frozen=True)
@@ -316,7 +320,8 @@ def check_field_spikes(bars: Sequence[Bar], *, threshold: float = OUTLIER_Z) -> 
     """Bad prints in highs, lows and volume (closes are scanned by :func:`check_price_spikes`).
 
     A wick 50 times the close or a volume a million times its neighbours is a bad tick even when the close is
-    sound; such bars are quarantined like a bad close.
+    sound; such bars are quarantined like a bad close. A wick beyond WICK_BOUND times its own bar's open and close is
+    one too, even when every bar's high shares it.
     """
     flagged: dict[str, set[int]] = {}
     for name, values in (("high", [b.high for b in bars]), ("low", [b.low for b in bars])):
@@ -326,6 +331,14 @@ def check_field_spikes(bars: Sequence[Bar], *, threshold: float = OUTLIER_Z) -> 
         hits = {*scan.bad_prints, *scan.unconfirmed}
         if hits:
             flagged[name] = hits
+    wicks = {
+        i
+        for i, b in enumerate(bars)
+        if min(b.open, b.close, b.low) > 0
+        and (b.high > WICK_BOUND * max(b.open, b.close) or b.low * WICK_BOUND < min(b.open, b.close))
+    }
+    if wicks:
+        flagged["wick"] = wicks
     volumes = [b.volume for b in bars]
     if len(volumes) >= 11 and all(v is not None and v > 0 for v in volumes):
         # Volume bursts of 10x are ordinary; only a bar 100x away from the series' median volume is a bad tick.

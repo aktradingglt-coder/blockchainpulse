@@ -59,6 +59,17 @@ COLUMN_SHIFT_SHARE = 0.6
 #: a 2010 META comparative, has a median step of 10^-0.57 with 52% of its steps within 10^0.5 of 10^-1).
 COLUMN_DECIMAL_STEPS = frozenset({1, 2})
 COLUMN_DECIMAL_NEAR = 0.3
+#: A statement a power of 10 or 100 off is at least two facts (one is _decimal_repair's): see _slipped_statement.
+STATEMENT_MIN = 2
+#: A relation closed in at least BREAK_HISTORY of the filer's other instances, and in BREAK_SHARE of them, is its own
+#: arithmetic: see _unexplained_breaks.
+BREAK_HISTORY = 4
+BREAK_SHARE = 0.95
+_CASH_FLOW_TOTAL = re.compile(r"^NetCashProvidedByUsedIn|^CashCashEquivalents.*PeriodIncreaseDecrease")
+_CASH_FLOW_LINE = re.compile(
+    r"^(NetCashProvidedByUsedIn|Proceeds|Payments|Repayments|IncreaseDecreaseIn|EffectOfExchangeRate|InterestPaid"
+    r"|IncomeTaxesPaid|CashCashEquivalents.*PeriodIncreaseDecrease)"
+)
 PREVIOUS_WINDOW_DAYS = 400
 #: A currency fact larger than this multiple of the company's own total assets is held. Across about 400,000 clean
 #: us-gaap facts of 15 large filers, outside revenue and cost lines, the largest ratio is 1.5 (XOM gross PP&E); the only
@@ -702,7 +713,8 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     * held — a held fact's siblings: the same filing's other facts of that concept and period end (a scale is set per
       table, so e.g. the trailing-twelve-month figure beside a mis-scaled quarter shares its error); and the whole
       column (one filing, one period end) once most of it is held;
-    * flagged — any other fact more than 10^FLAG_DISTANCE from its neighbours (kept, for review).
+    * flagged — any other fact more than 10^FLAG_DISTANCE from its neighbours, and the facts of a recent filing's
+      relation that the filer's other filings close but it breaks with no repair explaining it (kept, for review).
 
     Whenever two filings are weighed against each other, neighbours reported by either of them are left out, so a
     mis-scaled filing never vouches for itself or against the other.
@@ -736,6 +748,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
         step = neighbours.previous_step(i) if f.period_start is None and f.accession in recent else None
         if step is not None and step > INSTANT_FLAG_STEP:
             flagged.add(i)
+    flagged |= _unexplained_breaks(records, held, recent)
     held |= _beyond_assets(records, logs, held)
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
@@ -1037,6 +1050,10 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
             held_here, fixed = _repair(records, system, [inst for inst in system if inst in broken], neighbours)
             out |= held_here
             explained |= fixed
+    # A whole statement a power of 10 or 100 off (or flipped) inside a genuine column: a broken relation that one of its
+    # terms' statement, rescaled together, closes exactly. Tried before smaller groups, which would split it (a pair of
+    # balances can close the cash change of a slipped cash-flow statement across two years).
+    out |= _statement_errors(records, [i for i in tables + statements if i in broken], explained, neighbours)
     # Several facts a power of 10 or 100 off together (a statement partly keyed in the wrong unit): statements and
     # footnote tables joined, as a total another table confirms (assets = liabilities and equity) may have slipped with
     # it; signs learned from the filing are left out. A single slipped fact is _decimal_repair's.
@@ -1078,6 +1095,76 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
         known |= spread
         out |= spread
     return out
+
+
+def _unexplained_breaks(records: list[FundamentalFact], held: set[int], recent: set[str]) -> set[int]:
+    """Facts of recent filings in a relation the filer's other filings close (BREAK_HISTORY instances or more,
+    BREAK_SHARE of them within ADDITIVITY_TOLERANCE) that breaks in their filing, with none of its facts held: a figure
+    entered wrong by a factor no rescale or flip explains (assets x1.5 beside liabilities and equity) cannot be told
+    from the filer's own tagging of that period (it breaks relations in clean filings too), so they are flagged, kept
+    for review, rather than held."""
+    tables, _, statements, _ = _instances(records)
+    instances = tables + statements
+
+    def shape(inst: _Instance) -> tuple[tuple[str, bool], ...]:
+        return tuple(sorted((records[k].concept, coef > 0) for k, coef in inst))
+
+    unbalanced = {inst for inst in instances if not _balances(_contributions(records, inst))}
+    closes: dict[tuple[tuple[str, bool], ...], list[tuple[str, bool]]] = {}
+    for inst in instances:
+        closes.setdefault(shape(inst), []).append((records[inst[0][0]].accession, inst not in unbalanced))
+    out: set[int] = set()
+    for inst in unbalanced:
+        terms = {k for k, _ in inst}
+        accession = records[inst[0][0]].accession
+        if accession not in recent or held & terms:
+            continue  # history, or a repair or another check that explained it
+        others = [ok for acc, ok in closes[shape(inst)] if acc != accession]
+        if len(others) >= BREAK_HISTORY and sum(others) >= BREAK_SHARE * len(others):
+            out |= terms
+    return out
+
+
+def _statement_errors(
+    records: list[FundamentalFact], broken: list[_Instance], explained: set[_Instance], neighbours: _Neighbours
+) -> set[int]:
+    """_statement_repair for each broken relation not yet explained (adding those it explains)."""
+    out: set[int] = set()
+    closed: dict[int, list[_Instance]] | None = None
+    for inst in broken:
+        if inst not in explained:
+            if closed is None:
+                closed = _closed_relations(records)
+            if found := _statement_repair(records, closed, neighbours, inst):
+                out |= found
+                explained.add(inst)
+    return out
+
+
+def _statement_repair(
+    records: list[FundamentalFact], closed: dict[int, list[_Instance]], neighbours: _Neighbours, inst: _Instance
+) -> set[int]:
+    """The statement (_slipped_statement) of one of the broken relation's terms whose rescale by its step, or whose
+    sign reversal (a flow statement against balances it does not contain), closes the relation exactly, needing both
+    the statement's terms and the others; empty when none does."""
+    balances = [k for k, _ in inst if records[k].period_start is None]
+    for k, _ in inst:
+        d = neighbours.level_step(k)
+        # signs: only where a flow statement meets the balance sheet (the change in cash against closing minus opening
+        # cash); tables and rollforwards flip sign conventions between filings in clean data
+        tries = [(_reversed(neighbours, records), -1.0)] if balances and records[k].period_start is not None else []
+        if d is not None and abs(round(d)) in COLUMN_DECIMAL_STEPS:
+            tries.append((_stepped(neighbours, round(d)), 10.0 ** -round(d)))
+        for moved, factor in tries:
+            found = _slipped_statement(records, closed, k, moved)
+            after = _contributions(records, inst, found, factor)
+            if (
+                len(found) >= STATEMENT_MIN
+                and _exact(after)
+                and _closes_with_both_sides(after, [j in found for j, _ in inst])
+            ):
+                return found
+    return set()
 
 
 def _instances(
@@ -1363,6 +1450,18 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
         index.setdefault((f.accession, f.period_start, f.period_end), {})[f.concept] = i
     out: set[int] = set()
     confirmed: set[int] | None = None  # found only when a ratio is off: the identities are costly to rebuild
+    closed: dict[int, list[_Instance]] | None = None
+
+    def statement(i: int, off: float) -> set[int]:
+        """Net income's column, else its statement, when it slipped by the ratio's step (off: the step to it)."""
+        nonlocal closed
+        if column := _slipped_column(records, neighbours, i, off):
+            return set(column)
+        if closed is None:
+            closed = _closed_relations(records)
+        found = _slipped_statement(records, closed, i, _stepped(neighbours, round(off)))
+        return found if len(found) >= STATEMENT_MIN else set()
+
     for num, den, min_move in RATIOS:
         levels = _ratio_levels(records, index, num, den)
         if len(levels) < MIN_RATIO_INSTANCES:
@@ -1371,12 +1470,8 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
         for level, idx in levels:
             slipped = _slipped(level - usual, min_move)
             if (held | out) & set(idx):  # this check's own holds count: diluted EPS held carries basic EPS
-                if (
-                    slipped
-                    and min_move is None
-                    and (column := _slipped_column(records, neighbours, idx[-1], -(level - usual)))
-                ):
-                    out |= set(column)  # a size bound held net income first; its statement slipped with it
+                if slipped and min_move is None and (column := statement(idx[-1], -(level - usual))):
+                    out |= column  # a size bound held net income first; its statement slipped with it
                     continue
                 rest = [i for i in idx if i not in held | out]
                 if _moved_together(records, idx, level - usual, min_move) and rest:
@@ -1387,9 +1482,9 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
             elif slipped:
                 if confirmed is None:
                     confirmed = _confirmed(records)
-                column = _slipped_column(records, neighbours, idx[-1], -(level - usual)) if min_move is None else []
+                column = statement(idx[-1], -(level - usual)) if min_move is None else set()
                 # net income's identities close because its whole statement slipped with it: hold the statement
-                out |= set(column) or _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
+                out |= column or _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
     return out
 
 
@@ -1412,6 +1507,84 @@ def _slipped_column(records: list[FundamentalFact], neighbours: _Neighbours, i: 
     if len(steps) < COLUMN_SHIFT_MIN or abs(statistics.median(steps) - off) > NEAR_POWER:
         return []
     return column
+
+
+def _closed_relations(records: list[FundamentalFact]) -> dict[int, list[_Instance]]:
+    """Relations of statement identities and footnote tables (signs learned from the filing left out) that close
+    exactly as reported, by fact."""
+    tables, _, statements, _ = _instances(records)
+    by_fact: dict[int, list[_Instance]] = {}
+    for inst in tables + statements:
+        if _exact(_contributions(records, inst)):
+            for k, _ in inst:
+                by_fact.setdefault(k, []).append(inst)
+    return by_fact
+
+
+def _slipped_statement(
+    records: list[FundamentalFact],
+    closed: dict[int, list[_Instance]],
+    seed: int,
+    moved: Callable[[int], bool | None],
+) -> set[int]:
+    """The statement that moved with fact seed (an income or cash-flow statement keyed in the wrong unit, or with its
+    signs reversed, inside a genuine column whose median does not move): ``moved`` says whether a fact sits the slip
+    off its history (None without history). It is grown from the seed along relations that close exactly as reported:
+    their terms add up with the seed, so they share its scale and sign. COLUMN_SHIFT_SHARE of the grown facts with
+    history must have moved (single flows such as investing swing on their own); then the other facts of its filing's
+    periods that moved, and close no relation with a fact left out, join it. Empty when the seed or the grown statement
+    has not moved: it reached figures on their history, so it did not move as a whole. A moved cash-flow statement (one
+    holding a cash-flow total) also takes its period's cash-flow lines by name: debt issued and repaid, proceeds and
+    working-capital changes swing so far on their own that a slipped one sits within its history (XOM debt repayments
+    10^1.0 above history at their genuine value)."""
+    if not moved(seed):
+        return set()
+    out = {seed}
+    frontier = [seed]
+    while frontier:
+        for inst in closed.get(frontier.pop(), ()):
+            new = [k for k, _ in inst if k not in out]
+            out.update(new)
+            frontier.extend(new)
+    known = [m for i in out if (m := moved(i)) is not None]
+    if sum(known) < COLUMN_SHIFT_SHARE * len(known):
+        return set()
+    periods = {(records[i].accession, records[i].period_start, records[i].period_end) for i in out}
+    cash_flows = any(_CASH_FLOW_TOTAL.match(records[i].concept) for i in out)
+    siblings = {
+        j
+        for j, g in enumerate(records)
+        if j not in out
+        and (g.accession, g.period_start, g.period_end) in periods
+        and _CURRENCY.match(g.unit)
+        and g.taxonomy != "dei"
+        and (moved(j) or (cash_flows and bool(_CASH_FLOW_LINE.match(g.concept))))
+    }
+    while True:  # a sibling tied by a relation that closes as reported to a fact left out stays out
+        tied = {j for j in siblings for inst in closed.get(j, ()) if any(k not in out | siblings for k, _ in inst)}
+        if not tied:
+            return out | siblings
+        siblings -= tied
+
+
+def _stepped(neighbours: _Neighbours, step: int) -> Callable[[int], bool | None]:
+    """Whether a fact sits ``step`` powers of 10 from its history (within NEAR_POWER); None without history."""
+
+    def moved(i: int) -> bool | None:
+        d = neighbours.level_step(i)
+        return None if d is None else abs(d - step) <= NEAR_POWER
+
+    return moved
+
+
+def _reversed(neighbours: _Neighbours, records: list[FundamentalFact]) -> Callable[[int], bool | None]:
+    """Whether a fact's sign opposes most of its history; None without history."""
+
+    def moved(i: int) -> bool | None:
+        own = frozenset({records[i].accession})
+        return None if neighbours.distance(i, own) is None else neighbours.sign_against_history(i, own)
+
+    return moved
 
 
 def _all_off_by(neighbours: _Neighbours, records: list[FundamentalFact], group: Sequence[int], factor: float) -> bool:

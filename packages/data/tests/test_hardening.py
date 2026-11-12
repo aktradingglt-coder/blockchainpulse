@@ -3813,3 +3813,168 @@ def test_a_fast_growers_statement_keyed_a_decimal_off_is_held_by_its_eps(factor:
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
         (c, 2025, "a") for c in (*flows, *per_share)
     }
+
+
+# --- P1 review round 26: statements inside a genuine column, breaks by any factor, curve shape, wicks ---------------
+
+
+_YEARS = (2021, 2022, 2023, 2024, 2025)
+
+
+def _genuine_lines(count: int = 12) -> dict[str, tuple[float, ...]]:
+    """Footnote lines in no relation, steady across the years: the rest of the newest filing's flow column."""
+    return {f"Note{k:02d}": tuple((1 + 0.1 * k) * 1e9 * 1.03**y for y in range(5)) for k in range(count)}
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1, 100.0])
+def test_an_income_statement_slipped_inside_a_genuine_column_is_held_not_its_eps(factor: float) -> None:
+    """The income statement keyed 10x or 100x off while the rest of its flow column (footnotes) is genuine: the column's
+    median does not move, net income's identity closes (every line moved together), and EPS x shares no longer matches
+    net income. The statement is held, not the genuine EPS and share count the ratio would otherwise blame."""
+    income = (10e9, 11e9, 12e9, 13e9, 14e9)  # synthetic round figures, not any filer's
+    statement = {
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": tuple(
+            n * 1.25 for n in income
+        ),
+        "IncomeTaxExpenseBenefit": tuple(n * 0.25 for n in income),
+        "NetIncomeLoss": income,
+    }
+    shares = (1.0e9,) * 5
+    per_share = {
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True)),
+    }
+    records = [
+        *_seeded(statement, set(statement), factor, _YEARS),
+        *_seeded({**per_share, **_genuine_lines()}, set(), 1.0, _YEARS),
+    ]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in statement
+    }
+
+
+def _cash_flow_records(factor: float) -> tuple[list[FundamentalFact], set[str]]:
+    """A cash-flow statement whose newest year is multiplied by factor, beside genuine cash balances (closing minus
+    opening cash = the change in cash) and a genuine income statement; buybacks jumped 10x in the newest year for real,
+    so the slipped figure sits on their history. Returns the records and the seeded concepts."""
+    change = (2e9, -1e9, 3e9, 1e9, 2e9)  # synthetic round figures, not any filer's
+    operating = (30e9, 32e9, 35e9, 36e9, 38e9)
+    investing = (-15e9, -18e9, -17e9, -20e9, -21e9)
+    buybacks = (1e9, 1e9, 1e9, 1e9, 1e9 / factor if factor > 0 else 1e9)
+    cash_flows = {
+        sec_scale._CASH_CHANGE[0]: change,  # the change in cash including restricted cash
+        "NetCashProvidedByUsedInOperatingActivities": operating,
+        "NetCashProvidedByUsedInInvestingActivities": investing,
+        "NetCashProvidedByUsedInFinancingActivities": tuple(
+            c - o - i for c, o, i in zip(change, operating, investing, strict=True)
+        ),
+        "PaymentsForRepurchaseOfCommonStock": buybacks,
+    }
+    closing = [20e9]
+    for c in change:
+        closing.append(closing[-1] + c)
+    cash = {"CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": tuple(closing)}
+    income = (10e9, 11e9, 12e9, 13e9, 14e9)
+    statement = {
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": tuple(
+            n * 1.25 for n in income
+        ),
+        "IncomeTaxExpenseBenefit": tuple(n * 0.25 for n in income),
+        "NetIncomeLoss": income,
+    }
+    records = [
+        *_seeded(cash_flows, set(cash_flows), factor, _YEARS, instants=False),
+        *_seeded(cash, set(), 1.0, (2020, *_YEARS), instants=True),
+        *_seeded({**statement, **_genuine_lines()}, set(), 1.0, _YEARS, instants=False),
+    ]
+    return records, set(cash_flows)
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1, -1.0])
+def test_a_cash_flow_statement_slipped_or_flipped_against_genuine_cash_balances_is_held(factor: float) -> None:
+    """The newest cash-flow statement 10x off, or with every sign reversed, while the balance sheet is genuine: its own
+    identity closes, but the change in cash no longer equals closing minus opening cash, and rescaling (or flipping)
+    the statement together closes it exactly. The statement is held, with the period's cash-flow lines that sit on
+    their history at their slipped value (buybacks), and the genuine balances and income statement are served."""
+    records, seeded = _cash_flow_records(factor)
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in seeded
+    }
+    clean, _ = sec_scale.scale_errors(_cash_flow_records(1.0)[0])
+    assert not clean
+
+
+@pytest.mark.parametrize("factor", [1.5, 0.7])
+def test_assets_off_liabilities_and_equity_by_any_factor_is_flagged(factor: float) -> None:
+    """Assets x1.5 beside liabilities and equity: no rescale or flip explains the break, and a filer's own tagging
+    breaks relations in clean filings too, so the pair is flagged for review (named in the quality report), not held;
+    the filer's other filings close the relation every year."""
+    totals = tuple(100e9 * 1.04**y for y in range(6))
+    rows = {"Assets": totals, "LiabilitiesAndStockholdersEquity": totals}
+    records = _seeded(rows, "Assets", factor, (2020, *_YEARS), instants=True)
+    held, flagged = sec_scale.scale_errors(records)
+    assert not held
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in flagged} == {
+        ("Assets", 2025, "a"),
+        ("LiabilitiesAndStockholdersEquity", 2025, "a"),
+    }
+    _, clean = sec_scale.scale_errors(_seeded(rows, "Assets", 1.0, (2020, *_YEARS), instants=True))
+    assert not clean
+
+
+def _tenor_edit(column: str, factor: float) -> Mutator:
+    def apply(body: str) -> str:
+        rows = list(csv.DictReader(io.StringIO(body)))
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=list(rows[0]), lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            if row.get(column):
+                row[column] = f"{float(row[column]) * factor:.2f}"
+            writer.writerow(row)
+        return out.getvalue()
+
+    return apply
+
+
+@pytest.mark.parametrize(("column", "tenor", "factor"), [("10 Yr", "10Y", 0.1), ("2 Yr", "2Y", 2.0)])
+async def test_a_tenor_off_the_curve_on_every_day_is_quarantined(column: str, tenor: str, factor: float) -> None:
+    """Every day's 10-year yield divided by 10 (0.4% between a 5% 7-year and a 5.5% 20-year), or the 2-year doubled:
+    each day's own curve contradicts it although the tenor's own series is smooth, so the tenor is quarantined on
+    every day and the rest of the curve is served."""
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+    clean = await _replay(TreasuryAdapter, request)
+    assert not any("curve_shape" in w for w in clean.quality.warnings)
+    resp = await _replay(TreasuryAdapter, request, {0: _tenor_edit(column, factor)})
+    served = [p for p in resp.records if isinstance(p, TreasuryYieldPoint)]
+    assert not any(p.tenor == tenor for p in served)
+    assert len(served) == sum(1 for p in clean.records if isinstance(p, TreasuryYieldPoint) and p.tenor != tenor)
+    assert any("curve_shape" in w for w in resp.quality.warnings)
+
+
+@pytest.mark.parametrize(("field", "factor"), [("high", 10.0), ("low", 0.1)])
+async def test_every_wick_keyed_in_the_wrong_unit_is_quarantined(field: str, factor: float) -> None:
+    """Every bar's high x10 (or low /10): the field's own series is smooth, but each bar's high sits 10x above its own
+    open and close, beyond the widest genuine wick (WICK_BOUND), so every bar is quarantined and, with nothing usable
+    left, the response is refused rather than served."""
+    request = _plan(KrakenFuturesAdapter, RequestKind.BARS)
+    cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request))
+    candles_at = next(i for i, it in enumerate(cassette.interactions) if '"candles"' in it.body)
+
+    def seed(data: dict[str, Any]) -> None:
+        for c in data["candles"]:
+            c[field] = str(float(c[field]) * factor)
+
+    clean = await _replay(KrakenFuturesAdapter, request)
+    assert not clean.quarantined
+    with pytest.raises(DataQualityError, match="every record was quarantined"):
+        await _replay(KrakenFuturesAdapter, request, {candles_at: _json_edit(seed)})
+
+    def one_bar(data: dict[str, Any]) -> None:
+        data["candles"][-5][field] = str(float(data["candles"][-5][field]) * factor)
+
+    resp = await _replay(KrakenFuturesAdapter, request, {candles_at: _json_edit(one_bar)})
+    assert len(resp.quarantined) == 1
+    assert any("wick" in w for w in resp.quality.warnings)

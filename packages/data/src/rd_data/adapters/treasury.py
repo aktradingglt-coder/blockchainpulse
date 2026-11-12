@@ -62,6 +62,10 @@ _YIELD_TEXT = re.compile(r"^-?\d+\.\d{2}$")
 FIRST_SESSION_BY = 7
 #: Business-day calendar for gap checks and freshness (bond-market-only holidays show up as small gaps, never blocking).
 NYSE = ExchangeCalendar("XNYS")
+#: A tenor's yield more than this many percentage points outside the band of its neighbouring tenors that day (beyond
+#: the nearer one by more than the two neighbours differ, at either end of the curve) is a bad print, even when every
+#: day's value of that tenor shares it: the recorded 2026 curves stay within 0.08 of the band.
+KINK_BOUND = 1.0
 #: Consecutive publication days with an identical full curve that mean the source stopped updating.
 FROZEN_DAYS = 5
 URL = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{year}/all"
@@ -103,7 +107,8 @@ class TreasuryAdapter(BaseAdapter):
             raise NotFound(f"us_treasury: no curve rows for {year}", provider=self.name)
         range_check = check_range([p.yield_pct for p in all_points], lo=YIELD_RANGE[0], hi=YIELD_RANGE[1], what="yield")
         bad_prints, jumps = _bad_prints_by_tenor(all_points, exclude=set(range_check.indices))
-        held = {*range_check.indices, *bad_prints}
+        kinks = _kinked_tenors(all_points, exclude=set(range_check.indices))
+        held = {*range_check.indices, *bad_prints, *kinks}
         points = [p for p in all_points if p.ts.year == year]  # context from the previous year is never returned
         quarantined = [p for i, p in enumerate(all_points) if i in held and p.ts.year == year]
         usable = [p for i, p in enumerate(all_points) if i not in held and p.ts.year == year]
@@ -128,6 +133,15 @@ class TreasuryAdapter(BaseAdapter):
                 if bad_prints
                 else "ok",
                 indices=tuple(bad_prints),
+            ),
+            CheckResult(
+                "curve_shape",
+                passed=not kinks,
+                blocking=False,
+                detail=f"{len(kinks)} yield(s) off the curve of their neighbouring tenors quarantined"
+                if kinks
+                else "ok",
+                indices=tuple(kinks),
             ),
             CheckResult(
                 "large_moves",
@@ -249,6 +263,32 @@ def _bad_prints_by_tenor(points: list[TreasuryYieldPoint], *, exclude: set[int])
         flagged.extend(idx[j] for j in (*scan.bad_prints, *scan.unconfirmed))
         jumps.extend(idx[j] for j in scan.jumps)
     return sorted(flagged), sorted(jumps)
+
+
+def _kinked_tenors(points: list[TreasuryYieldPoint], *, exclude: set[int]) -> list[int]:
+    """Per day, yields off the curve their neighbouring tenors draw (KINK_BOUND): an inner tenor outside the band of
+    the tenors either side of it, an end tenor farther from the nearer one than the two nearest differ by."""
+    order = {tenor: k for k, tenor in enumerate(COLUMNS.values())}
+    by_day: dict[datetime, list[int]] = {}
+    for i, p in enumerate(points):
+        if i not in exclude and p.tenor in order:
+            by_day.setdefault(p.ts, []).append(i)
+    out: list[int] = []
+    for idx in by_day.values():
+        curve = sorted(idx, key=lambda i: order[points[i].tenor])
+        values = [points[i].yield_pct for i in curve]
+        for k, v in enumerate(values):
+            if 0 < k < len(values) - 1:
+                a, b = values[k - 1], values[k + 1]
+                off = max(v - max(a, b), min(a, b) - v)
+            elif len(values) >= 3:
+                near, next_ = (values[1], values[2]) if k == 0 else (values[-2], values[-3])
+                off = abs(v - near) - abs(near - next_)
+            else:
+                continue
+            if off > KINK_BOUND:
+                out.append(curve[k])
+    return sorted(out)
 
 
 def _missing_business_days(days: list[datetime]) -> CheckResult:
