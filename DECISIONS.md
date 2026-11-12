@@ -608,7 +608,13 @@ company's very first filing has nothing in the response to be compared with, bey
   same relations and rule 11: of 124 seeded groups at the 15 filers (assets with liabilities and equity, revenue with
   cost of revenue, net income with one or both EPS, net income with comprehensive income, ×10 or ÷10), 123 are held,
   and 120 of 120 whole current columns (all facts or flows only, ×10, ÷10, ×100, ÷100); the one served is GE's
-  comparative revenue, the GE revenue line above (round 25).
+  comparative revenue, the GE revenue line above (round 25). A whole income or cash-flow statement of the newest
+  filing ×10, ÷10 or ×100 (with or without EPS; 3,603 seeded facts at the 15 filers) is held but for 90 facts: 28
+  are BAC's cash-flow statement ÷10, whose change in cash is under 1% of its cash balances, so no relation shows the
+  slip; the rest are non-operating, other non-cash and noncontrolling-interest lines outside the relations (round 26,
+  on 90b3e53). With every sign reversed, 8 of 465 cash-flow facts, 18 of 343 income-statement facts and 18 of 393
+  with EPS are served, the same kinds of line, and C's annual income statement, which has no never-negative expense
+  line to seed it (on 9d6726e).
 
 Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
 fundamentals into reports (STATUS). (P1 review rounds 6–12.)

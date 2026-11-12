@@ -1,11 +1,12 @@
 # STATUS.md
 
-_Last updated: 2026-11-11_
+_Last updated: 2026-11-12_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–25 returned ONE MORE PASS; all
-major findings fixed (ledger rounds 5–29); awaiting review round 26 (ledger row 29 written).** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–26 returned ONE MORE PASS; major
+findings worked through in ledger rows 5–30 (row 30 lists what round 26's seeds still serve: BAC cash flows ÷10,
+lines outside relations, revenue ×3 where no relation applies); awaiting review round 27.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
