@@ -3628,6 +3628,61 @@ def test_eps_is_weighed_against_income_to_common_stock_where_tagged(newest: floa
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == want
 
 
+def test_one_eps_slipped_beside_a_fast_growers_genuine_statement_is_held_not_the_statement() -> None:
+    """Diluted EPS a tenth of its value in a year whose genuine income statement grew 10^0.6 (as AMZN's 2026 income
+    sits 10^0.5-0.7 above its history): the diluted ratio slips by 10 and the statement sits within 10^0.5 of a step
+    above its history, as a statement keyed 10x off would, but basic EPS and shares agree with the same income, so the
+    income did not move: diluted EPS is held and the statement served."""
+    income = (10e9, 11e9, 12e9, 13e9, 13e9 * 10**0.6)  # synthetic round figures, not any filer's
+    shares = (1.0e9, 1.0e9, 1.0e9, 1.0e9, 1.0e9)
+    rows = {
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": tuple(
+            n * 1.25 for n in income
+        ),
+        "IncomeTaxExpenseBenefit": tuple(n * 0.25 for n in income),
+        "NetIncomeLoss": income,
+        "WeightedAverageNumberOfSharesOutstandingBasic": shares,
+        "WeightedAverageNumberOfDilutedSharesOutstanding": tuple(s * 1.01 for s in shares),
+        "EarningsPerShareBasic": tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True)),
+        "EarningsPerShareDiluted": tuple(round(n / s / 1.01, 2) for n, s in zip(income, shares, strict=True)),
+    }
+    records = _seeded({**rows, **_genuine_lines()}, "EarningsPerShareDiluted", 0.1, _YEARS)
+    held, _ = sec_scale.scale_errors(records)
+    got = {(records[i].concept, records[i].period_end.year) for i in held}
+    assert ("EarningsPerShareDiluted", 2025) in got
+    assert not got & {(c, 2025) for c in ("NetIncomeLoss", "IncomeTaxExpenseBenefit", "EarningsPerShareBasic")}
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1])
+def test_eps_slipped_with_a_held_net_income_is_weighed_against_it_not_income_to_common(factor: float) -> None:
+    """Net income and EPS keyed in the same wrong unit beside a genuine income to common stock (GOOGL 2026, a tenth of
+    their value beside $174.7B to common), where the relation passes have already held net income and income to common
+    (a relation the two share breaks). EPS x shares matches the held net income, not income to common, so the ratio
+    pass weighs EPS against the held net income and holds it with it."""
+    shares = (10e9, 10e9, 10e9, 10e9, 10e9)
+    income = (14e9, 15e9, 16e9, 15e9, 17e9)  # synthetic round figures, not any filer's
+    to_common = tuple(n - 0.1e9 for n in income)
+    rows = {
+        "NetIncomeLoss": income,
+        "NetIncomeLossAvailableToCommonStockholdersBasic": to_common,
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(to_common, shares, strict=True)),
+    }
+    records = _seeded(rows, {"NetIncomeLoss", "EarningsPerShareDiluted"}, factor, (2021, 2022, 2023, 2024, 2025))
+    logs = [math.log10(abs(f.value)) if f.value else None for f in records]
+    by_period: dict[tuple[str, str, int | None, date], list[int]] = {}
+    for i, f in enumerate(records):
+        by_period.setdefault((f.concept, f.unit, sec_scale._duration(f), f.period_end), []).append(i)
+    neighbours = sec_scale._Neighbours(records, logs, by_period)
+
+    def newest(concept: str) -> int:
+        return next(i for i, f in enumerate(records) if f.concept == concept and f.period_end.year == 2025)
+
+    held = {newest("NetIncomeLoss"), newest("NetIncomeLossAvailableToCommonStockholdersBasic")}
+    out = sec_scale._ratio_errors(records, held, neighbours)
+    assert {(records[i].concept, records[i].period_end.year) for i in out} == {("EarningsPerShareDiluted", 2025)}
+
+
 @pytest.mark.parametrize("factor", [10.0, 0.1])
 @pytest.mark.parametrize(
     "total",
@@ -3854,10 +3909,12 @@ def test_an_income_statement_slipped_inside_a_genuine_column_is_held_not_its_eps
     }
 
 
-def _cash_flow_records(factor: float) -> tuple[list[FundamentalFact], set[str]]:
+def _cash_flow_records(factor: float, untagged: float = 0.0) -> tuple[list[FundamentalFact], set[str]]:
     """A cash-flow statement whose newest year is multiplied by factor, beside genuine cash balances (closing minus
     opening cash = the change in cash) and a genuine income statement; buybacks jumped 10x in the newest year for real,
-    so the slipped figure sits on their history. Returns the records and the seeded concepts."""
+    so the slipped figure sits on their history. ``untagged`` is a flow every year that the filer reports in no tag
+    (a discontinued-operations line), so the statement's own identity does not close as reported. Returns the records
+    and the seeded concepts."""
     change = (2e9, -1e9, 3e9, 1e9, 2e9)  # synthetic round figures, not any filer's
     operating = (30e9, 32e9, 35e9, 36e9, 38e9)
     investing = (-15e9, -18e9, -17e9, -20e9, -21e9)
@@ -3867,7 +3924,7 @@ def _cash_flow_records(factor: float) -> tuple[list[FundamentalFact], set[str]]:
         "NetCashProvidedByUsedInOperatingActivities": operating,
         "NetCashProvidedByUsedInInvestingActivities": investing,
         "NetCashProvidedByUsedInFinancingActivities": tuple(
-            c - o - i for c, o, i in zip(change, operating, investing, strict=True)
+            c - o - i - untagged for c, o, i in zip(change, operating, investing, strict=True)
         ),
         "PaymentsForRepurchaseOfCommonStock": buybacks,
     }
@@ -3903,6 +3960,56 @@ def test_a_cash_flow_statement_slipped_or_flipped_against_genuine_cash_balances_
         (c, 2025, "a") for c in seeded
     }
     clean, _ = sec_scale.scale_errors(_cash_flow_records(1.0)[0])
+    assert not clean
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1, 100.0, -1.0])
+def test_a_cash_flow_statement_whose_own_identity_never_closes_is_held_by_its_cash_balances(factor: float) -> None:
+    """The same slip where the filer leaves a discontinued-operations flow untagged, so the statement's own identity
+    breaks every year and no statement forms around the change in cash (MMM 2026). The change in cash still breaks
+    closing minus opening cash, and rescaling (or flipping) it with the period's facts that moved with it closes it
+    exactly: those are held; buybacks, which sit on their history at the slipped value, are not taken by name."""
+    records, seeded = _cash_flow_records(factor, untagged=0.5e9)
+    held, _ = sec_scale.scale_errors(records)
+    moved = seeded if factor < 0 else seeded - {"PaymentsForRepurchaseOfCommonStock"}
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in moved
+    }
+    clean, _ = sec_scale.scale_errors(_cash_flow_records(1.0, untagged=0.5e9)[0])
+    assert not clean
+
+
+def _income_statement(costs: Sequence[float]) -> dict[str, tuple[float, ...]]:
+    """Revenue, costs, pre-tax income, tax, net income, shares and EPS that add up (synthetic, not any filer's)."""
+    revenue = (80e9, 84e9, 86e9, 88e9, 85e9)
+    pretax = tuple(r - c for r, c in zip(revenue, costs, strict=True))
+    tax = tuple(p * 0.2 for p in pretax)
+    income = tuple(p - t for p, t in zip(pretax, tax, strict=True))
+    shares = (4.2e9, 4.2e9, 4.2e9, 4.2e9, 4.2e9)
+    return {
+        "Revenues": revenue,
+        "CostsAndExpenses": tuple(costs),
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": pretax,
+        "IncomeTaxExpenseBenefit": tax,
+        "NetIncomeLoss": income,
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True)),
+    }
+
+
+def test_an_income_statement_with_every_sign_reversed_is_held_through_its_negative_revenue() -> None:
+    """The newest income statement keyed with every sign reversed (as seeded on XOM's 2026 first quarter): its
+    identities still close, but revenue cannot be negative; the statement that closes around it opposes its history
+    in sign, so it is held with it, and EPS, whose product with shares has the held net income's sign, follows it.
+    A genuine loss year (costs above revenue: pre-tax income, tax, net income and EPS negative) holds nothing."""
+    rows = _income_statement((70e9, 73e9, 75e9, 77e9, 78e9))
+    seeded = set(rows) - {"WeightedAverageNumberOfDilutedSharesOutstanding"}
+    records = _seeded({**rows, **_genuine_lines()}, seeded, -1.0, _YEARS)
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year) for i in held} == {(c, 2025) for c in seeded}
+    loss = _income_statement((70e9, 73e9, 75e9, 77e9, 95e9))
+    assert loss["NetIncomeLoss"][-1] < 0
+    clean, _ = sec_scale.scale_errors(_seeded({**loss, **_genuine_lines()}, seeded, 1.0, _YEARS))
     assert not clean
 
 

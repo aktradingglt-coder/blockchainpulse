@@ -281,7 +281,7 @@ earliest (Wednesday) release so a genuine release is never refused as "not yet p
 **Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
 stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
 
-### D-036 · 2026-10-21 (rev. 2026-11-11, round 25) · SEC company facts: scale errors, not restatements
+### D-036 · 2026-10-21 (rev. 2026-11-12, round 26) · SEC company facts: scale errors, not restatements
 **Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
 and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
 response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
@@ -407,7 +407,13 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    their history instead of their column, AMZN's genuine 2025 growth (every flow 10^0.3-0.5 above its history)
    carried one held tax line into 17 genuine lines. Income to common stock equal to a held net income of the same
    filing and period (within 10^0.05) is held with it, so the EPS ratio weighs EPS and shares against it; on clean
-   data this adds the two META 2012 figures beside its held net income (337 clean holds).
+   data this adds the two META 2012 figures beside its held net income (337 clean holds). A change in cash that no
+   statement closes around as reported (MMM's 2026 statement leaves a discontinued-operations flow untagged, so its
+   own identity breaks every year) is grown from itself alone: it takes only the period's facts that moved with it,
+   not every cash-flow line by name; MMM's statement 10×, 100× or ÷10 off, or flipped, then holds all but the 2–3
+   lines that sit on their history at the slipped value. A lone term of another rollforward is left alone: trying
+   flips on GE's and TSLA's goodwill rollforwards (filers report the goodwill change under either sign) held 34
+   genuine facts.
    A broken relation that nothing above explains, in a relation the filer's other filings close (at least four other
    instances, 95% of them within 1%), shows a figure entered wrong by some other factor (assets ×1.5 beside
    liabilities and equity), but it cannot be told from the filer's own tagging of that period: holding such breaks
@@ -437,7 +443,14 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    held, not EPS, also when a size bound held net income first (a fast grower's genuine column sits up to 10^0.4
    above its neighbours, NVDA 2026, too far for the column rule of rule 11 alone).
    Diluted EPS sits within 10^0.3 of basic EPS in clean data (cents rounding of small EPS), so a move of 10^0.5
-   between them is a slip, and basic EPS beside a held diluted EPS it agrees with is held with it.
+   between them is a slip, and basic EPS beside a held diluted EPS it agrees with is held with it. An income that
+   another EPS instance of its period agrees with (at its usual level) is vouched for: it is neither blamed nor taken
+   for a slipped statement, and the EPS that disagrees moved (AMZN's genuine 2026 income sits 10^0.5–0.7 above its
+   history, where a statement keyed 10× off would, so its diluted EPS ÷10 held the genuine income statement; GOOGL's
+   diluted EPS ÷10 blamed its genuine income to common, its EPS history broken by the 2022 split). Income to common
+   beside a held net income it does not equal is not what an EPS keyed with that net income agrees with: the
+   instance is weighed against the held net income instead (GOOGL 2026, net income and both EPS a tenth of their
+   value beside a genuine $174.7B to common, served its EPS).
 6b. *Parts over their totals.* A never-negative part more than twice its never-negative total in one filing and
    period (current assets, cash, PP&E, goodwill, intangibles, inventory, receivables, loans and securities of total
    assets or of liabilities and equity; deposits, current liabilities, payables and long-term debt of total
@@ -474,10 +487,18 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
 10. *Impossible signs.* A negative value of a balance or total that cannot be negative is held: assets, liabilities,
     their current parts, liabilities and equity, cash, PP&E, goodwill, intangibles, inventory, receivables, payables,
     long-term debt, contract revenue, cost of revenue and of goods sold, a bank's interest income and noninterest
-    expense, common stock at par and share counts (27 concepts; of 33,433 clean facts in 10-K and 10-Q filings and their amendments (33,219 and 214),
+    expense, common stock at par and share counts, and (round 26) operating expenses and their lines (costs and
+    expenses, R&D, SG&A, G&A, selling and marketing, advertising, labour, share-based compensation expense, a bank's
+    operating and deposit interest expense), depreciation and amortization, capital expenditure, dividends paid and
+    interest paid (44 concepts; of 50,195 clean facts in 10-K and 10-Q filings and their amendments (49,873 and 322),
     counted in every taxonomy before the adapter's own filters, one is negative: a
     Citi Q4-2020 cost of revenue of −$46M, held with its annual figure;
-    total `Revenues` is left out, as asset managers can report it negative). For headline totals (net, operating and
+    total `Revenues` and a bank's net revenue are left out, as asset managers can report them negative). A flow held
+    here seeds the search for a statement keyed with every sign reversed, whose identities still close: the facts
+    grown from it along the relations that close as reported are held with it when 60% of those with history oppose
+    it in sign (XOM's 2026 first quarter seeded with every sign reversed: revenue at −$85.1B is reached from costs
+    and expenses through pre-tax income), and an EPS whose product with shares has the sign of a held net income that
+    opposes its history follows it. For headline totals (net, operating and
     pre-tax income, tax expense, net cash flows, revenue, a bank's net revenue, cost of revenue, operating expenses,
     comprehensive income) and equity balances (equity, equity including NCI, retained earnings, AOCI: where two clean
     filings report one period with opposite signs, they report different amounts, a restatement this rule ignores, as

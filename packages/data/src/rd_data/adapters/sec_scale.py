@@ -61,6 +61,8 @@ COLUMN_DECIMAL_STEPS = frozenset({1, 2})
 COLUMN_DECIMAL_NEAR = 0.3
 #: A statement a power of 10 or 100 off is at least two facts (one is _decimal_repair's): see _slipped_statement.
 STATEMENT_MIN = 2
+#: Income to common stock within 10^this of net income is the same figure (_agrees).
+TWIN_POWER = 0.05
 #: Decimal additivity needs figures of this many significant digits beyond their rounding unit (_decimal_misscaled_in).
 PRECISE_DIGITS = 4
 #: A relation closed in at least BREAK_HISTORY of the filer's other instances, and in BREAK_SHARE of them, is its own
@@ -137,8 +139,8 @@ SIGN_CHECKED = frozenset(
 )
 #: When the sign history does not single out one side of a sign error, hold every candidate (True) or none (False).
 SIGN_UNDECIDED_HOLDS = False
-#: Balances and totals that cannot be negative: of 33,433 clean 10-K and 10-Q facts of these concepts in 15 large
-#: filers, one is (C's Q4-2020 cost of revenue, -46M). A negative one is a sign error and is held.
+#: Balances, totals, expenses and outflows that cannot be negative: of 50,195 clean 10-K and 10-Q facts of these
+#: concepts in 15 large filers, one is (C's Q4-2020 cost of revenue, -46M). A negative one is a sign error and is held.
 NEVER_NEGATIVE = frozenset(
     {
         "Assets",
@@ -168,6 +170,26 @@ NEVER_NEGATIVE = frozenset(
         "InterestIncomeOperating",
         "CommonStockSharesOutstanding",
         "WeightedAverageNumberOfSharesOutstandingBasic",
+        # expenses and outflows, none negative in the same filers' clean 10-K and 10-Q facts (round 26); total
+        # revenue stays out (asset managers can report it negative), and a statement flipped whole is found through
+        # its expenses (_flipped_statements)
+        "CostsAndExpenses",
+        "OperatingExpenses",
+        "ResearchAndDevelopmentExpense",
+        "SellingGeneralAndAdministrativeExpense",
+        "GeneralAndAdministrativeExpense",
+        "SellingAndMarketingExpense",
+        "MarketingAndAdvertisingExpense",
+        "LaborAndRelatedExpense",
+        "InterestExpenseOperating",
+        "InterestExpenseDeposits",
+        "AllocatedShareBasedCompensationExpense",
+        "DepreciationDepletionAndAmortization",
+        "AmortizationOfIntangibleAssets",
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsOfDividends",
+        "PaymentsOfDividendsCommonStock",
+        "InterestPaidNet",
     }
 )
 #: Largest identity system (terms sharing identities, e.g. the 12-line income-tax table) solved by search.
@@ -739,6 +761,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     }
     held, flagged = _fact_holds(records, distance)
     held |= {i for i, f in enumerate(records) if f.value < 0 and f.concept in NEVER_NEGATIVE}
+    held |= _flipped_statements(records, held, neighbours)
     held |= _filing_disagreements(records, logs, by_period, neighbours)
     held |= _sign_disagreements(records, by_period, neighbours)
     held |= _additivity_errors(records, neighbours)
@@ -1170,16 +1193,26 @@ def _statement_repair(
     for k, _ in inst:
         if balances and records[k].period_start is not None:
             grown = _grown(closed, k)
-            if len(grown) < STATEMENT_MIN or any(records[j].period_start is None for j in grown):
+            by_name = len(grown) >= STATEMENT_MIN
+            # a change in cash no statement closes around as reported (MMM's, short of a discontinued-operations line)
+            # takes only the period's facts that moved with it, not every cash-flow line by name; a lone term of
+            # another rollforward is left alone (filers report the goodwill change under either sign: GE, TSLA)
+            if any(records[j].period_start is None for j in grown) or not (
+                by_name or _CASH_FLOW_TOTAL.match(records[k].concept)
+            ):
                 continue
             steps = [d for j in grown if (d := neighbours.level_step(j)) is not None]
             tries: list[tuple[set[int], float]] = []
             for factor in DECIMAL_FACTORS:
                 step = -round(math.log10(factor))
                 if steps and statistics.median(steps) * step > 0:
-                    tries.append((_with_siblings(records, closed, grown, _stepped(neighbours, step)), factor))
+                    tries.append(
+                        (_with_siblings(records, closed, grown, _stepped(neighbours, step), by_name=by_name), factor)
+                    )
             # a flip is shown by the exact closure alone: flows change sign on their own (GOOGL financing, FX)
-            tries.append((_with_siblings(records, closed, grown, _reversed(neighbours, records)), -1.0))
+            tries.append(
+                (_with_siblings(records, closed, grown, _reversed(neighbours, records), by_name=by_name), -1.0)
+            )
         else:
             d = neighbours.level_step(k)
             if d is None or abs(round(d)) not in COLUMN_DECIMAL_STEPS:
@@ -1524,18 +1557,24 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
         found = _slipped_statement(records, closed, i, _stepped(neighbours, round(off)))
         return found if len(found) >= STATEMENT_MIN else set()
 
+    # an income another EPS of its period agrees with did not move, the EPS that disagrees did: neither blamed nor
+    # taken for a slipped statement (AMZN's genuine 2026 income sits 10^0.5-0.7 above its history, as one would)
+    vouched = _vouched_incomes(records, index)
     for num, den, min_move in RATIOS:
         levels = _ratio_levels(records, index, num, den)
         if len(levels) < MIN_RATIO_INSTANCES:
             continue
         usual = statistics.median(level for level, _ in levels)
-        for level, idx in levels:
+        for instance in levels:
+            level, idx = _weighed(records, index, held, out, instance)
             slipped = _slipped(level - usual, min_move)
-            twin = _held_twin(records, index, held | out, idx[-1])
-            if twin is not None:  # income to common stock beside its own net income, held: the same figure
-                out.add(idx[-1])
             if (held | out) & set(idx):  # this check's own holds count: diluted EPS held carries basic EPS
-                if slipped and min_move is None and (column := statement(idx[-1], -(level - usual))):
+                if (
+                    slipped
+                    and min_move is None
+                    and idx[-1] not in vouched
+                    and (column := statement(idx[-1], -(level - usual)))
+                ):
                     out |= column  # a size bound held net income first; its statement slipped with it
                     continue
                 rest = [i for i in idx if i not in held | out]
@@ -1544,30 +1583,83 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
                         out |= _ratio_blame(neighbours, records, rest)
                     else:  # EPS or shares, whichever history clearly blames (shares sit on theirs)
                         out |= _ratio_blame(neighbours, records, rest, margin=NEAR_POWER / 2, undecided=False)
+                        out |= _sign_followers(neighbours, records, idx, rest)
             elif slipped:
                 if confirmed is None:
-                    confirmed = _confirmed(records)
-                column = statement(idx[-1], -(level - usual)) if min_move is None else set()
+                    confirmed = _confirmed(records) | vouched
+                column = statement(idx[-1], -(level - usual)) if min_move is None and idx[-1] not in vouched else set()
                 # net income's identities close because its whole statement slipped with it: hold the statement
                 out |= column or _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
     return out
 
 
-def _held_twin(
+def _sign_followers(
+    neighbours: _Neighbours, records: list[FundamentalFact], idx: list[int], rest: list[int]
+) -> set[int]:
+    """Of an EPS instance that moved with its held income, the terms that flipped with it: when the income opposes its
+    history in sign, the EPS that does too (EPS x shares has the held income's sign, so it was reversed with it)."""
+    flipped = _reversed(neighbours, records)
+    return {j for j in rest if flipped(j)} if flipped(idx[-1]) else set()
+
+
+def _weighed(
+    records: list[FundamentalFact],
+    index: dict[tuple[str, date | None, date], dict[str, int]],
+    held: set[int],
+    out: set[int],
+    instance: tuple[float, list[int]],
+) -> tuple[float, list[int]]:
+    """A ratio instance as it is weighed. Income to common stock beside a held net income of its filing and period is
+    held with it when the two are the same figure (_agrees); otherwise the instance is weighed against the held net
+    income instead: EPS keyed in the same wrong unit agrees with the held figure, not with genuine income to common
+    (GOOGL 2026 net income and both EPS a tenth of their value beside a genuine $174.7B to common)."""
+    level, idx = instance
+    ni = _held_income(records, index, held | out, idx[-1])
+    if ni is None:
+        return level, idx
+    if _agrees(records[idx[-1]].value, records[ni].value):
+        out.add(idx[-1])
+        return level, idx
+    return level + math.log10(abs(records[idx[-1]].value / records[ni].value)), [*idx[:-1], ni]  # income: denominator
+
+
+def _vouched_incomes(
+    records: list[FundamentalFact], index: dict[tuple[str, date | None, date], dict[str, int]]
+) -> set[int]:
+    """The incomes of EPS instances at their usual level (within RATIO_MOVED_TOGETHER): an EPS and share count that
+    agree with an income vouch for it, so a second EPS of the period that disagrees with it is the one that moved
+    (GOOGL's diluted EPS a tenth of its value beside a genuine basic EPS: its income to common is not blamed)."""
+    out: set[int] = set()
+    for num, den, min_move in RATIOS:
+        if min_move is not None:
+            continue
+        levels = _ratio_levels(records, index, num, den)
+        if len(levels) < MIN_RATIO_INSTANCES:
+            continue
+        usual = statistics.median(level for level, _ in levels)
+        out |= {idx[-1] for level, idx in levels if abs(level - usual) <= RATIO_MOVED_TOGETHER}
+    return out
+
+
+def _held_income(
     records: list[FundamentalFact],
     index: dict[tuple[str, date | None, date], dict[str, int]],
     held: set[int],
     i: int,
 ) -> int | None:
-    """The held net income of income-to-common fact i's filing and period, when the two agree (within 10^0.05: no
-    preferred dividends to tell them apart), else None."""
+    """The held net income of income-to-common fact i's filing and period, else None (i may be held too: a relation
+    the two share breaks when net income slipped, and both can be held for it)."""
     f = records[i]
-    if not f.concept.startswith(_TO_COMMON) or i in held:
+    if not f.concept.startswith(_TO_COMMON):
         return None
     ni = index.get((f.accession, f.period_start, f.period_end), {}).get("NetIncomeLoss")
-    if ni is None or ni not in held or not f.value or not records[ni].value:
-        return None
-    return ni if abs(math.log10(abs(f.value / records[ni].value))) < 0.05 else None
+    return ni if ni is not None and ni in held and records[ni].value else None
+
+
+def _agrees(a: float, b: float) -> bool:
+    """Whether income to common stock and net income are the same figure (within 10^0.05: no preferred dividends to
+    tell them apart)."""
+    return abs(math.log10(abs(a / b))) < TWIN_POWER
 
 
 def _slipped_column(records: list[FundamentalFact], neighbours: _Neighbours, i: int, off: float) -> list[int]:
@@ -1628,6 +1720,28 @@ def _slipped_statement(
     return _with_siblings(records, closed, out, moved)
 
 
+def _flipped_statements(records: list[FundamentalFact], held: set[int], neighbours: _Neighbours) -> set[int]:
+    """The statements that flipped with a flow held for being negative where it cannot be (revenue, an expense, an
+    outflow): grown from it along the relations that close exactly as reported, as _slipped_statement grows a slipped
+    one, when most of them oppose their history in sign too. A statement keyed with every sign reversed still closes
+    its identities, so only the line that cannot be negative shows it (XOM's 2026 first quarter with revenue at
+    -$85.1B beside costs, pre-tax income, tax and net income all reversed)."""
+    seeds = [
+        i
+        for i in held
+        if records[i].period_start is not None and records[i].value < 0 and records[i].concept in NEVER_NEGATIVE
+    ]
+    if not seeds:
+        return set()
+    closed = _closed_relations(records)
+    flipped = _reversed(neighbours, records)
+    out: set[int] = set()
+    for i in seeds:
+        if i not in out and len(found := _slipped_statement(records, closed, i, flipped)) >= STATEMENT_MIN:
+            out |= found
+    return out
+
+
 def _grown(closed: dict[int, list[_Instance]], seed: int) -> set[int]:
     """The facts tied to seed by relations that close exactly as reported, directly or through each other."""
     out = {seed}
@@ -1645,11 +1759,14 @@ def _with_siblings(
     closed: dict[int, list[_Instance]],
     out: set[int],
     moved: Callable[[int], bool | None],
+    *,
+    by_name: bool = True,
 ) -> set[int]:
     """A moved statement with the other facts of its filing's periods that moved too (and, for a cash-flow statement,
-    its period's cash-flow lines by name), less those a relation that closes as reported ties to a fact left out."""
+    its period's cash-flow lines by name unless ``by_name`` is off), less those a relation that closes as reported ties
+    to a fact left out."""
     periods = {(records[i].accession, records[i].period_start, records[i].period_end) for i in out}
-    cash_flows = any(_CASH_FLOW_TOTAL.match(records[i].concept) for i in out)
+    cash_flows = by_name and any(_CASH_FLOW_TOTAL.match(records[i].concept) for i in out)
     siblings = {
         j
         for j, g in enumerate(records)
