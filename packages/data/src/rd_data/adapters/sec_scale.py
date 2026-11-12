@@ -1596,8 +1596,12 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
 def _sign_followers(
     neighbours: _Neighbours, records: list[FundamentalFact], idx: list[int], rest: list[int]
 ) -> set[int]:
-    """Of an EPS instance that moved with its held income, the terms that flipped with it: when the income opposes its
-    history in sign, the EPS that does too (EPS x shares has the held income's sign, so it was reversed with it)."""
+    """Of an EPS instance that moved with its held income, the terms that flipped with it: when the income is held and
+    opposes its history in sign, the EPS that does too (EPS x shares has the held income's sign, so it was reversed
+    with it). An income not held (a held share count, NVDA's 2009 counts in thousands, beside a genuine loss) is not
+    the evidence."""
+    if idx[-1] in rest:
+        return set()
     flipped = _reversed(neighbours, records)
     return {j for j in rest if flipped(j)} if flipped(idx[-1]) else set()
 
@@ -1737,7 +1741,9 @@ def _flipped_statements(records: list[FundamentalFact], held: set[int], neighbou
     flipped = _reversed(neighbours, records)
     out: set[int] = set()
     for i in seeds:
-        if i not in out and len(found := _slipped_statement(records, closed, i, flipped)) >= STATEMENT_MIN:
+        # the seed and at least two lines it closes with: C's one genuine negative cost of revenue (Q4 2020) closes
+        # with a discontinued-operations line alone
+        if i not in out and len(found := _slipped_statement(records, closed, i, flipped)) > STATEMENT_MIN:
             out |= found
     return out
 
