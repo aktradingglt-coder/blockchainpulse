@@ -1,0 +1,46 @@
+# Neutral professional theme (PROMPT §2 rule 3). Every pair listed under `text_pairs` must reach WCAG AA (4.5:1)
+# in both themes; tests/test_design_tokens.py enforces it. Fonts: Inter, JetBrains Mono (SIL Open Font License 1.1).
+schema_version: 1
+themes:
+  light:
+    bg: "#FFFFFF"
+    surface: "#F5F6F8"
+    surface_raised: "#FFFFFF"
+    border: "#D5D9E0"
+    text: "#111827"
+    text_muted: "#4B5563"
+    primary: "#1D4ED8"
+    on_primary: "#FFFFFF"
+    positive: "#047857"
+    negative: "#B91C1C"
+    warning: "#92400E"
+    focus_ring: "#1D4ED8"
+  dark:
+    bg: "#0B1220"
+    surface: "#111827"
+    surface_raised: "#1A2233"
+    border: "#334155"
+    text: "#F3F4F6"
+    text_muted: "#A3ABB8"
+    primary: "#7CB2FB"
+    on_primary: "#0B1220"
+    positive: "#34D399"
+    negative: "#F98B8B"
+    warning: "#FBBF24"
+    focus_ring: "#7CB2FB"
+text_pairs:
+  - [text, bg]
+  - [text, surface]
+  - [text, surface_raised]
+  - [text_muted, bg]
+  - [text_muted, surface]
+  - [text_muted, surface_raised]
+  - [primary, bg]
+  - [primary, surface]
+  - [on_primary, primary]
+  - [positive, bg]
+  - [positive, surface]
+  - [negative, bg]
+  - [negative, surface]
+  - [warning, bg]
+  - [warning, surface]

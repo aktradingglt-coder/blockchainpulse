@@ -1,0 +1,37 @@
+# Model IDs and prices pinned in one place (PROMPT §1.10, §7.1). Prices: USD per million tokens.
+# Checked 2026-10-21 (docs/vendor-notes/anthropic.md). Re-verify before changing.
+schema_version: 1
+provider: anthropic
+checked_on: "2026-10-21"
+models:
+  opus:
+    id: "claude-opus-5-5"
+    price_input: 4.00
+    price_output: 20.00
+    price_cache_read: 0.20
+  sonnet:
+    id: "claude-sonnet-5-5"
+    price_input: 2.00
+    price_output: 10.00
+    price_cache_read: 0.20
+  haiku:
+    id: "claude-haiku-5-5"
+    price_input: 0.10
+    price_output: 0.50
+    long_context_threshold_tokens: 100000
+    price_input_long: 0.50
+    price_output_long: 2.50
+roles:
+  research_director: opus
+  synthesis: opus
+  red_team: opus
+  planner: sonnet
+  data_steward: sonnet
+  asset_analyst: sonnet
+  quant_analyst: sonnet
+  verifier: sonnet
+  compliance_reviewer: sonnet
+  editor: sonnet
+  news_triage: haiku
+  alert_explainer: haiku
+batch_discount: 0.50
