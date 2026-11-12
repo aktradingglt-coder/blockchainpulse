@@ -297,7 +297,13 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    filings' facts of that concept are held. A filing is held whole when most of what it shares with
    other filings is a power of 1000 off.
 3. *Sums across periods.* Year to date = earlier year to date + latest quarter, the parts usually from different
-   filings.
+   filings. A sum that rescaling one filing's facts by 10, 100, 1/10 or 1/100 makes hold exactly (within 0.1% of its
+   smallest term) holds that filing's facts when they sit on the slip's side of their history and the other filing's
+   do not sit the step off theirs: a second quarter's statement keyed in the wrong unit breaks its half-year against
+   the first quarter's genuine filing. Only figures of four or more significant digits beyond their rounding unit
+   count (GE's $5M and $10M NCI shares of OCI add up after such a rescale by chance), and the tolerance is the
+   smallest term's (a restated BRK 2022 half-year a tenth of which nearly matched two offsetting quarters, judged
+   against the largest term, held two genuine facts) (P1 review round 26).
 4. *The same year.* A year-to-date fact against the same year's shorter year-to-date from other filings, judged on the
    ratio the concept shows in other years (at least 3 years, spread under 10^0.3).
 5. *The filing's own comparatives.* A newest-period cell about a power of 1000 from the prior years the same filing
@@ -384,13 +390,24 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    reported (their terms add up with it, so they share its scale or sign); 60% of the grown facts with history must
    sit the step off it (within 10^0.5) or, for a flip, have the opposite sign to it; the period's other facts that
    moved too, and are tied by no relation that closes as reported to a fact left out, join it. The statement is held
-   when rescaling or flipping it closes the broken relation exactly (within 0.1%), needing both sides. Flips are tried
-   only for a flow statement against balances it does not contain (the change in cash against closing minus opening
-   cash): tables and rollforwards change sign conventions between filings in clean data, and trying flips there held
-   231 genuine C, GE and TSLA facts. A slipped cash-flow statement also takes its period's cash-flow lines by element
+   when rescaling or flipping it closes the broken relation exactly (within 0.1%), needing both sides. Where the
+   relation ties a flow statement to balances it does not contain (the change in cash against closing minus opening
+   cash, with or without disposal-group cash, as GE and TSLA tag it), that exact closure is the evidence: a rescaled
+   statement need only sit on the slip's side of its history at the median (a fast grower's genuine flows sit far
+   above theirs: NVDA's cash flows at a tenth of their value sit only 10^-0.2 to 10^-0.6 below their history), and a
+   flipped one need not oppose its history at all (financing and exchange flows change sign on their own). Flips are
+   tried only there: tables and rollforwards change sign conventions between filings in clean data, and trying flips
+   on them held 231 genuine C, GE and TSLA facts. A slipped cash-flow statement also takes its period's cash-flow lines by element
    name (proceeds, payments, repayments, working-capital changes), which swing so far on their own that a slipped one
    can sit on its history (XOM debt repayments genuinely 10^1.0 above theirs). This search runs before the smaller
-   groups, which could otherwise split the statement (two balances close a cash change across two years).
+   groups, which could otherwise split the statement (two balances close a cash change across two years). Facts that
+   close a relation exactly with held facts are held with them when both sit off the rest of their column on the same
+   side (by 10^0.25 or more at the median): a slipped figure cannot add up exactly with genuine ones of its size
+   (GOOGL 2026 pre-tax income and tax, 10^0.3-0.5 below their history beside a held net income). Measured against
+   their history instead of their column, AMZN's genuine 2025 growth (every flow 10^0.3-0.5 above its history)
+   carried one held tax line into 17 genuine lines. Income to common stock equal to a held net income of the same
+   filing and period (within 10^0.05) is held with it, so the EPS ratio weighs EPS and shares against it; on clean
+   data this adds the two META 2012 figures beside its held net income (337 clean holds).
    A broken relation that nothing above explains, in a relation the filer's other filings close (at least four other
    instances, 95% of them within 1%), shows a figure entered wrong by some other factor (assets ×1.5 beside
    liabilities and equity), but it cannot be told from the filer's own tagging of that period: holding such breaks
