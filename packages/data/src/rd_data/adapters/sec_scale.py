@@ -61,6 +61,8 @@ COLUMN_DECIMAL_STEPS = frozenset({1, 2})
 COLUMN_DECIMAL_NEAR = 0.3
 #: A statement a power of 10 or 100 off is at least two facts (one is _decimal_repair's): see _slipped_statement.
 STATEMENT_MIN = 2
+#: Decimal additivity needs figures of this many significant digits beyond their rounding unit (_decimal_misscaled_in).
+PRECISE_DIGITS = 4
 #: A relation closed in at least BREAK_HISTORY of the filer's other instances, and in BREAK_SHARE of them, is its own
 #: arithmetic: see _unexplained_breaks.
 BREAK_HISTORY = 4
@@ -678,6 +680,10 @@ CHANGES: tuple[tuple[str, str], ...] = (
         "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
         "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
     ),
+    (  # filers with disposal groups state the cash the change runs between including them (GE, TSLA)
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroupAndDiscontinuedOperations",
+    ),
 )
 #: A balance (instant fact) in a recent filing that moved more than 10^INSTANT_FLAG_STEP from the previous period end
 #: is flagged: balances move smoothly (3 genuine moves that large in 17 years of AMZN balances).
@@ -1088,7 +1094,16 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
         for inst in consistent:
             terms = {k for k, _ in inst}
             rest = terms - known
-            if rest and terms & known and _off_history(neighbours, records, rest):
+            if (
+                rest
+                and terms & known
+                and (
+                    _off_history(neighbours, records, rest)
+                    or (
+                        _exact(_contributions(records, inst)) and _moved_alike(records, neighbours, terms & known, rest)
+                    )
+                )
+            ):
                 spread |= rest
         if not spread:
             break
@@ -1144,19 +1159,33 @@ def _statement_errors(
 def _statement_repair(
     records: list[FundamentalFact], closed: dict[int, list[_Instance]], neighbours: _Neighbours, inst: _Instance
 ) -> set[int]:
-    """The statement (_slipped_statement) of one of the broken relation's terms whose rescale by its step, or whose
-    sign reversal (a flow statement against balances it does not contain), closes the relation exactly, needing both
-    the statement's terms and the others; empty when none does."""
-    balances = [k for k, _ in inst if records[k].period_start is None]
+    """The statement of one of the broken relation's terms whose rescale by 10, 100, 1/10 or 1/100, or whose sign
+    reversal, closes the relation exactly, needing both the statement's terms and the others; empty when none does.
+    Where the relation ties a flow statement to balances it does not contain (the change in cash against closing minus
+    opening cash), that exact closure is the evidence: a rescaled statement need only sit on the slip's side of its
+    history (median), as a fast grower's genuine flows sit far above theirs (NVDA's cash flows 10^-0.2 to 10^-0.6 off
+    theirs at a tenth of their value), and a flipped one need not oppose its history at all (financing and exchange
+    flows change sign on their own). Elsewhere the statement must have moved as _slipped_statement requires."""
+    balances = any(records[k].period_start is None for k, _ in inst)
     for k, _ in inst:
-        d = neighbours.level_step(k)
-        # signs: only where a flow statement meets the balance sheet (the change in cash against closing minus opening
-        # cash); tables and rollforwards flip sign conventions between filings in clean data
-        tries = [(_reversed(neighbours, records), -1.0)] if balances and records[k].period_start is not None else []
-        if d is not None and abs(round(d)) in COLUMN_DECIMAL_STEPS:
-            tries.append((_stepped(neighbours, round(d)), 10.0 ** -round(d)))
-        for moved, factor in tries:
-            found = _slipped_statement(records, closed, k, moved)
+        if balances and records[k].period_start is not None:
+            grown = _grown(closed, k)
+            if len(grown) < STATEMENT_MIN or any(records[j].period_start is None for j in grown):
+                continue
+            steps = [d for j in grown if (d := neighbours.level_step(j)) is not None]
+            tries: list[tuple[set[int], float]] = []
+            for factor in DECIMAL_FACTORS:
+                step = -round(math.log10(factor))
+                if steps and statistics.median(steps) * step > 0:
+                    tries.append((_with_siblings(records, closed, grown, _stepped(neighbours, step)), factor))
+            # a flip is shown by the exact closure alone: flows change sign on their own (GOOGL financing, FX)
+            tries.append((_with_siblings(records, closed, grown, _reversed(neighbours, records)), -1.0))
+        else:
+            d = neighbours.level_step(k)
+            if d is None or abs(round(d)) not in COLUMN_DECIMAL_STEPS:
+                continue
+            tries = [(_slipped_statement(records, closed, k, _stepped(neighbours, round(d))), 10.0 ** -round(d))]
+        for found, factor in tries:
             after = _contributions(records, inst, found, factor)
             if (
                 len(found) >= STATEMENT_MIN
@@ -1165,6 +1194,39 @@ def _statement_repair(
             ):
                 return found
     return set()
+
+
+def _moved_alike(
+    records: list[FundamentalFact], neighbours: _Neighbours, moved: AbstractSet[int], rest: AbstractSet[int]
+) -> bool:
+    """Facts that close a relation exactly with held facts, both sitting off the rest of their column on the same side
+    (their median steps from history, against the column's median step, by 10^(NEAR_POWER/2) or more): a figure
+    slipped by a decimal cannot add up exactly with genuine ones of its size, so they slipped with it, though a fast
+    grower's slipped flows sit only 10^0.3-0.5 below their history (GOOGL 2026 pre-tax income and tax beside its net
+    income). Measured against the column, a filer's genuine growth (AMZN 2025, every flow 10^0.3-0.5 above its
+    history) does not carry a held line into the genuine lines it adds up with."""
+    centre = _column_centre(records, neighbours, next(iter(rest)))
+    a = [d for i in moved if (d := neighbours.level_step(i)) is not None]
+    b = [d for i in rest if (d := neighbours.level_step(i)) is not None]
+    if not a or not b or centre is None:
+        return False
+    x, y = statistics.median(a) - centre, statistics.median(b) - centre
+    return x * y > 0 and min(abs(x), abs(y)) >= NEAR_POWER / 2
+
+
+def _column_centre(records: list[FundamentalFact], neighbours: _Neighbours, i: int) -> float | None:
+    """The median step from history of fact i's column (its filing's currency facts for that period end and kind)."""
+    f = records[i]
+    steps = [
+        d
+        for j, g in enumerate(records)
+        if g.accession == f.accession
+        and g.period_end == f.period_end
+        and (g.period_start is None) == (f.period_start is None)
+        and _CURRENCY.match(g.unit)
+        and (d := neighbours.level_step(j)) is not None
+    ]
+    return statistics.median(steps) if steps else None
 
 
 def _instances(
@@ -1469,6 +1531,9 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
         usual = statistics.median(level for level, _ in levels)
         for level, idx in levels:
             slipped = _slipped(level - usual, min_move)
+            twin = _held_twin(records, index, held | out, idx[-1])
+            if twin is not None:  # income to common stock beside its own net income, held: the same figure
+                out.add(idx[-1])
             if (held | out) & set(idx):  # this check's own holds count: diluted EPS held carries basic EPS
                 if slipped and min_move is None and (column := statement(idx[-1], -(level - usual))):
                     out |= column  # a size bound held net income first; its statement slipped with it
@@ -1486,6 +1551,23 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
                 # net income's identities close because its whole statement slipped with it: hold the statement
                 out |= column or _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
     return out
+
+
+def _held_twin(
+    records: list[FundamentalFact],
+    index: dict[tuple[str, date | None, date], dict[str, int]],
+    held: set[int],
+    i: int,
+) -> int | None:
+    """The held net income of income-to-common fact i's filing and period, when the two agree (within 10^0.05: no
+    preferred dividends to tell them apart), else None."""
+    f = records[i]
+    if not f.concept.startswith(_TO_COMMON) or i in held:
+        return None
+    ni = index.get((f.accession, f.period_start, f.period_end), {}).get("NetIncomeLoss")
+    if ni is None or ni not in held or not f.value or not records[ni].value:
+        return None
+    return ni if abs(math.log10(abs(f.value / records[ni].value))) < 0.05 else None
 
 
 def _slipped_column(records: list[FundamentalFact], neighbours: _Neighbours, i: int, off: float) -> list[int]:
@@ -1539,6 +1621,15 @@ def _slipped_statement(
     10^1.0 above history at their genuine value)."""
     if not moved(seed):
         return set()
+    out = _grown(closed, seed)
+    known = [m for i in out if (m := moved(i)) is not None]
+    if sum(known) < COLUMN_SHIFT_SHARE * len(known):
+        return set()
+    return _with_siblings(records, closed, out, moved)
+
+
+def _grown(closed: dict[int, list[_Instance]], seed: int) -> set[int]:
+    """The facts tied to seed by relations that close exactly as reported, directly or through each other."""
     out = {seed}
     frontier = [seed]
     while frontier:
@@ -1546,9 +1637,17 @@ def _slipped_statement(
             new = [k for k, _ in inst if k not in out]
             out.update(new)
             frontier.extend(new)
-    known = [m for i in out if (m := moved(i)) is not None]
-    if sum(known) < COLUMN_SHIFT_SHARE * len(known):
-        return set()
+    return out
+
+
+def _with_siblings(
+    records: list[FundamentalFact],
+    closed: dict[int, list[_Instance]],
+    out: set[int],
+    moved: Callable[[int], bool | None],
+) -> set[int]:
+    """A moved statement with the other facts of its filing's periods that moved too (and, for a cash-flow statement,
+    its period's cash-flow lines by name), less those a relation that closes as reported ties to a fact left out."""
     periods = {(records[i].accession, records[i].period_start, records[i].period_end) for i in out}
     cash_flows = any(_CASH_FLOW_TOTAL.match(records[i].concept) for i in out)
     siblings = {
@@ -2144,6 +2243,53 @@ def _sign_flipped_in(records: list[FundamentalFact], combo: tuple[int, ...], nei
     return {i for part in fixes for i in part} if SIGN_UNDECIDED_HOLDS else set()
 
 
+def _toward(neighbours: _Neighbours, facts: Sequence[int], step: float) -> bool:
+    """The facts' median step from their history lies on the side of ``step`` (all of them having history)."""
+    steps = [d for i in facts if (d := neighbours.level_step(i)) is not None]
+    return len(steps) == len(facts) and statistics.median(steps) * step > 0
+
+
+def _precise(values: Sequence[float]) -> bool:
+    """Every value carries PRECISE_DIGITS significant digits beyond the unit all of them are rounded to."""
+    whole = [round(abs(v)) for v in values]
+    if not all(whole):
+        return False
+    unit = 1
+    while all(w % (unit * 10) == 0 for w in whole):
+        unit *= 10
+    return min(whole) >= unit * int(10 ** (PRECISE_DIGITS - 1))
+
+
+def _decimal_misscaled_in(records: list[FundamentalFact], combo: tuple[int, ...], neighbours: _Neighbours) -> set[int]:
+    """The facts of one ``whole = first + second`` sum that one filing keyed 10x or 100x off (or a tenth or a
+    hundredth) explains: rescaling that filing's facts makes the sum hold exactly (within FLIP_TOLERANCE of its smallest
+    term: a restated half-year a tenth of which nearly matches two quarters that offset, BRK 2022 OCI, is no slip), they
+    sit about that
+    step from their history (within 10^NEAR_POWER) and the other filing's facts do not. A second quarter's statement
+    keyed in the wrong unit breaks its half-year against the first quarter's genuine filing. Figures of under
+    PRECISE_DIGITS significant digits are left out: rounded to the filing's unit, a few millions add up after such a
+    rescale by chance (GE's NCI share of OCI, $5M and $10M)."""
+    values = [records[i].value for i in combo]
+    if not _precise(values):
+        return set()
+    accessions = sorted({records[i].accession for i in combo})
+    found: set[int] = set()
+    for acc in accessions:
+        part = [i for i in combo if records[i].accession == acc]
+        rest = [i for i in combo if records[i].accession != acc]
+        for factor in DECIMAL_FACTORS:
+            scaled = [v * factor if records[i].accession == acc else v for i, v in zip(combo, values, strict=True)]
+            whole, first, second = scaled
+            if (
+                _adds_up_with_every_term(scaled)
+                and abs(whole - first - second) <= FLIP_TOLERANCE * min(abs(whole), abs(first), abs(second))
+                and _toward(neighbours, part, -math.log10(factor))
+                and not _all_off_by(neighbours, records, rest, factor)
+            ):
+                found.update(part)
+    return found
+
+
 def _misscaled_in(records: list[FundamentalFact], combo: tuple[int, ...], neighbours: _Neighbours) -> set[int]:
     """The facts of one ``whole = first + second`` sum that a power-of-1000 scale error in one filing explains."""
     values = [records[i].value for i in combo]
@@ -2158,7 +2304,7 @@ def _misscaled_in(records: list[FundamentalFact], combo: tuple[int, ...], neighb
             if _adds_up_with_every_term(scaled):
                 fixes.append(part)
     if not fixes:
-        return _sign_flipped_in(records, combo, neighbours)
+        return _decimal_misscaled_in(records, combo, neighbours) or _sign_flipped_in(records, combo, neighbours)
     # Scaling one filing up is the same as scaling the other down: the side far from its neighbouring periods is the
     # mis-scaled one. Without a clear answer every candidate is held (a guess could serve the wrong scale).
     wrong = _clear_pick(neighbours, fixes, accessions, nearest=False)
