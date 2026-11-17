@@ -1158,7 +1158,10 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
     # A whole statement a power of 10 or 100 off (or flipped) inside a genuine column: a broken relation that one of its
     # terms' statement, rescaled together, closes exactly. Tried before smaller groups, which would split it (a pair of
     # balances can close the cash change of a slipped cash-flow statement across two years).
-    out |= _statement_errors(records, [i for i in tables + statements if i in broken], explained, neighbours)
+    # every relation that is not exact (within 0.1%): a small NCI share keeps MMM's profit = net income + NCI share
+    # within 1% when net income and profit slipped x10 together, and the repair must close it exactly all the same
+    inexact = [i for i in tables + statements if i in broken or not _exact(_contributions(records, i))]
+    out |= _statement_errors(records, inexact, explained, neighbours, set(broken))
     # Several facts a power of 10 or 100 off together (a statement partly keyed in the wrong unit): statements and
     # footnote tables joined, as a total another table confirms (assets = liabilities and equity) may have slipped with
     # it; signs learned from the filing are left out. A single slipped fact is _decimal_repair's.
@@ -1241,23 +1244,34 @@ def _unexplained_breaks(records: list[FundamentalFact], held: set[int], recent: 
 
 
 def _statement_errors(
-    records: list[FundamentalFact], broken: list[_Instance], explained: set[_Instance], neighbours: _Neighbours
+    records: list[FundamentalFact],
+    broken: list[_Instance],
+    explained: set[_Instance],
+    neighbours: _Neighbours,
+    beyond: AbstractSet[_Instance],
 ) -> set[int]:
-    """_statement_repair for each broken relation not yet explained (adding those it explains)."""
+    """_statement_repair for each broken relation not yet explained (adding those it explains); flips are tried only
+    for relations broken beyond ADDITIVITY_TOLERANCE (``beyond``): a merely inexact one flipped can close by chance
+    (GE's genuine 2015 loss, its OCI tagged twice)."""
     out: set[int] = set()
     closed: dict[int, list[_Instance]] | None = None
     for inst in broken:
         if inst not in explained:
             if closed is None:
                 closed = _closed_relations(records)
-            if found := _statement_repair(records, closed, neighbours, inst):
+            if found := _statement_repair(records, closed, neighbours, inst, flips=inst in beyond):
                 out |= found
                 explained.add(inst)
     return out
 
 
 def _statement_repair(
-    records: list[FundamentalFact], closed: dict[int, list[_Instance]], neighbours: _Neighbours, inst: _Instance
+    records: list[FundamentalFact],
+    closed: dict[int, list[_Instance]],
+    neighbours: _Neighbours,
+    inst: _Instance,
+    *,
+    flips: bool = True,
 ) -> set[int]:
     """The statement of one of the broken relation's terms whose rescale by 10, 100, 1/10 or 1/100, or whose sign
     reversal, closes the relation exactly, needing both the statement's terms and the others; empty when none does.
@@ -1287,9 +1301,10 @@ def _statement_repair(
                         (_with_siblings(records, closed, grown, _stepped(neighbours, step), by_name=by_name), factor)
                     )
             # a flip is shown by the exact closure alone: flows change sign on their own (GOOGL financing, FX)
-            tries.append(
-                (_with_siblings(records, closed, grown, _reversed(neighbours, records), by_name=by_name), -1.0)
-            )
+            if flips:
+                tries.append(
+                    (_with_siblings(records, closed, grown, _reversed(neighbours, records), by_name=by_name), -1.0)
+                )
         else:
             d = neighbours.level_step(k)
             tries = []
@@ -1297,7 +1312,7 @@ def _statement_repair(
                 tries.append(
                     (_slipped_statement(records, closed, k, _stepped(neighbours, round(d))), 10.0 ** -round(d))
                 )
-            if records[k].concept in _HEADLINE_INCOME:  # the bottom of the statement flipped beside genuine pre-tax
+            if flips and records[k].concept in _HEADLINE_INCOME:  # the bottom flipped beside a genuine pre-tax
                 tries.append((_slipped_statement(records, closed, k, _reversed(neighbours, records)), -1.0))
         for found, factor in tries:
             after = _contributions(records, inst, found, factor)
@@ -1670,7 +1685,29 @@ def _ratio_errors(records: list[FundamentalFact], held: set[int], neighbours: _N
                     confirmed = _confirmed(records) | vouched
                 column = statement(idx[-1], -(level - usual)) if min_move is None and idx[-1] not in vouched else set()
                 # net income's identities close because its whole statement slipped with it: hold the statement
-                out |= column or _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
+                blamed = column or _ratio_blame(neighbours, records, [i for i in idx if i not in confirmed] or idx)
+                out |= blamed
+                if min_move is not None and not column:  # cash keyed in the wrong unit with its balance sheet
+                    out |= _balance_statement(records, idx, blamed, level - usual, statement)
+    return out
+
+
+def _balance_statement(
+    records: list[FundamentalFact],
+    idx: list[int],
+    blamed: AbstractSet[int],
+    off: float,
+    statement: Callable[[int, float], set[int]],
+) -> set[int]:
+    """The balance sheet that slipped with a balance a tight ratio blames by a step of 10 or 100 (cash beside its
+    genuine total including restricted cash): the balances of its filing and date that sit the same step off their
+    history (GOOGL 2026 assets, liabilities, payables and receivables ÷10 beside a genuine cash total, whose equity
+    relation leaves $18B untagged so no exact relation breaks). A lone slipped cash figure has none beside it."""
+    out: set[int] = set()
+    for b in blamed:
+        step = off if b == idx[0] else -off
+        if records[b].period_start is None and _CURRENCY.match(records[b].unit) and _slipped(step, None):
+            out |= statement(b, step)
     return out
 
 

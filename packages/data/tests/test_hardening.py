@@ -4076,6 +4076,53 @@ def test_a_comparative_amount_exactly_ten_times_its_original_filing_is_held(fact
     assert {(records[i].period_end.year, records[i].accession) for i in held} == {(2024, "k2025")}
 
 
+def test_a_balance_sheet_slipped_beside_its_genuine_cash_total_is_held_whole() -> None:
+    """Cash, assets, liabilities, payables and receivables ÷10 together (GOOGL 2026 seeded so: assets $92.2B against a
+    genuine $922.0B), the restricted-cash total and the rest of the balance sheet genuine, and no exact relation
+    between them that the filer tags in full: cash's share of its total slips by 10, and the balances that sit the same
+    step off their history are held with cash, not cash alone."""
+    years = (2020, *_YEARS)
+    grow = tuple(1.06**k for k in range(6))
+    rows = {
+        "CashAndCashEquivalentsAtCarryingValue": tuple(23.1e9 * g for g in grow),  # synthetic, not any filer's
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": tuple(23.6e9 * g for g in grow),
+        "Assets": tuple(402.3e9 * g for g in grow),
+        "Liabilities": tuple(118.7e9 * g for g in grow),
+        "AccountsPayableCurrent": tuple(7.4e9 * g for g in grow),
+        "AccountsReceivableNetCurrent": tuple(41.2e9 * g for g in grow),
+        **{f"Note{k:02d}": tuple((1 + 0.1 * k) * 1e9 * g for g in grow) for k in range(12)},
+    }
+    seeded = {
+        "CashAndCashEquivalentsAtCarryingValue",
+        "Assets",
+        "Liabilities",
+        "AccountsPayableCurrent",
+        "AccountsReceivableNetCurrent",
+    }
+    records = _seeded(rows, seeded, 0.1, years, instants=True)
+    held, _ = sec_scale.scale_errors(records)
+    assert {(c, 2025) for c in seeded} <= {(records[i].concept, records[i].period_end.year) for i in held}
+    clean, _ = sec_scale.scale_errors(_seeded(rows, set(), 1.0, years, instants=True))
+    assert not clean
+
+
+def test_net_income_and_profit_slipped_beside_a_small_genuine_nci_share_are_held() -> None:
+    """Profit and net income x10 together beside a genuine NCI share of 0.2% (MMM 2026 seeded so): profit = net income
+    + NCI share still balances within 1%, but not exactly, and rescaling the two closes it exactly: both are held."""
+    income = (9.1e9, 9.6e9, 10.2e9, 10.9e9, 11.3e9)  # synthetic, not any filer's
+    nci = tuple(n * 0.002 for n in income)
+    rows = {
+        "NetIncomeLoss": income,
+        "NetIncomeLossAttributableToNoncontrollingInterest": nci,
+        "ProfitLoss": tuple(n + m for n, m in zip(income, nci, strict=True)),
+    }
+    records = _seeded({**rows, **_genuine_lines()}, {"NetIncomeLoss", "ProfitLoss"}, 10.0, _YEARS)
+    held, _ = sec_scale.scale_errors(records)
+    assert {("NetIncomeLoss", 2025), ("ProfitLoss", 2025)} <= {
+        (records[i].concept, records[i].period_end.year) for i in held
+    }
+
+
 def test_a_balance_sheet_with_every_sign_reversed_is_held() -> None:
     """The newest balance sheet negated: assets, liabilities, debt and equity still add up, but assets and debt
     cannot be negative; the balances that close with them oppose their history in sign, so equity is held with

@@ -436,7 +436,10 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    income, grown along the relations that close as reported, and held when it closes that relation exactly. A held
    non-operating line does not carry the relations it closes into its totals (it swings on its own, and a slipped
    one is repaired by its relation): AMZN's genuine 2026 non-operating income, held beside an earlier filing ÷1000,
-   otherwise carried its whole genuine half-year statement.
+   otherwise carried its whole genuine half-year statement. Relations that balance within 1% but not exactly are tried
+   too, for rescales only (flips only where a relation is broken beyond 1%: GE's genuine 2015 loss, its OCI tagged
+   twice, closed a merely inexact relation once flipped and held 126 genuine facts): a small NCI share keeps MMM's
+   profit = net income + NCI share within 1% when net income and profit slipped ×10 together.
    A broken relation that nothing above explains, in a relation the filer's other filings close (at least four other
    instances, 95% of them within 1%), shows a figure entered wrong by some other factor (assets ×1.5 beside
    liabilities and equity), but it cannot be told from the filer's own tagging of that period: holding such breaks
@@ -465,6 +468,9 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    column sits within 10^0.5 of that step off its history, the statement was keyed in the wrong unit: the column is
    held, not EPS, also when a size bound held net income first (a fast grower's genuine column sits up to 10^0.4
    above its neighbours, NVDA 2026, too far for the column rule of rule 11 alone).
+   A balance that the cash ratio blames by a step of 10 or 100 takes with it the balances of its filing and date that
+   sit the same step off their history: a balance sheet keyed in the wrong unit beside a genuine cash total need not
+   break any exact relation (GOOGL leaves $18B of its equity untagged; seeded ÷10, its assets $92.2B were served).
    Diluted EPS sits within 10^0.3 of basic EPS in clean data (cents rounding of small EPS), so a move of 10^0.5
    between them is a slip, and basic EPS beside a held diluted EPS it agrees with is held with it. An income that
    another EPS instance of its period agrees with (at its usual level) is vouched for: it is neither blamed nor taken
