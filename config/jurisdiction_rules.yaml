@@ -1,0 +1,12 @@
+# Jurisdiction rules driven by the buyer's billing country (PROMPT §13.1). ISO 3166-1 alpha-2 codes.
+# Safety-first defaults; every entry needs counsel review before launch (docs/legal/).
+schema_version: 1
+default: {sales: allowed}
+sanctioned:   # blocked automatically, regardless of any other rule
+  countries: ["CU", "IR", "KP", "SY", "RU", "BY"]
+  regions: ["UA-43", "UA-14", "UA-09"]   # Crimea, Donetsk, Luhansk oblasts
+  source_note: "Conservative superset of comprehensive OFAC/EU/UK programs; counsel to confirm."
+countries:
+  PK:
+    sales: not_yet_cleared
+    reason: "SECP Research Analyst Regulations (amended Jan 2026) — registration question open"

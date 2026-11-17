@@ -1,0 +1,71 @@
+name: record-cassettes
+
+# Records contract-test cassettes from live providers (D-011): the build sandbox cannot reach vendor hosts, CI can.
+# Trigger: edit .github/recording-request.json (providers whose plans to record, plus optional extra "requests")
+# and push, or run manually.
+# Keyed providers record only when their secret exists (e.g. EIA_API_KEY); keyless ones always.
+
+on:
+  push:
+    paths: [".github/recording-request.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: record-cassettes-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.11.32"
+      - run: uv python install 3.12.13
+      - run: uv sync --frozen --all-packages
+      - name: record
+        env:
+          SEC_EDGAR_USER_AGENT: "ResearchDesk-CI (working name) support@example.com"
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+        run: |
+          providers=$(python3 -c "import json; print(','.join(json.load(open('.github/recording-request.json'))['providers']))")
+          if [ -z "${EIA_API_KEY}" ]; then providers=$(echo "$providers" | tr ',' '\n' | grep -v '^eia$' | paste -sd, -); fi
+          set +e
+          uv run python -m rd_data.recording --providers "$providers" --requests .github/recording-request.json \
+            --failed-out .recordings-failed --source "GitHub Actions run ${{ github.run_id }}"
+          code=$?
+          set -e
+          echo "recorder exit code: $code"
+          echo "RECORDER_EXIT=$code" >> "$GITHUB_ENV"
+      - name: secret scan of recorded cassettes
+        run: make tools && ./scripts/scan_committable.sh
+      - name: commit cassettes to this branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p packages/data/tests/cassettes
+          git add -A packages/data/tests/cassettes
+          if git diff --cached --quiet; then echo "no cassette changes"; exit 0; fi
+          git commit -m "Record provider cassettes (CI run ${{ github.run_id }})"
+          # The branch may have moved while recording (only cassette files are committed here, so a rebase onto
+          # the newest tip is conflict-free); retry a few times before failing.
+          for attempt in 1 2 3; do
+            git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}" && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1
+      - name: keep failed recordings for diagnosis
+        if: env.RECORDER_EXIT != '0'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: failed-recordings
+          path: .recordings-failed
+          if-no-files-found: ignore
+      - name: fail the run if any recording failed (successful ones are already committed)
+        if: env.RECORDER_EXIT != '0'
+        run: exit 1

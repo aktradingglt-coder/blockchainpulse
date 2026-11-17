@@ -1,0 +1,42 @@
+# Install with: uv run pre-commit install. Hooks run the same pinned tools as CI.
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (staged changes)
+        entry: bash -c 'make -s tools && .tools/bin/gitleaks git --pre-commit --staged --config .gitleaks.toml --redact --no-banner .'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --force-exclude
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --check --force-exclude
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy --strict
+        entry: uv run mypy packages apps/api apps/worker apps/scheduler tests scripts
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: import-contracts
+        name: import-linter contracts
+        entry: uv run lint-imports
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: web-lint
+        name: eslint (web)
+        entry: pnpm --dir apps/web lint
+        language: system
+        files: ^apps/web/
+        pass_filenames: false
+      - id: no-env-files
+        name: block committing .env files
+        entry: bash -c 'for f in "$@"; do b=$(basename "$f"); case "$b" in .env|.env.*) [ "$b" = .env.example ] || { echo "refusing to commit $f"; exit 1; };; esac; done' --
+        language: system
