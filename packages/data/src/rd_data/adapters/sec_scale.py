@@ -764,6 +764,11 @@ CHANGES: tuple[tuple[str, str], ...] = (
     ),
     # before restricted cash joined the statement (ASU 2016-18, filings before 2018), the change in cash alone
     ("CashAndCashEquivalentsPeriodIncreaseDecrease", "CashAndCashEquivalentsAtCarryingValue"),
+    # ... and including discontinued operations' cash (GE 2015)
+    (
+        "CashAndCashEquivalentsPeriodIncreaseDecrease",
+        "CashAndCashEquivalentsAtCarryingValueIncludingDiscontinuedOperations",
+    ),
 )
 #: A balance (instant fact) in a recent filing that moved more than 10^INSTANT_FLAG_STEP from the previous period end
 #: is flagged: balances move smoothly (3 genuine moves that large in 17 years of AMZN balances).
@@ -1296,7 +1301,9 @@ def _statement_repair(
             tries: list[tuple[set[int], float]] = []
             for factor in DECIMAL_FACTORS:
                 step = -round(math.log10(factor))
-                if steps and statistics.median(steps) * step > 0:
+                # a lone change in cash swings too far for its history to show the slip's side (TSLA's 2015 change in
+                # cash ÷10 still sits 10^0.27 above it): its siblings must have moved by the step instead
+                if not by_name or (steps and statistics.median(steps) * step > 0):
                     tries.append(
                         (_with_siblings(records, closed, grown, _stepped(neighbours, step), by_name=by_name), factor)
                     )

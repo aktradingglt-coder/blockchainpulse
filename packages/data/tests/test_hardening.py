@@ -4019,20 +4019,26 @@ def test_an_income_statement_with_every_sign_reversed_is_held_through_its_negati
     assert not clean
 
 
+@pytest.mark.parametrize(
+    "cash_tag",
+    ["CashAndCashEquivalentsAtCarryingValue", "CashAndCashEquivalentsAtCarryingValueIncludingDiscontinuedOperations"],
+)
+@pytest.mark.parametrize("untagged", [0.0, 0.5e9])
 @pytest.mark.parametrize("factor", [10.0, 0.1, 100.0])
 def test_a_cash_flow_statement_tagged_before_restricted_cash_joined_it_is_held_by_its_cash_balances(
-    factor: float,
+    factor: float, untagged: float, cash_tag: str
 ) -> None:
     """The same slip in a filing from before ASU 2016-18, whose change in cash runs between cash and cash equivalents
     alone (GOOGL's 2019 first quarter, operating cash flow $1.2B against a genuine $12.0B): that change is tied to the
-    balances it runs between too, so the statement is held."""
+    balances it runs between too (GE's 2015 balances including discontinued operations' cash among them), so the
+    statement is held, also where its own identity never closes (TSLA 2015). Buybacks, which sit on their history at
+    the slipped value, are taken by name only with a statement that closes."""
     records, seeded = _cash_flow_records(
-        factor,
-        change_tag="CashAndCashEquivalentsPeriodIncreaseDecrease",
-        cash_tag="CashAndCashEquivalentsAtCarryingValue",
+        factor, untagged, change_tag="CashAndCashEquivalentsPeriodIncreaseDecrease", cash_tag=cash_tag
     )
     held, _ = sec_scale.scale_errors(records)
-    assert {(c, 2025, "a") for c in seeded} - {"PaymentsForRepurchaseOfCommonStock"} <= {
+    want = seeded - ({"PaymentsForRepurchaseOfCommonStock"} if untagged else set())
+    assert {(c, 2025, "a") for c in want} <= {
         (records[i].concept, records[i].period_end.year, records[i].accession) for i in held
     }
 

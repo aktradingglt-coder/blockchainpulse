@@ -429,8 +429,11 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    flips on GE's and TSLA's goodwill rollforwards (filers report the goodwill change under either sign) held 34
    genuine facts.
    Before restricted cash joined the statement (filings before 2018), the change in cash runs between cash and cash
-   equivalents alone, and that tie is checked too (969 of 987 clean instances close; round 27: whole cash-flow
-   statements ÷10 in 2015 and 2019 as-of snapshots were served at AAPL, GOOGL, XOM, TSLA and others). The bottom of
+   equivalents alone, and that tie is checked too (969 of 987 clean instances close), as is GE's to its cash including
+   discontinued operations (40 of 40; round 27: whole cash-flow statements ÷10 in 2015 and 2019 as-of snapshots were
+   served at AAPL, GOOGL, XOM, TSLA, GE and others). A lone change in cash is rescaled by any step its moved siblings
+   share: it swings too far for its own history to show the slip's side (TSLA's 2015 change ÷10 still sits 10^0.27
+   above it). The bottom of
    an income statement flipped together (net and comprehensive income, OCI, EPS) closes its own relations and breaks
    only net income = pre-tax income − tax: a flip is tried there from net, comprehensive or continuing-operations
    income, grown along the relations that close as reported, and held when it closes that relation exactly. A held
