@@ -10,7 +10,7 @@ dependencies = [
     "uvicorn[standard]==0.54.0",
     "prometheus-client==0.26.0",
     "redis==8.1.0",
-    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-instrumentation-fastapi==0.66b2",
     "dramatiq[redis]==2.2.1",
 ]
 
