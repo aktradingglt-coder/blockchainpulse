@@ -21,6 +21,13 @@ from rd_data.schemas import FundamentalFact
 
 #: How close (in log10) two filings' values must be to a ratio of 10^3, 10^6, ... to count as a scale error.
 SCALE_TOLERANCE = 0.02
+#: Two filings' amounts for one period exactly 10 or 100 apart (within 10^this, rounding of reported figures) are a
+#: slipped decimal, not a restatement; amounts in currency only (a split restates EPS and share counts exactly).
+EXACT_DECIMAL_TOLERANCE = 0.0005
+#: ... amounts of at least this much (per-share prices, also in currency, are restated exactly by splits).
+EXACT_DECIMAL_MIN = 1e6
+#: Filings' figures for one period within 10^this of each other are one group when weighing a power-of-1000 dispute.
+GROUP_WIDTH = 1.5
 #: Neighbouring periods (same concept, unit and duration) a fact is compared with, within NEIGHBOUR_WINDOW_DAYS: a
 #: line last reported a decade ago says nothing about this year's scale.
 NEIGHBOURS = 4
@@ -69,10 +76,10 @@ PRECISE_DIGITS = 4
 #: arithmetic: see _unexplained_breaks.
 BREAK_HISTORY = 4
 BREAK_SHARE = 0.95
-_CASH_FLOW_TOTAL = re.compile(r"^NetCashProvidedByUsedIn|^CashCashEquivalents.*PeriodIncreaseDecrease")
+_CASH_FLOW_TOTAL = re.compile(r"^NetCashProvidedByUsedIn|^Cash(And)?CashEquivalents.*PeriodIncreaseDecrease")
 _CASH_FLOW_LINE = re.compile(
     r"^(NetCashProvidedByUsedIn|Proceeds|Payments|Repayments|IncreaseDecreaseIn|EffectOfExchangeRate|InterestPaid"
-    r"|IncomeTaxesPaid|CashCashEquivalents.*PeriodIncreaseDecrease)"
+    r"|IncomeTaxesPaid|Cash(And)?CashEquivalents.*PeriodIncreaseDecrease)"
 )
 PREVIOUS_WINDOW_DAYS = 400
 #: A currency fact larger than this multiple of the company's own total assets is held. Across about 400,000 clean
@@ -139,7 +146,7 @@ SIGN_CHECKED = frozenset(
 )
 #: When the sign history does not single out one side of a sign error, hold every candidate (True) or none (False).
 SIGN_UNDECIDED_HOLDS = False
-#: Balances, totals, expenses and outflows that cannot be negative: of 50,195 clean 10-K and 10-Q facts of these
+#: Balances, totals, expenses and outflows that cannot be negative: of 66,747 clean 10-K and 10-Q facts of these
 #: concepts in 15 large filers, one is (C's Q4-2020 cost of revenue, -46M). A negative one is a sign error and is held.
 NEVER_NEGATIVE = frozenset(
     {
@@ -190,6 +197,41 @@ NEVER_NEGATIVE = frozenset(
         "PaymentsOfDividends",
         "PaymentsOfDividendsCommonStock",
         "InterestPaidNet",
+        # balance-sheet lines, none negative in the same filers' clean facts (round 27); equity, retained earnings,
+        # treasury stock, minority interest and deferred taxes are reported negative by some
+        "LongTermDebtNoncurrent",
+        "LongTermDebtCurrent",
+        "LiabilitiesNoncurrent",
+        "OperatingLeaseLiabilityNoncurrent",
+        "OperatingLeaseRightOfUseAsset",
+        "AccruedLiabilitiesCurrent",
+        "OtherLiabilitiesNoncurrent",
+        "OtherAssetsNoncurrent",
+        "OtherAssetsCurrent",
+        "OtherLiabilitiesCurrent",
+        "ContractWithCustomerLiabilityCurrent",
+        "MarketableSecuritiesCurrent",
+        "MarketableSecuritiesNoncurrent",
+        "CommercialPaper",
+        "Deposits",
+        "LoansAndLeasesReceivableNetReportedAmount",
+        "AdditionalPaidInCapital",
+        "AdditionalPaidInCapitalCommonStock",
+        "CommonStocksIncludingAdditionalPaidInCapital",
+        "AccountsPayableAndAccruedLiabilitiesCurrent",
+        "EmployeeRelatedLiabilitiesCurrent",
+        "DeferredRevenueCurrent",
+        "DeferredRevenueNoncurrent",
+        "FinanceLeaseLiabilityNoncurrent",
+        "ShortTermBorrowings",
+        "LongTermDebtAndCapitalLeaseObligations",
+        "AvailableForSaleSecuritiesDebtSecurities",
+        "HeldToMaturitySecurities",
+        "TradingSecurities",
+        "FederalFundsPurchasedAndSecuritiesSoldUnderAgreementsToRepurchase",
+        "OtherLiabilities",
+        "OtherAssets",
+        "PrepaidExpenseAndOtherAssetsCurrent",
     }
 )
 #: Largest identity system (terms sharing identities, e.g. the 12-line income-tax table) solved by search.
@@ -292,6 +334,15 @@ _REVENUE = ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "
 _BANK_PRETAX = (
     "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
     "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+)
+#: Lines that swing on their own (non-operating income): one held does not carry the totals of its relations with it,
+#: whose own repairs catch it when it slipped (AMZN's genuine 2026 non-operating income, held beside an earlier
+#: filing ÷1000, carried its whole genuine half-year statement through pre-tax = operating + non-operating income).
+_SWINGING = frozenset({"NonoperatingIncomeExpense", "OtherNonoperatingIncomeExpense"})
+#: Net and comprehensive income: flipped together (with OCI and EPS) beside a genuine pre-tax income and tax, they
+#: close their own relations and break only net income = pre-tax income - tax (_statement_repair).
+_HEADLINE_INCOME = frozenset(
+    {"NetIncomeLoss", "ProfitLoss", "ComprehensiveIncomeNetOfTax", "IncomeLossFromContinuingOperations"}
 )
 _AFTER_TAX = (
     "IncomeLossFromContinuingOperationsIncludingPortionAttributableToNoncontrollingInterest",
@@ -428,6 +479,11 @@ SIGNED_IDENTITIES: tuple[tuple[_Term, ...], ...] = (
         ),
         _term("IncomeTaxExpenseBenefit", coef=1.0),
         _term("IncomeLossFromEquityMethodInvestments", coef=-1.0, optional=True),
+    ),
+    (  # pre-tax income = operating income + non-operating income
+        _term(*_BANK_PRETAX, coef=1.0),
+        _term("OperatingIncomeLoss", coef=-1.0),
+        _term("NonoperatingIncomeExpense", coef=-1.0),
     ),
     (  # pre-tax income = revenue - all costs and expenses (filers whose costs include non-operating items)
         _term("IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest", coef=1.0),
@@ -706,6 +762,8 @@ CHANGES: tuple[tuple[str, str], ...] = (
         "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
         "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroupAndDiscontinuedOperations",
     ),
+    # before restricted cash joined the statement (ASU 2016-18, filings before 2018), the change in cash alone
+    ("CashAndCashEquivalentsPeriodIncreaseDecrease", "CashAndCashEquivalentsAtCarryingValue"),
 )
 #: A balance (instant fact) in a recent filing that moved more than 10^INSTANT_FLAG_STEP from the previous period end
 #: is flagged: balances move smoothly (3 genuine moves that large in 17 years of AMZN balances).
@@ -713,6 +771,24 @@ INSTANT_FLAG_STEP = 2.0
 #: Year-to-date ratio checks need this many other years, whose ratios sit within 10^PREFIX_SPREAD of their median.
 PREFIX_HISTORY = 3
 PREFIX_SPREAD = 0.3
+
+
+def _exact_amounts(records: list[FundamentalFact], idx: Sequence[int]) -> bool:
+    """Whether one period's filed figures can show an exact decimal slip: currency amounts of EXACT_DECIMAL_MIN or more
+    carrying PRECISE_DIGITS significant digits (WFC's fees rounded to $1M and $10M, and C's per-share exercise prices
+    restated for its 2011 reverse split, sit exactly 10 apart in clean data)."""
+    values = [records[i].value for i in idx]
+    return (
+        bool(_CURRENCY.match(records[idx[0]].unit))
+        and min(abs(v) for v in values) >= EXACT_DECIMAL_MIN
+        and _precise(values)
+    )
+
+
+def _decimal_apart(log_ratio: float) -> bool:
+    """A power of 1000 apart, or exactly 10 or 100 apart (EXACT_DECIMAL_TOLERANCE)."""
+    k = round(log_ratio)
+    return _scale_like(log_ratio) or (abs(k) in COLUMN_DECIMAL_STEPS and abs(log_ratio - k) < EXACT_DECIMAL_TOLERANCE)
 
 
 def _scale_like(log_ratio: float, tolerance: float = SCALE_TOLERANCE) -> bool:
@@ -1120,6 +1196,7 @@ def _identity_errors(records: list[FundamentalFact], held: set[int], neighbours:
             if (
                 rest
                 and terms & known
+                and any(records[k].concept not in _SWINGING for k in terms & known)
                 and (
                     _off_history(neighbours, records, rest)
                     or (
@@ -1215,9 +1292,13 @@ def _statement_repair(
             )
         else:
             d = neighbours.level_step(k)
-            if d is None or abs(round(d)) not in COLUMN_DECIMAL_STEPS:
-                continue
-            tries = [(_slipped_statement(records, closed, k, _stepped(neighbours, round(d))), 10.0 ** -round(d))]
+            tries = []
+            if d is not None and abs(round(d)) in COLUMN_DECIMAL_STEPS:
+                tries.append(
+                    (_slipped_statement(records, closed, k, _stepped(neighbours, round(d))), 10.0 ** -round(d))
+                )
+            if records[k].concept in _HEADLINE_INCOME:  # the bottom of the statement flipped beside genuine pre-tax
+                tries.append((_slipped_statement(records, closed, k, _reversed(neighbours, records)), -1.0))
         for found, factor in tries:
             after = _contributions(records, inst, found, factor)
             if (
@@ -1725,16 +1806,12 @@ def _slipped_statement(
 
 
 def _flipped_statements(records: list[FundamentalFact], held: set[int], neighbours: _Neighbours) -> set[int]:
-    """The statements that flipped with a flow held for being negative where it cannot be (revenue, an expense, an
-    outflow): grown from it along the relations that close exactly as reported, as _slipped_statement grows a slipped
+    """The statements that flipped with a fact held for being negative where it cannot be (an expense, an outflow, a
+    balance): grown from it along the relations that close exactly as reported, as _slipped_statement grows a slipped
     one, when most of them oppose their history in sign too. A statement keyed with every sign reversed still closes
     its identities, so only the line that cannot be negative shows it (XOM's 2026 first quarter with revenue at
     -$85.1B beside costs, pre-tax income, tax and net income all reversed)."""
-    seeds = [
-        i
-        for i in held
-        if records[i].period_start is not None and records[i].value < 0 and records[i].concept in NEVER_NEGATIVE
-    ]
+    seeds = [i for i in held if records[i].value < 0 and records[i].concept in NEVER_NEGATIVE]
     if not seeds:
         return set()
     closed = _closed_relations(records)
@@ -2148,7 +2225,12 @@ def _fact_holds(records: list[FundamentalFact], distance: dict[int, float]) -> t
 
 
 def _clear_pick(
-    neighbours: _Neighbours, groups: Sequence[Sequence[int]], exclude: frozenset[str], *, nearest: bool
+    neighbours: _Neighbours,
+    groups: Sequence[Sequence[int]],
+    exclude: frozenset[str],
+    *,
+    nearest: bool,
+    margin: float = DECISIVE_MARGIN,
 ) -> int | None:
     """Index of the group of facts clearly nearest (or furthest from) its neighbouring periods, by DECISIVE_MARGIN,
     judged without the disputing filings' own values; None when the neighbours do not decide."""
@@ -2157,7 +2239,7 @@ def _clear_pick(
     if len(known) < len(scores):
         return None
     order = sorted(range(len(groups)), key=lambda g: known[g] if nearest else -known[g])
-    if len(order) == 1 or abs(known[order[1]] - known[order[0]]) >= DECISIVE_MARGIN:
+    if len(order) == 1 or abs(known[order[1]] - known[order[0]]) >= margin:
         return order[0]
     return None
 
@@ -2211,9 +2293,10 @@ def _filing_disagreements(
     neighbours: _Neighbours,
 ) -> set[int]:
     """Periods filed more than once: filings a power of 1000 from the reference filing (the one closest to its
-    independent neighbours) are held. When the neighbours do not clearly side with one filing, the disagreeing
-    filings' facts of that concept are all held (a guess could pick the wrong scale). A filing is held whole when
-    most of everything it shares with other filings (not only the disputed periods) is a power of 1000 off."""
+    independent neighbours), or for amounts exactly 10 or 100 from it, are held. When the neighbours do not clearly
+    side with one filing, the disagreeing filings' facts of that concept are all held (a guess could pick the wrong
+    scale). A filing is held whole when most of everything it shares with other filings (not only the disputed
+    periods) is a power of 1000 off."""
     held: set[int] = set()
     off_by_accession: dict[str, list[bool]] = {}
     ambiguous: set[tuple[str, str, str]] = set()
@@ -2222,28 +2305,34 @@ def _filing_disagreements(
         if len(accessions) < 2:
             continue
         values = [v for i in idx if (v := logs[i]) is not None]
-        if not any(_scale_like(a - b) for a in values for b in values):
+        apart = _decimal_apart if _exact_amounts(records, idx) else _scale_like
+        if not any(apart(a - b) for a in values for b in values):
             for i in idx:  # filings agree up to restatements: this period counts for every filing as "on scale"
                 off_by_accession.setdefault(records[i].accession, []).append(False)
             continue
-        # Group the facts by scale; the group clearly nearest the neighbouring periods is kept.
+        # Group the facts by scale; the group clearly nearest the neighbouring periods is kept. Filings only 10 or 100
+        # apart are grouped and told apart by half that step (a power of 1000 by DECISIVE_MARGIN).
+        decimal = not any(_scale_like(a - b) for a in values for b in values)
+        width = NEAR_POWER if decimal else GROUP_WIDTH
         groups: list[list[int]] = []
         for i in idx:
             log_i = logs[i]
             group = next((g for g in groups if (v := logs[g[0]]) is not None and log_i is not None
-                          and abs(log_i - v) < 1.5), None)  # fmt: skip
+                          and abs(log_i - v) < width), None)  # fmt: skip
             if group is None:
                 groups.append([i])
             else:
                 group.append(i)
-        keep = _clear_pick(neighbours, groups, accessions, nearest=True)
+        keep = _clear_pick(
+            neighbours, groups, accessions, nearest=True, margin=NEAR_POWER if decimal else DECISIVE_MARGIN
+        )
         if keep is None:
             keep = _majority(records, groups)
         if keep is None:
             ambiguous.update((records[i].concept, records[i].unit, records[i].accession) for i in idx)
             continue
         keep_log = statistics.median(v for i in groups[keep] if (v := logs[i]) is not None)
-        wrong = [i for i in idx if (v := logs[i]) is not None and _scale_like(v - keep_log)]
+        wrong = [i for i in idx if (v := logs[i]) is not None and apart(v - keep_log)]
         held.update(wrong)
         for i in idx:
             off_by_accession.setdefault(records[i].accession, []).append(i in wrong)

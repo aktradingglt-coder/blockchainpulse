@@ -3909,7 +3909,13 @@ def test_an_income_statement_slipped_inside_a_genuine_column_is_held_not_its_eps
     }
 
 
-def _cash_flow_records(factor: float, untagged: float = 0.0) -> tuple[list[FundamentalFact], set[str]]:
+def _cash_flow_records(
+    factor: float,
+    untagged: float = 0.0,
+    *,
+    change_tag: str = sec_scale._CASH_CHANGE[0],
+    cash_tag: str = "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+) -> tuple[list[FundamentalFact], set[str]]:
     """A cash-flow statement whose newest year is multiplied by factor, beside genuine cash balances (closing minus
     opening cash = the change in cash) and a genuine income statement; buybacks jumped 10x in the newest year for real,
     so the slipped figure sits on their history. ``untagged`` is a flow every year that the filer reports in no tag
@@ -3920,7 +3926,7 @@ def _cash_flow_records(factor: float, untagged: float = 0.0) -> tuple[list[Funda
     investing = (-15e9, -18e9, -17e9, -20e9, -21e9)
     buybacks = (1e9, 1e9, 1e9, 1e9, 1e9 / factor if factor > 0 else 1e9)
     cash_flows = {
-        sec_scale._CASH_CHANGE[0]: change,  # the change in cash including restricted cash
+        change_tag: change,  # the change in cash (including restricted cash, unless tagged before ASU 2016-18)
         "NetCashProvidedByUsedInOperatingActivities": operating,
         "NetCashProvidedByUsedInInvestingActivities": investing,
         "NetCashProvidedByUsedInFinancingActivities": tuple(
@@ -3931,7 +3937,7 @@ def _cash_flow_records(factor: float, untagged: float = 0.0) -> tuple[list[Funda
     closing = [20e9]
     for c in change:
         closing.append(closing[-1] + c)
-    cash = {"CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": tuple(closing)}
+    cash = {cash_tag: tuple(closing)}
     income = (10e9, 11e9, 12e9, 13e9, 14e9)
     statement = {
         "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": tuple(
@@ -4013,6 +4019,108 @@ def test_an_income_statement_with_every_sign_reversed_is_held_through_its_negati
     assert not clean
 
 
+@pytest.mark.parametrize("factor", [10.0, 0.1, 100.0])
+def test_a_cash_flow_statement_tagged_before_restricted_cash_joined_it_is_held_by_its_cash_balances(
+    factor: float,
+) -> None:
+    """The same slip in a filing from before ASU 2016-18, whose change in cash runs between cash and cash equivalents
+    alone (GOOGL's 2019 first quarter, operating cash flow $1.2B against a genuine $12.0B): that change is tied to the
+    balances it runs between too, so the statement is held."""
+    records, seeded = _cash_flow_records(
+        factor,
+        change_tag="CashAndCashEquivalentsPeriodIncreaseDecrease",
+        cash_tag="CashAndCashEquivalentsAtCarryingValue",
+    )
+    held, _ = sec_scale.scale_errors(records)
+    assert {(c, 2025, "a") for c in seeded} - {"PaymentsForRepurchaseOfCommonStock"} <= {
+        (records[i].concept, records[i].period_end.year, records[i].accession) for i in held
+    }
+
+
+def _operating_rows() -> dict[str, tuple[float, ...]]:
+    """Operating income, non-operating income and the pre-tax income they add up to (synthetic, not any filer's)."""
+    operating = (60e9, 66e9, 70e9, 75e9, 80e9)
+    nonoperating = (2.1e9, 1.7e9, 2.6e9, 3.1e9, 2.4e9)
+    return {
+        "OperatingIncomeLoss": operating,
+        "NonoperatingIncomeExpense": nonoperating,
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": tuple(
+            o + n for o, n in zip(operating, nonoperating, strict=True)
+        ),
+    }
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1, -1.0])
+def test_non_operating_income_off_its_pre_tax_relation_is_held(factor: float) -> None:
+    """Pre-tax income = operating income + non-operating income closes exactly (MSFT FY2026: $155.237B + $10.697B =
+    $165.934B); non-operating income x10, /10 or flipped breaks it, and rescaling or flipping it alone closes it."""
+    records = _seeded({**_operating_rows(), **_genuine_lines()}, "NonoperatingIncomeExpense", factor, _YEARS)
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year) for i in held} == {("NonoperatingIncomeExpense", 2025)}
+    clean, _ = sec_scale.scale_errors(_seeded({**_operating_rows(), **_genuine_lines()}, set(), 1.0, _YEARS))
+    assert not clean
+
+
+@pytest.mark.parametrize("factor", [10.0, 0.1])
+def test_a_comparative_amount_exactly_ten_times_its_original_filing_is_held(factor: float) -> None:
+    """The newest filing's comparative cell for last year 10x or /10 off the figure last year's own filing reported
+    for the same period (AAPL equity at 2025-06-28 served at $658.3B): two filings exactly 10 apart are a slipped
+    decimal, not a restatement, and the one off the neighbouring periods is held."""
+    figures = (70_412e6, 74_937e6, 80_118e6, 84_309e6, 88_746e6, 90_215e6, 87_523e6, 85_631e6)  # synthetic
+    revenue = dict(zip(range(2018, 2026), figures, strict=True))
+    records: list[FundamentalFact] = []
+    for year in range(2019, 2026):  # each year's 10-K reports its year and the one before (synthetic figures)
+        cells = [("Revenues", y, revenue[y] * (factor if (year, y) == (2025, 2024) else 1.0)) for y in (year - 1, year)]
+        records += _filing(cells, accession=f"k{year}")
+    held, _ = sec_scale.scale_errors(_with_units(records))
+    assert {(records[i].period_end.year, records[i].accession) for i in held} == {(2024, "k2025")}
+
+
+def test_a_balance_sheet_with_every_sign_reversed_is_held() -> None:
+    """The newest balance sheet negated: assets, liabilities, debt and equity still add up, but assets and debt
+    cannot be negative; the balances that close with them oppose their history in sign, so equity is held with
+    them."""
+    liabilities = (195e9, 200e9, 210e9, 220e9, 230e9, 240e9)  # synthetic, not any filer's
+    equity = (98e9, 100e9, 104e9, 108e9, 112e9, 116e9)
+    total = tuple(a + b for a, b in zip(liabilities, equity, strict=True))
+    rows = {
+        "Assets": total,
+        "Liabilities": liabilities,
+        "StockholdersEquity": equity,
+        "LiabilitiesAndStockholdersEquity": total,
+        "LongTermDebtNoncurrent": (88e9, 90e9, 92e9, 95e9, 97e9, 99e9),
+    }
+    years = (2020, *_YEARS)
+    records = _seeded(rows, set(rows), -1.0, years, instants=True)
+    held, _ = sec_scale.scale_errors(records)
+    assert {(c, 2025) for c in rows} <= {(records[i].concept, records[i].period_end.year) for i in held}
+
+
+def test_net_and_comprehensive_income_flipped_beside_a_genuine_pre_tax_income_are_held() -> None:
+    """Net income, other comprehensive income, comprehensive income and EPS negated together: comprehensive income =
+    net income + OCI still closes, but net income = pre-tax income - tax no longer does, and flipping the bottom of
+    the statement closes it: it is held with EPS (MSFT FY2026 seeded so served diluted EPS -17.95)."""
+    income = (10e9, 11e9, 12e9, 13e9, 14e9)  # synthetic, not any filer's
+    oci = (0.4e9, -0.3e9, 0.5e9, 0.2e9, 0.6e9)
+    shares = (1e9, 1e9, 1e9, 1e9, 1e9)
+    rows = {
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": tuple(
+            n * 1.25 for n in income
+        ),
+        "IncomeTaxExpenseBenefit": tuple(n * 0.25 for n in income),
+        "NetIncomeLoss": income,
+        "OtherComprehensiveIncomeLossNetOfTax": oci,
+        "ComprehensiveIncomeNetOfTax": tuple(n + o for n, o in zip(income, oci, strict=True)),
+        "WeightedAverageNumberOfDilutedSharesOutstanding": shares,
+        "EarningsPerShareDiluted": tuple(round(n / s, 2) for n, s in zip(income, shares, strict=True)),
+    }
+    bottom = {"NetIncomeLoss", "OtherComprehensiveIncomeLossNetOfTax", "ComprehensiveIncomeNetOfTax"}
+    records = _seeded({**rows, **_genuine_lines()}, bottom | {"EarningsPerShareDiluted"}, -1.0, _YEARS)
+    held, _ = sec_scale.scale_errors(records)
+    got = {(records[i].concept, records[i].period_end.year) for i in held}
+    assert {("NetIncomeLoss", 2025), ("ComprehensiveIncomeNetOfTax", 2025), ("EarningsPerShareDiluted", 2025)} <= got
+
+
 @pytest.mark.parametrize("factor", [1.5, 0.7])
 def test_assets_off_liabilities_and_equity_by_any_factor_is_flagged(factor: float) -> None:
     """Assets x1.5 beside liabilities and equity: no rescale or flip explains the break, and a filer's own tagging
@@ -4059,6 +4167,101 @@ async def test_a_tenor_off_the_curve_on_every_day_is_quarantined(column: str, te
     assert not any(p.tenor == tenor for p in served)
     assert len(served) == sum(1 for p in clean.records if isinstance(p, TreasuryYieldPoint) and p.tenor != tenor)
     assert any("curve_shape" in w for w in resp.quality.warnings)
+
+
+@pytest.mark.parametrize(("rows", "factor"), [(2, 10.0), (3, 1000.0), (3, 0.1), (6, 1000.0)])
+async def test_cot_weeks_after_an_implausible_shift_that_stays_are_all_quarantined(rows: int, factor: float) -> None:
+    """Every position field and open interest of the newest weeks x10, x1000 or /10: each row still balances, and the
+    weeks after the first sit at the new level, so only the shift itself shows it; every week of the shift is held,
+    however many weeks share it, not only the week of the jump, and with the newest weeks held the response is too
+    old to serve."""
+    request = _plan(CftcAdapter, RequestKind.COT, report_type="disaggregated", futures_only=None)
+
+    def shifted(body: str) -> str:
+        data = json.loads(body)
+        for k in range(rows):
+            data[k] = {
+                key: (str(float(v) * factor) if ("positions" in key or key == "open_interest_all") else v)
+                for key, v in data[k].items()
+            }
+        return json.dumps(data)
+
+    with pytest.raises(Stale):
+        await _replay(CftcAdapter, request, {0: shifted})
+
+
+@pytest.mark.parametrize("factor", [1000.0, 100.0, 10.0, 3.0, 0.001])
+async def test_bars_keyed_in_another_unit_from_some_day_on_are_quarantined(factor: float) -> None:
+    """The newest six daily bars (open, high, low and close) multiplied by one factor: the move into them is beyond
+    any single-bar move and never comes back, so the bars after it are held however many there are, rather than
+    taken as a confirmed level shift."""
+    request = _plan(KrakenFuturesAdapter, RequestKind.BARS)
+    cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request))
+    candles_at = next(i for i, it in enumerate(cassette.interactions) if '"candles"' in it.body)
+
+    def seed(data: dict[str, Any]) -> None:
+        for c in data["candles"][-6:]:
+            for name in ("open", "high", "low", "close"):
+                c[name] = str(float(c[name]) * factor)
+
+    resp = await _replay(KrakenFuturesAdapter, request, {candles_at: _json_edit(seed)})
+    assert len(resp.quarantined) == 6
+    assert any("price_spikes" in w for w in resp.quality.warnings)
+
+
+@pytest.mark.parametrize("factor", [2.0, 0.1])
+async def test_the_whole_curve_keyed_in_another_unit_on_the_latest_days_is_quarantined(factor: float) -> None:
+    """Every tenor of the latest three days x2 or /10: each day's curve keeps its shape, and the move into those days
+    (several points) is far beyond any daily move, so all three days are held rather than taken as a new level, and
+    the response is refused as too old rather than served fresh."""
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+    clean = await _replay(TreasuryAdapter, request)
+
+    def latest(body: str) -> str:
+        rows = list(csv.DictReader(io.StringIO(body)))
+        newest = sorted(rows, key=lambda r: datetime.strptime(r["Date"], "%m/%d/%Y").replace(tzinfo=UTC))[-3:]
+        for row in newest:
+            for k in row:
+                if k != "Date" and row[k]:
+                    row[k] = f"{float(row[k]) * factor:.2f}"
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=list(rows[0]), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        return out.getvalue()
+
+    assert clean.records
+    with pytest.raises(Stale):  # the latest three days held: the newest curve left is too old to serve
+        await _replay(TreasuryAdapter, request, {0: latest})
+
+
+@pytest.mark.parametrize(
+    ("columns", "factor"),
+    [
+        (("7 Yr", "10 Yr"), 2.0),
+        (("20 Yr", "30 Yr"), 0.1),
+        (("2 Yr", "3 Yr", "5 Yr"), 0.1),
+        (("1 Mo", "1.5 Month", "2 Mo", "3 Mo", "4 Mo", "6 Mo"), 2.0),
+    ],
+)
+async def test_adjacent_tenors_off_the_curve_together_are_quarantined(columns: tuple[str, ...], factor: float) -> None:
+    """Adjacent tenors keyed in the wrong unit together on every day (7Y and 10Y doubled, the long end /10, the bills
+    doubled): each sits beside a tenor that shares its error, but the run sits off the band of the tenors around it,
+    so the run is quarantined on every day and the rest of the curve served."""
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+    clean = await _replay(TreasuryAdapter, request)
+    edits = [_tenor_edit(c, factor) for c in columns]
+
+    def apply(body: str) -> str:
+        for edit in edits:
+            body = edit(body)
+        return body
+
+    resp = await _replay(TreasuryAdapter, request, {0: apply})
+    tenors = {COLUMNS[c] for c in columns}
+    served = [p for p in resp.records if isinstance(p, TreasuryYieldPoint)]
+    assert not any(p.tenor in tenors for p in served)
+    assert len(served) == sum(1 for p in clean.records if isinstance(p, TreasuryYieldPoint) and p.tenor not in tenors)
 
 
 @pytest.mark.parametrize(("field", "factor"), [("high", 10.0), ("low", 0.1)])

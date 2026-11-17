@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -66,6 +67,10 @@ NYSE = ExchangeCalendar("XNYS")
 #: the nearer one by more than the two neighbours differ, at either end of the curve) is a bad print, even when every
 #: day's value of that tenor shares it: the recorded 2026 curves stay within 0.08 of the band.
 KINK_BOUND = 1.0
+#: A par yield moving more than this many percentage points in one day is a unit or decimal error, not a market move
+#: (the largest daily move of any tenor in the recorded 2026 file is 0.16 point); one that stays (the curve keyed x2
+#: or ÷10 from some day on) is held however many days share it (D-033).
+YIELD_IMPLAUSIBLE_MOVE = 1.5
 #: Consecutive publication days with an identical full curve that mean the source stopped updating.
 FROZEN_DAYS = 5
 URL = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{year}/all"
@@ -259,36 +264,61 @@ def _bad_prints_by_tenor(points: list[TreasuryYieldPoint], *, exclude: set[int])
     flagged: list[int] = []
     jumps: list[int] = []
     for idx in by_tenor.values():
-        scan = scan_spikes([points[i].yield_pct for i in idx])
-        flagged.extend(idx[j] for j in (*scan.bad_prints, *scan.unconfirmed))
+        scan = scan_spikes([points[i].yield_pct for i in idx], implausible=YIELD_IMPLAUSIBLE_MOVE)
+        flagged.extend(idx[j] for j in (*scan.bad_prints, *scan.unconfirmed, *scan.shifted))
         jumps.extend(idx[j] for j in scan.jumps)
     return sorted(flagged), sorted(jumps)
 
 
 def _kinked_tenors(points: list[TreasuryYieldPoint], *, exclude: set[int]) -> list[int]:
-    """Per day, yields off the curve their neighbouring tenors draw (KINK_BOUND): an inner tenor outside the band of
-    the tenors either side of it, an end tenor farther from the nearer one than the two nearest differ by."""
+    """Per day, yields off the curve the tenors around them draw (KINK_BOUND): a run of adjacent tenors (one or more)
+    all on one side of the band of the tenors either side of the run, or, at either end, all farther from the nearest
+    tenor beyond the run than that one and the next differ by. Adjacent tenors keyed in the wrong unit together
+    (7Y and 10Y x2, the bills ÷10) would vouch for each other against their immediate neighbours alone."""
     order = {tenor: k for k, tenor in enumerate(COLUMNS.values())}
     by_day: dict[datetime, list[int]] = {}
     for i, p in enumerate(points):
         if i not in exclude and p.tenor in order:
             by_day.setdefault(p.ts, []).append(i)
-    out: list[int] = []
+    out: set[int] = set()
     for idx in by_day.values():
         curve = sorted(idx, key=lambda i: order[points[i].tenor])
         values = [points[i].yield_pct for i in curve]
-        for k, v in enumerate(values):
-            if 0 < k < len(values) - 1:
-                a, b = values[k - 1], values[k + 1]
-                off = max(v - max(a, b), min(a, b) - v)
-            elif len(values) >= 3:
-                near, next_ = (values[1], values[2]) if k == 0 else (values[-2], values[-3])
-                off = abs(v - near) - abs(near - next_)
-            else:
-                continue
-            if off > KINK_BOUND:
-                out.append(curve[k])
+        off_curve: set[int] = set()  # positions in this day's curve
+        for size in range(1, len(values)):  # the smallest runs first: a run is judged by tenors that are on the curve
+            for lo in range(len(values) - size + 1):
+                hi = lo + size - 1
+                refs = _run_references(len(values), lo, hi)
+                if not refs or off_curve & {*range(lo, hi + 1), *refs}:
+                    continue
+                offs = _run_offsets(values, lo, hi, refs)
+                if all(o > KINK_BOUND for o in offs) or all(o < -KINK_BOUND for o in offs):
+                    off_curve.update(range(lo, hi + 1))
+        out.update(curve[k] for k in off_curve)
     return sorted(out)
+
+
+def _run_references(count: int, lo: int, hi: int) -> tuple[int, int] | None:
+    """The tenors a run of positions lo..hi is judged by: the one either side, or at an end the two nearest beyond it
+    (None when too few tenors lie outside)."""
+    if lo > 0 and hi < count - 1:
+        return lo - 1, hi + 1
+    if lo == 0 and hi <= count - 3:
+        return hi + 1, hi + 2
+    if hi == count - 1 and lo >= 2:
+        return lo - 1, lo - 2
+    return None
+
+
+def _run_offsets(values: list[float], lo: int, hi: int, refs: tuple[int, int]) -> list[float]:
+    """Signed distances of values[lo..hi] from the curve their reference tenors draw: outside the band of the tenors
+    either side, or at an end beyond the nearest one by more than the two nearest differ by."""
+    run = values[lo : hi + 1]
+    a, b = values[refs[0]], values[refs[1]]
+    if lo > 0 and hi < len(values) - 1:
+        return [v - max(a, b) if v > max(a, b) else v - min(a, b) if v < min(a, b) else 0.0 for v in run]
+    spread = abs(a - b)
+    return [math.copysign(max(abs(v - a) - spread, 0.0), v - a) for v in run]
 
 
 def _missing_business_days(days: list[datetime]) -> CheckResult:

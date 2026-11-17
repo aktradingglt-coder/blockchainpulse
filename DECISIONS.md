@@ -201,14 +201,20 @@ the time. §5.4 does not list fixed-width bars; the daily-bar rule (1 missed bar
 extreme change (robust z > 10 on log returns, MAD with a mean-absolute-deviation fallback) that comes back within two
 points is a bad print and is quarantined. An extreme move in the last two points, or in the first two, cannot be told
 apart from a bad print and is quarantined as *unconfirmed* until later bars confirm it; confirmed level shifts are
-kept with a warning. A move beyond ×10 in one bar is implausible, so its run and its confirmation extend to five
-points (three bad ticks in a row are not a market move). Volume is quarantined only when 100× away from the series'
-median. Macro series: values outside the series' physical range and reverting outliers are quarantined. For *flow*
+kept with a warning. A move beyond ×2.5 in one bar (a Treasury par yield: 1.5 points in a day) is implausible, so
+its run and its confirmation extend to five points (three bad ticks in a row are not a market move), and one that
+does not come back, with no other extreme move after it, is never confirmed: every point after it is quarantined
+however many share it, as the series was keyed in another unit from there (round 27: the newest six Kraken bars
+×1000, ×10, ×3 or ÷1000, and the whole curve ×2 or ÷10 on its latest three days, were served as confirmed shifts).
+The largest daily move of any tenor in the recorded 2026 Treasury file is 0.16 point. Volume is quarantined only when
+100× away from the series' median. Macro series: values outside the series' physical range and reverting outliers are quarantined. For *flow*
 statistics (monthly/quarterly releases such as unemployment or GDP) an extreme *latest* release is kept with a
 warning. *Levels* — EIA weekly quantities, COT open interest, and daily market series such as FRED yields, FX and
 commodity prices — are judged on relative changes and treated like prices: an extreme latest move is held until
 later observations confirm it (P1 review rounds 3 and 5). Open interest is held only beyond ×3/÷3 (expiry rolls of
-20–40% are shown and flagged).
+20–40% are shown and flagged); a move beyond ×3 that stays holds every week after it, not only the week of the jump
+(round 27: every field of the newest two weeks ×10, which still balances, served the second week fresh). Holding the
+newest points can leave a response too old to serve: it is then refused as stale rather than served fresh.
 Non-finite numbers are refused by every canonical schema.
 **Alternatives.** Quarantine only interior two-sided spikes (the original rule); quarantine every extreme latest
 value, macro included.
@@ -243,7 +249,10 @@ terms allow display but forbid derived data, which the three-tag model could not
   file runs newest first, so a cut between rows loses the year's oldest days) (P1 review round 24). A tenor's yield
   more than 1.0 percentage point outside the band its neighbouring tenors draw that day (an end tenor: farther from
   the nearer neighbour than the two nearest differ, by more than 1.0) is quarantined, even when every day's value of
-  that tenor shares it (the 10-year divided by 10, the 2-year doubled). Measured only on the recorded 2026 file (201
+  that tenor shares it (the 10-year divided by 10, the 2-year doubled). The same holds for a run of adjacent tenors
+  all on one side of the band of the tenors around the run (at an end, all beyond the two nearest tenors outside it),
+  judged smallest run first and only against tenors still on the curve, so tenors keyed in the wrong unit together
+  do not vouch for each other (round 27: 7Y and 10Y doubled, 20Y and 30Y ÷10, 2Y–5Y ÷10, the bills doubled). Measured only on the recorded 2026 file (201
   days): genuine curves stay within 0.08 of the band; the Treasury host is not reachable from the build environment
   for a longer calibration (STATUS) (P1 review round 26).
 - COT: both the long and the short side (with spreading) must sum to open interest; rows for another market are
@@ -295,7 +304,10 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    ≥ 10^1, judged without the disputing filings' own values) is kept; groups a power of 1000 from it are held. When
    the neighbours do not decide, a group two or more filings report beats a single filing's value; otherwise both
    filings' facts of that concept are held. A filing is held whole when most of what it shares with
-   other filings is a power of 1000 off.
+   other filings is a power of 1000 off. Currency amounts of $1M or more with four significant digits that two filings
+   report exactly 10 or 100 apart (within 10^0.0005) are a slipped decimal too, judged by half a step (round 27: the
+   newest filing's comparative equity, assets and revenue ×10 or ÷10 were served); per-share amounts and share counts
+   are restated exactly by splits, and WFC's fees rounded to $1M and $10M sit exactly 10 apart in clean data.
 3. *Sums across periods.* Year to date = earlier year to date + latest quarter, the parts usually from different
    filings. A sum that rescaling one filing's facts by 10, 100, 1/10 or 1/100 makes hold exactly (within 0.1% of its
    smallest term) holds that filing's facts when they sit on the slip's side of their history and the other filing's
@@ -322,7 +334,9 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
      tagged as the NCI's share of net income (288 of 406: C 149 of 149, GE 135 of 233, MMM 4 of 24); income from
      continuing operations (or profit, or net
      income) = pre-tax income − tax, with equity-method income added after tax where the pre-tax line excludes it;
-     pre-tax income = revenue − costs and expenses; operating income = gross profit − operating expenses, and =
+     pre-tax income = revenue − costs and expenses, and = operating income + non-operating income (1,327 of 1,383
+     clean instances within 0.1%: AAPL 228, MSFT 221, MMM 225, AMZN 225, GOOGL 143, NVDA 123 of as many, META 162
+     of 178, GE 0 of 40; round 27); operating income = gross profit − operating expenses, and =
      revenue − costs and expenses; a bank's revenue = net interest income + noninterest income (588 of 588 clean
      instances within 0.1%), and so is its net revenue where tagged as such (223 of 223, JPM and WFC); a bank's
      pre-tax income = net revenue (either total, or its two parts) − provision for credit losses − noninterest expense
@@ -414,6 +428,15 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    lines that sit on their history at the slipped value. A lone term of another rollforward is left alone: trying
    flips on GE's and TSLA's goodwill rollforwards (filers report the goodwill change under either sign) held 34
    genuine facts.
+   Before restricted cash joined the statement (filings before 2018), the change in cash runs between cash and cash
+   equivalents alone, and that tie is checked too (969 of 987 clean instances close; round 27: whole cash-flow
+   statements ÷10 in 2015 and 2019 as-of snapshots were served at AAPL, GOOGL, XOM, TSLA and others). The bottom of
+   an income statement flipped together (net and comprehensive income, OCI, EPS) closes its own relations and breaks
+   only net income = pre-tax income − tax: a flip is tried there from net, comprehensive or continuing-operations
+   income, grown along the relations that close as reported, and held when it closes that relation exactly. A held
+   non-operating line does not carry the relations it closes into its totals (it swings on its own, and a slipped
+   one is repaired by its relation): AMZN's genuine 2026 non-operating income, held beside an earlier filing ÷1000,
+   otherwise carried its whole genuine half-year statement.
    A broken relation that nothing above explains, in a relation the filer's other filings close (at least four other
    instances, 95% of them within 1%), shows a figure entered wrong by some other factor (assets ×1.5 beside
    liabilities and equity), but it cannot be told from the filer's own tagging of that period: holding such breaks
@@ -490,11 +513,16 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
     expense, common stock at par and share counts, and (round 26) operating expenses and their lines (costs and
     expenses, R&D, SG&A, G&A, selling and marketing, advertising, labour, share-based compensation expense, a bank's
     operating and deposit interest expense), depreciation and amortization, capital expenditure, dividends paid and
-    interest paid (44 concepts; of 50,195 clean facts in 10-K and 10-Q filings and their amendments (49,873 and 322),
+    interest paid, and (round 27) 33 balance-sheet lines (non-current and current debt, non-current liabilities,
+    lease liabilities and right-of-use assets, accrued, other and employee liabilities, other assets, deferred revenue,
+    marketable and held-to-maturity securities, trading securities, commercial paper and short-term borrowings,
+    deposits, net loans, paid-in capital and repurchase agreements; equity, retained earnings, treasury stock,
+    minority interest and deferred taxes are reported negative by some) (77 concepts; of 66,747 clean facts in 10-K and
+    10-Q filings and their amendments (66,322 and 425),
     counted in every taxonomy before the adapter's own filters, one is negative: a
     Citi Q4-2020 cost of revenue of −$46M, held with its annual figure;
     total `Revenues` and a bank's net revenue are left out, as asset managers can report them negative). A flow held
-    here seeds the search for a statement keyed with every sign reversed, whose identities still close: the facts
+    here (a flow or a balance) seeds the search for a statement keyed with every sign reversed, whose identities still close: the facts
     grown from it along the relations that close as reported are held with it when 60% of those with history oppose
     it in sign (XOM's 2026 first quarter seeded with every sign reversed: revenue at −$85.1B is reached from costs
     and expenses through pre-tax income), and an EPS whose product with shares has the sign of a held net income that

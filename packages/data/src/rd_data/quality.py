@@ -201,8 +201,11 @@ MAX_BAD_RUN = 2
 #: For an implausible move (beyond ``implausible`` in :func:`scan_spikes`, e.g. x10 in one bar) the run, and the
 #: confirmation a genuine shift needs, extend to this many points: three bad ticks in a row are not a market move.
 LONG_BAD_RUN = 5
-#: A single-bar price move beyond x10 (or ÷10) is implausible for any instrument we cover (D-031).
-IMPLAUSIBLE_LOG_MOVE = math.log(10.0)
+#: A single-bar price move beyond x2.5 (or ÷2.5) is implausible for any instrument we cover (D-031): it is a unit or
+#: decimal error, and one that stays (a column keyed in the wrong unit from some bar on) is held, not confirmed.
+IMPLAUSIBLE_LOG_MOVE = math.log(2.5)
+#: Volume bursts of 10x are ordinary; only a bar 100x away from the series' median volume is a bad tick.
+VOLUME_LOG_BOUND = math.log(100.0)
 #: A week-on-week open-interest move beyond x3 (or /3) is a corrupted row, not an expiry roll.
 OI_IMPLAUSIBLE_LOG_MOVE = math.log(3.0)
 #: A high this many times the bar's larger of open and close, or a low this fraction of the smaller, is a bad print
@@ -219,6 +222,7 @@ class SpikeScan:
     bad_prints: tuple[int, ...] = ()  # extreme move that reverses within MAX_BAD_RUN points
     unconfirmed: tuple[int, ...] = ()  # extreme move at either end of the series that cannot be confirmed yet
     jumps: tuple[int, ...] = ()  # extreme move confirmed by more than MAX_BAD_RUN later points
+    shifted: tuple[int, ...] = ()  # the points after an implausible move that stays: never confirmed by its run
 
 
 def scan_spikes(
@@ -230,7 +234,9 @@ def scan_spikes(
     :data:`MAX_BAD_RUN` points. One that does not come back is a genuine level shift once more than
     :data:`MAX_BAD_RUN` points sit at the new level; with fewer (at the end of the series), or when the shift is
     within the first :data:`MAX_BAD_RUN` points, it is *unconfirmed*: the move cannot be told apart from a bad print.
-    Changes larger than ``implausible`` (absolute, in the units of ``levels``) use :data:`LONG_BAD_RUN` instead.
+    Changes larger than ``implausible`` (absolute, in the units of ``levels``) use :data:`LONG_BAD_RUN` instead, and
+    one that does not come back, with no other extreme move after it, is *shifted*: the series was keyed in another
+    unit from that point on, however many points share it (a genuine move of that size does not happen in one step).
     """
     n = len(levels)
     if n < 11:
@@ -240,15 +246,19 @@ def scan_spikes(
     bad: set[int] = set()
     unconfirmed: set[int] = set()
     jumps: list[int] = []
+    shifted: set[int] = set()
     return_legs: set[int] = set()
     for k, is_extreme in enumerate(extreme):
         if not is_extreme or k in return_legs:
             continue
-        limit = LONG_BAD_RUN if implausible is not None and abs(changes[k]) > implausible else MAX_BAD_RUN
+        wild = implausible is not None and abs(changes[k]) > implausible
+        limit = LONG_BAD_RUN if wild else MAX_BAD_RUN
         run = _reversal_run(levels, changes, extreme, k, limit)
         if run:
             bad.update(range(k + 1, k + 1 + run))
             return_legs.add(k + run)
+        elif wild and k + 1 > limit and not any(extreme[k + 1 :]):
+            shifted.update(range(k + 1, n))
         elif k + 1 <= limit:
             unconfirmed.update(range(k + 1))  # the first point(s) may be the bad print: nothing before to compare
         elif n - 1 - k <= limit:
@@ -258,8 +268,9 @@ def scan_spikes(
     return SpikeScan(
         evaluated=True,
         bad_prints=tuple(sorted(bad)),
-        unconfirmed=tuple(sorted(unconfirmed - bad)),
+        unconfirmed=tuple(sorted(unconfirmed - bad - shifted)),
         jumps=tuple(jumps),
+        shifted=tuple(sorted(shifted - bad)),
     )
 
 
@@ -292,11 +303,12 @@ def check_price_spikes(closes: Sequence[float], *, threshold: float = OUTLIER_Z)
         )
         return skipped, _ok("large_moves", "not evaluated", blocking=False)
     scan = scan_spikes([math.log(c) for c in closes], threshold=threshold, implausible=IMPLAUSIBLE_LOG_MOVE)
-    quarantined = tuple(sorted({*scan.bad_prints, *scan.unconfirmed}))
+    quarantined = tuple(sorted({*scan.bad_prints, *scan.unconfirmed, *scan.shifted}))
     spike_res = (
         _fail(
             "price_spikes",
-            f"{len(scan.bad_prints)} bad print(s) and {len(scan.unconfirmed)} unconfirmed extreme move(s) quarantined",
+            f"{len(scan.bad_prints)} bad print(s), {len(scan.unconfirmed)} unconfirmed extreme move(s) and "
+            f"{len(scan.shifted)} bar(s) after an implausible move that stayed quarantined",
             blocking=False,
             indices=quarantined,
         )
@@ -328,7 +340,7 @@ def check_field_spikes(bars: Sequence[Bar], *, threshold: float = OUTLIER_Z) -> 
         if len(values) < 11 or any(v <= 0 for v in values):
             continue
         scan = scan_spikes([math.log(v) for v in values], threshold=threshold, implausible=IMPLAUSIBLE_LOG_MOVE)
-        hits = {*scan.bad_prints, *scan.unconfirmed}
+        hits = {*scan.bad_prints, *scan.unconfirmed, *scan.shifted}
         if hits:
             flagged[name] = hits
     wicks = {
@@ -341,10 +353,9 @@ def check_field_spikes(bars: Sequence[Bar], *, threshold: float = OUTLIER_Z) -> 
         flagged["wick"] = wicks
     volumes = [b.volume for b in bars]
     if len(volumes) >= 11 and all(v is not None and v > 0 for v in volumes):
-        # Volume bursts of 10x are ordinary; only a bar 100x away from the series' median volume is a bad tick.
         logs = [math.log(v) for v in volumes if v is not None]
         mid = statistics.median(logs)
-        hits = {i for i, v in enumerate(logs) if abs(v - mid) > 2 * IMPLAUSIBLE_LOG_MOVE}
+        hits = {i for i, v in enumerate(logs) if abs(v - mid) > VOLUME_LOG_BOUND}
         if hits:
             flagged["volume"] = hits
     indices = tuple(sorted(set().union(*flagged.values()))) if flagged else ()
@@ -648,14 +659,15 @@ def check_series(
 def check_open_interest_moves(reports: Sequence[PositioningReport]) -> tuple[CheckResult, CheckResult]:
     """Open interest is a stock of contracts: judged on relative weekly changes like an inventory (D-031).
 
-    Returns (quarantine, warning): reverting outliers and unconfirmed extreme latest weeks (e.g. every field x10, which
-    still balances) are quarantined; confirmed extreme moves are flagged. ``reports`` must be in date order.
+    Returns (quarantine, warning): reverting outliers and unconfirmed extreme latest weeks beyond x3 are quarantined,
+    and so is every week after a move beyond x3 that stays (e.g. every field x10 from some week on, which still
+    balances), however many weeks share it; confirmed extreme moves are flagged. ``reports`` must be in date order.
     """
     levels = [r.open_interest for r in reports]
     if any(v <= 0 for v in levels):
         return _ok("open_interest_outliers", "not evaluated", blocking=False), _ok("large_moves", blocking=False)
     logs = [math.log(v) for v in levels]
-    scan = scan_spikes(logs, implausible=IMPLAUSIBLE_LOG_MOVE)
+    scan = scan_spikes(logs, implausible=OI_IMPLAUSIBLE_LOG_MOVE)
 
     def implausible(i: int) -> bool:
         # Quarterly expiry routinely moves open interest by 20-40% in a week (and it rebuilds afterwards); only a
@@ -663,7 +675,8 @@ def check_open_interest_moves(reports: Sequence[PositioningReport]) -> tuple[Che
         neighbours = [abs(logs[i] - logs[j]) for j in (i - 1, i + 1) if 0 <= j < len(logs)]
         return max(neighbours, default=0.0) > OI_IMPLAUSIBLE_LOG_MOVE
 
-    held = tuple(sorted(i for i in {*scan.bad_prints, *scan.unconfirmed} if implausible(i)))
+    # a shift beyond x3 that stays is held whole, not only its first week (every field x10 still balances)
+    held = tuple(sorted({*(i for i in {*scan.bad_prints, *scan.unconfirmed} if implausible(i)), *scan.shifted}))
     flagged = tuple(sorted({*scan.jumps, *(i for i in {*scan.bad_prints, *scan.unconfirmed} if i not in held)}))
     quarantine = (
         _fail("open_interest_outliers", f"{len(held)} week(s) quarantined", blocking=False, indices=held)
