@@ -90,7 +90,7 @@ _CASH_FLOW_ADJUSTMENT = re.compile(
 #: Facts a statement identity relates, per filing period, at least this many with history, before a statement can be
 #: judged as moved against its history (STATEMENT_SHIFT_SHARE of them by the same decimal step or reversed in sign).
 STATEMENT_SHIFT_MIN = 6
-STATEMENT_SHIFT_SHARE = 0.75
+STATEMENT_SHIFT_SHARE = 0.6
 PREVIOUS_WINDOW_DAYS = 400
 #: A currency fact larger than this multiple of the company's own total assets is held. Across about 400,000 clean
 #: us-gaap facts of 15 large filers, outside revenue and cost lines, the largest ratio is 1.5 (XOM gross PP&E); the only
@@ -965,9 +965,18 @@ def _statement_faces(records: list[FundamentalFact]) -> dict[tuple[str, date | N
             f = records[k]
             family = "balance" if f.period_start is None else _statement_family(f)
             faces.setdefault((f.accession, f.period_start, f.period_end, family), set()).add(k)
-    for i, f in enumerate(records):
-        key = (f.accession, f.period_start, f.period_end, "cash_flow")
-        if f.period_start is not None and key in faces and _CURRENCY.match(f.unit) and _statement_family(f) == key[3]:
+    flows = [
+        (i, (f.accession, f.period_start, f.period_end, "cash_flow"))
+        for i, f in enumerate(records)
+        if f.period_start is not None and _CURRENCY.match(f.unit) and _statement_family(f) == "cash_flow"
+    ]
+    # a period that reports a cash-flow total has a cash-flow statement even where its identity does not form (WFC
+    # tags no change in cash that the identity takes)
+    for i, key in flows:
+        if _CASH_FLOW_TOTAL.match(records[i].concept):
+            faces.setdefault(key, set())
+    for i, key in flows:
+        if key in faces:
             faces[key].add(i)
     return faces
 
