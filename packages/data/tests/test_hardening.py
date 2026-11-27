@@ -4398,7 +4398,7 @@ async def test_a_treasury_curve_for_a_session_not_yet_quoted_is_refused() -> Non
     session has not happened yet, so the row is refused like the other sources' future rows, not served fresh."""
     request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
     clean = await _replay(TreasuryAdapter, request)
-    assert clean.as_of is not None
+    assert isinstance(clean.as_of, datetime)
     nyse = ExchangeCalendar("XNYS")
     next_day = nyse.closes_after(clean.as_of.date(), 1)[0].date()
 
@@ -4413,7 +4413,7 @@ async def test_a_treasury_curve_for_a_session_not_yet_quoted_is_refused() -> Non
         await _replay(TreasuryAdapter, request, {0: add_row}, now=morning)
     evening = datetime.combine(next_day, datetime.min.time(), tzinfo=UTC) + timedelta(hours=22)
     served = await _replay(TreasuryAdapter, request, {0: add_row}, now=evening)
-    assert served.as_of is not None
+    assert isinstance(served.as_of, datetime)
     assert served.as_of.date() == next_day
 
 
