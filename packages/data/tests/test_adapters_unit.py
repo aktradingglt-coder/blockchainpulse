@@ -271,7 +271,7 @@ def _eia_body() -> dict[str, Any]:
         {
             "period": f"2026-10-{d:02d}",
             "series": "WCESTUS1",
-            "value": str(420 + d),
+            "value": str(420_000 + 100 * d),  # synthetic, at the scale of U.S. crude stocks (thousand barrels)
             "units": "MBBL",
             "series-description": "U.S. Ending Stocks excluding SPR of Crude Oil",
         }
@@ -288,7 +288,7 @@ async def test_eia_requires_key_then_parses(ctx_factory: Any) -> None:
     key = "eia-test-" + "k" * 20
     ctx, rec = ctx_factory(_json(_eia_body()), eia_api_key=key)
     resp = await EiaAdapter(ctx).fetch(req)
-    assert [o.value for o in of_type(resp.records, MacroObservation)] == [422.0, 429.0, 436.0]
+    assert [o.value for o in of_type(resp.records, MacroObservation)] == [420_200.0, 420_900.0, 421_600.0]
     assert resp.freshness is not None
     assert resp.freshness.status is Freshness.FRESH
     assert key not in " ".join(resp.source_urls)

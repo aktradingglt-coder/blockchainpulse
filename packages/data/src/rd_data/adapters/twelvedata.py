@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, ClassVar
 
 import orjson
@@ -26,7 +26,7 @@ from rd_data.adapters.base import (
 from rd_data.errors import DataQualityError, InvalidArgs, LicenceBlocked, NotFound, ProviderDown, RateLimited
 from rd_data.freshness import ContinuousCalendar, ExchangeCalendar, TradingCalendar, WeekdayCalendar
 from rd_data.licence import byo_key_only
-from rd_data.quality import QA_CONTEXT, DataQualityReport, check_bars, check_provider_order
+from rd_data.quality import QA_CONTEXT, CheckResult, DataQualityReport, check_bars, check_provider_order
 from rd_data.resilience import RateLimit
 from rd_data.schemas import AssetClass, Bar, DataType
 
@@ -152,6 +152,10 @@ class TwelveDataAdapter(BaseAdapter):
             raise NotFound(f"twelvedata: no closed {interval} bars for {symbol}", provider=self.name)
         order = check_provider_order([b.ts for b in bars], descending=False)  # requested order=ASC
         bars.sort(key=lambda b: b.ts)
+        # a daily bar dated a day the market does not trade is not a session's bar (a phantom bar would otherwise
+        # stand in a window of genuine ones, or date the response): held
+        off_session = [b for b in bars if interval == "1d" and not _trades_on(b.ts.date(), asset_class)]
+        bars = [b for b in bars if b not in off_session]
         report, usable = check_bars(
             bars,
             subject=f"twelvedata:{symbol}:{interval}",
@@ -162,11 +166,23 @@ class TwelveDataAdapter(BaseAdapter):
             rejected_rows=rejected,
             split_dates=[] if asset_class == "equity" else None,
         )
-        report = DataQualityReport(report.subject, (order, *report.checks), report.quarantined, report.record_count)
+        off_check = CheckResult(
+            "off_session",
+            passed=not off_session,
+            blocking=False,
+            detail=f"{len(off_session)} daily bar(s) dated a day the market does not trade quarantined"
+            if off_session
+            else "ok",
+        )
+        report = DataQualityReport(
+            report.subject, (order, off_check, *report.checks), report.quarantined, report.record_count
+        )
         wanted = int(request.params.get("outputsize", 200))
         first = bars[-wanted:][0].ts if bars else fetched  # the bars asked for, held ones included
         window = [b for b in usable if b.ts >= first]  # held bars leave a hole; the window never reaches further back
-        quarantined = tuple(b for b in bars if b not in usable and b.ts >= first)
+        quarantined = tuple(
+            sorted((b for b in [*bars, *off_session] if b not in usable and b.ts >= first), key=lambda b: b.ts)
+        )
         usable = window
         as_of = usable[-1].ts if usable else None
         delay = self.licence.delay_minutes  # the plan's delay, from the recorded terms, never from the caller
@@ -184,6 +200,21 @@ class TwelveDataAdapter(BaseAdapter):
     @staticmethod
     def recording_plan() -> list[DataRequest]:
         return [DataRequest(kind=RequestKind.BARS, params={"symbol": "EUR/USD", "interval": "1d", "outputsize": 30})]
+
+
+#: datetime.weekday() of Saturday.
+SATURDAY = 5
+_NYSE = ExchangeCalendar("XNYS")
+
+
+def _trades_on(day: date, asset_class: str) -> bool:
+    """Whether a daily bar can be dated ``day``: an NYSE session for equities; not a Saturday for FX and commodities
+    (some vendors print a short Sunday-evening FX bar); any day for crypto."""
+    if asset_class == "crypto":
+        return True
+    if asset_class == "equity":
+        return _NYSE.closes_after(day - timedelta(days=1), 1)[0].date() == day
+    return day.weekday() != SATURDAY
 
 
 def _closes_at(ts: datetime, interval: str, width: timedelta, cal: TradingCalendar) -> datetime:

@@ -5043,3 +5043,149 @@ async def test_a_suspended_kraken_contract_is_not_shown() -> None:
     resp = await _derivatives(suspend)
     assert {m.symbol for m in resp.records if isinstance(m, CryptoDerivativeMetric)} == {"ETH/USD:USD"}
     assert any(w.startswith("stale_symbols") for w in resp.quality.warnings)
+
+
+# ------------------------------------------------------------------------------------- review round 32 (P1)
+
+
+def _quarterly_flows(concept: str, quarters: dict[tuple[int, int], float]) -> list[FundamentalFact]:
+    """Each quarter's 10-Q reports its quarter and its year to date (synthetic figures in $M, not any filer's)."""
+    ends = {1: "03-31", 2: "06-30", 3: "09-30"}
+    starts = {1: "01-01", 2: "04-01", 3: "07-01"}
+    out = []
+    for (year, q), value in sorted(quarters.items()):
+        accession = f"{year}q{q}"
+        filed = date.fromisoformat(f"{year}-{ends[q]}") + timedelta(days=35)
+        ytd = sum(v for (y, k), v in quarters.items() if y == year and k <= q)
+        for start, amount in ((f"{year}-{starts[q]}", value), (f"{year}-01-01", ytd)):
+            if q == 1 and start != f"{year}-{starts[q]}":
+                continue
+            fact = FundamentalFact(
+                cik="0000000001", concept=concept, taxonomy="us-gaap", unit="USD", value=amount * 1e6,
+                period_start=date.fromisoformat(start), period_end=date.fromisoformat(f"{year}-{ends[q]}"),
+                form="10-Q", filed=filed, accession=accession,
+            )  # fmt: skip
+            out.append(fact)
+    return out
+
+
+@pytest.mark.parametrize(("concept", "factor"), [("Revenues", 10.0), ("Revenues", -1.0), ("CostOfRevenue", 10.0),
+                                                 ("OperatingIncomeLoss", -1.0), ("Revenues", 0.1)])  # fmt: skip
+def test_one_quarter_slipped_beside_its_genuine_year_to_date_is_held(concept: str, factor: float) -> None:
+    """The newest 10-Q's quarter keyed 10x, a tenth or with its sign reversed while its own nine months stay genuine
+    (so rescaling the whole filing cannot repair the sum): nine months = the half-year before + the quarter holds
+    again when that one fact is rescaled, and it sits that step (or sign) off its history, so it is held (with its
+    table sibling, the nine months beside it)."""
+    quarters = {(2025, 1): 16_271.0, (2025, 2): 16_743.0, (2025, 3): 17_282.0,
+                (2026, 1): 17_105.0, (2026, 2): 17_788.0, (2026, 3): 18_085.0}  # fmt: skip
+    records = _quarterly_flows(concept, quarters)
+    target = next(
+        i for i, f in enumerate(records)
+        if f.accession == "2026q3" and f.period_start == date(2026, 7, 1)
+    )  # fmt: skip
+    slipped = [r.model_copy(update={"value": r.value * factor}) if i == target else r for i, r in enumerate(records)]
+    held, _ = sec_scale.scale_errors(slipped)
+    assert target in held
+    # with it only its table sibling (the same filing's genuine nine months to the same date: a scale is set per table)
+    assert all(slipped[i].accession == "2026q3" and slipped[i].period_end == date(2026, 9, 30) for i in held)
+    clean, _ = sec_scale.scale_errors(records)
+    assert not clean
+
+
+@pytest.mark.parametrize("seed", ["copy1", "copy3", "milli", "wednesday"])
+async def test_eia_stalled_feed_unit_slip_and_off_cadence_weeks_are_caught(ctx_factory: Any, seed: str) -> None:
+    """Crude stocks (thousand barrels, never repeating to the barrel) with the newest week, or three, copied from the
+    week before; the whole series in million barrels under the same unit; the newest week dated a Wednesday: copies
+    and the off-cadence week are held, the unit slip falls under the series' floor and is refused."""
+    values = _crude()
+    if seed.startswith("copy"):
+        n = int(seed[-1])
+        for k in range(len(values) - n, len(values)):
+            values[k] = values[len(values) - n - 1]
+    if seed == "milli":
+        values = [(v or 0.0) / 1000 for v in values]
+    body = _eia_body(values)
+    if seed == "wednesday":
+        body["response"]["data"][0]["period"] = "2026-10-14"
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=body), **SETTINGS)
+    adapter = EiaAdapter(ctx)
+    request = DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1"})
+    try:
+        if seed == "milli":
+            with pytest.raises(DataQualityError, match="every record was quarantined"):
+                await adapter.fetch(request)
+            return
+        try:
+            resp = await adapter.fetch(request)
+        except Stale:
+            return
+    finally:
+        await adapter.aclose()
+    assert resp.as_of == datetime(2026, 10, 9, tzinfo=UTC)
+    assert any(w.startswith(("copied_rows", "cadence_day")) for w in resp.quality.warnings)
+
+
+async def test_twelvedata_bars_on_days_the_market_does_not_trade_are_held(ctx_factory: Any) -> None:
+    """An equity's daily bars with an extra bar on a Saturday and on Labor Day (synthetic prices): neither is a
+    session's bar, so both are held and the genuine bars served."""
+    sessions = [d for d in (date(2026, 9, 1) + timedelta(days=k) for k in range(50)) if d.weekday() < 5]
+    sessions = [d for d in sessions if d != date(2026, 9, 7)]
+    days = sorted([*sessions, date(2026, 9, 7), date(2026, 10, 3)])
+
+    def bar(k: int, d: date) -> dict[str, str]:
+        o, c = 100 + math.sin(k), 100 + math.cos(k)
+        return {"datetime": d.isoformat(), "open": f"{o:.3f}", "high": f"{max(o, c) + 1:.3f}",
+                "low": f"{min(o, c) - 1:.3f}", "close": f"{c:.3f}", "volume": str(1000 + k)}  # fmt: skip
+
+    values = [bar(k, d) for k, d in enumerate(days)]
+    body = {"meta": {"symbol": "AAPL", "interval": "1day", "type": "Common Stock"}, "values": values, "status": "ok"}
+    ctx, _ = ctx_factory(
+        lambda _r: httpx.Response(200, json=body),
+        now=datetime(2026, 10, 20, 22, tzinfo=UTC),
+        flags={"provider_twelvedata": True},
+        **SETTINGS,
+    )
+    adapter = TwelveDataAdapter(ctx)
+    try:
+        resp = await adapter.fetch(DataRequest(kind=RequestKind.BARS, params={"symbol": "AAPL", "interval": "1d"}))
+    finally:
+        await adapter.aclose()
+    shown = {b.ts.date() for b in resp.records if isinstance(b, Bar)}
+    assert date(2026, 10, 3) not in shown
+    assert date(2026, 9, 7) not in shown
+    assert any(w.startswith("off_session") for w in resp.quality.warnings)
+
+
+@pytest.mark.parametrize("seed", ["last3", "open", "middle"])
+async def test_kraken_candles_that_break_the_open_close_chain_are_held(seed: str) -> None:
+    """Kraken's candles open at the previous close (59 of 59 recorded): the newest three keyed x0.9, the newest open
+    x1.15, or a middle candle x1.1 all break the chain, so the bars in doubt are held and none of the seeded figures
+    served."""
+    request = _plan(KrakenFuturesAdapter, RequestKind.BARS)
+    clean = await _replay(KrakenFuturesAdapter, request)
+    truth = {b.ts: b for b in clean.records if isinstance(b, Bar)}
+
+    def edit(data: dict[str, Any]) -> None:
+        candles = data.get("candles")
+        if not isinstance(candles, list):
+            return
+        picks = {"last3": range(len(candles) - 3, len(candles)), "open": [len(candles) - 1], "middle": [40]}[seed]
+        for k in picks:
+            c = candles[k]
+            if seed == "open":
+                c["open"] = str(float(c["open"]) * 1.15)
+                c["high"] = str(max(float(c["high"]), float(c["open"])))
+            else:
+                factor = 0.9 if seed == "last3" else 1.1
+                for f in ("open", "high", "low", "close"):
+                    c[f] = str(float(c[f]) * factor)
+
+    cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request))
+    try:
+        resp = await _replay(
+            KrakenFuturesAdapter, request, {i: _json_edit(edit) for i in range(len(cassette.interactions))}
+        )
+    except Stale:
+        return
+    served = [b for b in resp.records if isinstance(b, Bar)]
+    assert all(b == truth[b.ts] for b in served)

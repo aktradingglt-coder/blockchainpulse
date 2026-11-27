@@ -6,6 +6,7 @@ and cassettes by :mod:`rd_data.http`. Responses cap at 5,000 rows; we request at
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -55,6 +56,10 @@ class SeriesInfo:
     stock: bool = True
     #: Largest physically possible change in one week (well above any recorded weekly build or draw, D-033).
     max_step: float | None = None
+    #: A count to the unit (thousand barrels) that never repeats exactly from one week to the next: a week equal to
+    #: the week before is a copy carried forward by a stalled feed. Natural gas storage is reported in whole Bcf, and
+    #: a week with no net change is possible, so it is not checked.
+    repeats_impossible: bool = False
 
 
 _WPSR = timedelta(days=5, hours=15, minutes=30)  # Weekly Petroleum Status Report: the following Wednesday
@@ -64,10 +69,18 @@ _WNGSR = timedelta(days=6, hours=15, minutes=30)  # Weekly Natural Gas Storage R
 #: is a unit or decimal error, not a market event.
 SERIES: Mapping[str, SeriesInfo] = {
     # thousand barrels: crude excl. SPR, motor gasoline, distillate; Bcf: Lower-48 working gas
-    "WCESTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 800_000.0, max_step=40_000.0),
-    "WGTSTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 400_000.0, max_step=25_000.0),
-    "WDISTUS1": SeriesInfo("petroleum/stoc/wstk", _WPSR, 0.0, 300_000.0, max_step=25_000.0),
-    "NW2_EPG0_SWO_R48_BCF": SeriesInfo("natural-gas/stor/wkly", _WNGSR, 0.0, 6_000.0, max_step=500.0),
+    # The lower bounds are a small fraction of what U.S. storage holds in any week (an operating minimum lies far
+    # above them): a value under them is the series keyed in another unit (thousand barrels as million barrels).
+    "WCESTUS1": SeriesInfo(
+        "petroleum/stoc/wstk", _WPSR, 10_000.0, 800_000.0, max_step=40_000.0, repeats_impossible=True
+    ),
+    "WGTSTUS1": SeriesInfo(
+        "petroleum/stoc/wstk", _WPSR, 10_000.0, 400_000.0, max_step=25_000.0, repeats_impossible=True
+    ),
+    "WDISTUS1": SeriesInfo(
+        "petroleum/stoc/wstk", _WPSR, 10_000.0, 300_000.0, max_step=25_000.0, repeats_impossible=True
+    ),
+    "NW2_EPG0_SWO_R48_BCF": SeriesInfo("natural-gas/stor/wkly", _WNGSR, 50.0, 6_000.0, max_step=500.0),
 }
 SERIES_ROUTES: Mapping[str, str] = {k: v.route for k, v in SERIES.items()}
 #: Release lag assumed for weekly series outside the catalogue: the earliest weekly schedule (Wednesday 15:30 UTC
@@ -193,6 +206,7 @@ class EiaAdapter(BaseAdapter):
             DataQualityReport(report.subject, (*report.checks, *extra), report.quarantined, report.record_count),
             rejected,
         )
+        quality, usable = _hold_copies_and_off_cadence(quality, usable, obs, info)
         step = _latest_step_violation(usable, info.max_step if info else None)
         if step is not None:
             usable = [o for o in usable if o is not step]
@@ -270,3 +284,43 @@ def _latest_step_violation(obs: list[MacroObservation], max_step: float | None) 
     if last.value is None or prev.value is None:  # pragma: no cover - filtered above; narrows the type
         return None
     return last if abs(last.value - prev.value) > max_step else None
+
+
+#: datetime.weekday() of Friday: the catalogue's weekly series are for the week ending on a Friday.
+FRIDAY = 4
+
+
+def _hold_copies_and_off_cadence(
+    quality: DataQualityReport, usable: list[MacroObservation], obs: list[MacroObservation], info: SeriesInfo | None
+) -> tuple[DataQualityReport, list[MacroObservation]]:
+    """For catalogue series: hold weeks dated other than the week-ending Friday (not a period EIA reports), and, for
+    counts that never repeat exactly, weeks equal to the week before (a copy carried forward)."""
+    if info is None:
+        return quality, usable
+    off = [o for o in obs if o.ts.weekday() != FRIDAY]
+    valued = [o for o in obs if o.value is not None and o not in off]
+    copies = [b for a, b in itertools.pairwise(valued) if info.repeats_impossible and a.value == b.value]
+    if not off and not copies:
+        return quality, usable
+    checks = [*quality.checks]
+    if off:
+        checks.append(
+            CheckResult(
+                "cadence_day", passed=False, blocking=False, detail=f"{len(off)} week(s) not dated a Friday held"
+            )
+        )
+    if copies:
+        checks.append(
+            CheckResult(
+                "copied_rows",
+                passed=False,
+                blocking=False,
+                detail=f"{len(copies)} week(s) equal to the week before held",
+            )
+        )
+    held = {id(o) for o in (*off, *copies)}
+    indices = {i for i, o in enumerate(obs) if id(o) in held}
+    report = DataQualityReport(
+        quality.subject, tuple(checks), tuple(sorted({*quality.quarantined, *indices})), quality.record_count
+    )
+    return report, [o for o in usable if id(o) not in held]

@@ -300,7 +300,19 @@ terms allow display but forbid derived data, which the three-tag model could not
   repeat the week before, a Treasury day repeating the day before in every tenor (no two recorded consecutive days
   share more than 12 of their 14 tenors), and a bar repeating the bar before in
   open, high, low and volume (its close touched or not; a bar without volume, as FX, only in full) are held. A
-  Treasury copy with one tenor nudged is not caught: a genuine quiet day (2026-02-03) moved only two tenors, by 0.01 (none in the recorded COT weeks of 6 series, the 200 recorded Treasury days or the
+  Treasury copy with one tenor nudged is not caught: a genuine quiet day (2026-02-03) moved only two tenors, by 0.01.
+  EIA's petroleum stocks (thousand barrels, which never repeat to the barrel) hold a week equal to the week before;
+  catalogue series hold a week not dated the week-ending Friday; and their lower bounds are a small fraction of what
+  U.S. storage holds in any week (10,000 thousand barrels for each petroleum stock, 50 Bcf for working gas), so the
+  series keyed in million barrels under the same unit is refused (round 32). Natural gas storage (whole Bcf, where
+  a week without net change can happen) is not checked for repeats.
+- Calendars for bars (P1 review round 32): a Twelve Data daily bar dated a day the market does not trade (an
+  equity on a day that is not an NYSE session, FX or a commodity on a Saturday) is held. Kraken's candles chain,
+  each opening at the previous close (59 of 59 recorded): where at least 90% of a response's adjacent candles
+  chain, a break holds the candle before it and every candle to the next break or to the end (a block keyed off, a
+  slipped close, a level shifted from there on), among candles no other check held. A slipped close on the newest
+  candle has no successor to show it; it is caught only beyond the price-spike bounds. A suspended Kraken contract
+  is quarantined. Unadjusted splits in Twelve Data equity bars stay a warning (no corporate-actions source yet). (none in the recorded COT weeks of 6 series, the 200 recorded Treasury days or the
   recorded Kraken bars); bars also hold every close inside a run of 5 or more identical closes anywhere in the window
   (the stale-quote check saw only the end). Macro series (FRED, EIA) are not checked for repeats: a policy rate stays
   the same for weeks. A Treasury row dated a Saturday or a Sunday is refused (never published), and one dated a
@@ -371,7 +383,14 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    the first quarter's genuine filing. Only figures of four or more significant digits beyond their rounding unit
    count (GE's $5M and $10M NCI shares of OCI add up after such a rescale by chance), and the tolerance is the
    smallest term's (a restated BRK 2022 half-year a tenth of which nearly matched two offsetting quarters, judged
-   against the largest term, held two genuine facts) (P1 review round 26).
+   against the largest term, held two genuine facts) (P1 review round 26). A single fact slipped on its own (the
+   quarter ×10, a tenth or sign-reversed beside its filing's genuine year to date, which a whole-filing rescale
+   cannot repair) is held when rescaling or flipping that one fact alone makes the sum hold exactly, it sits that
+   step (or opposes its history in sign) from its history, and no other single fact of the sum does; its table
+   sibling (the same filing's other figure of that concept to the same date) is held with it (round 32: MRK's third
+   quarter revenue ×10, 9M 50,978 = H1 32,893 + Q3 18,085, was served, as were single quarters at 13 of 30
+   out-of-sample filers). A slipped figure with no sum to repair it (an annual 10-K figure whose fourth quarter is
+   not tagged) is not caught this way.
 4. *The same year.* A year-to-date fact against the same year's shorter year-to-date from other filings, judged on the
    ratio the concept shows in other years (at least 3 years, spread under 10^0.3).
 5. *The filing's own comparatives.* A newest-period cell about a power of 1000 from the prior years the same filing

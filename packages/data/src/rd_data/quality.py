@@ -6,8 +6,9 @@ assemble a :class:`DataQualityReport` that is stored with the evidence it guards
 excluded from the usable series but kept, with their indices, in the report.
 
 Which checks each source runs is the adapter's choice: rows copied forward (identical to the row before) are held
-for bars, COT weeks and Treasury curves; a run of identical closes is checked for bars, anywhere in the window; macro
-series (FRED, EIA) are not checked for repeats, because a policy rate or a reported figure can stay the same for weeks.
+for bars, COT weeks, Treasury curves and EIA petroleum stocks (thousand barrels never repeat to the barrel); a run of
+identical closes is checked for bars, anywhere in the window; FRED series and EIA natural gas storage (whole Bcf) are
+not checked for repeats, because a policy rate can stay the same for weeks and a storage week can show no net change.
 Cross-source reconciliation (:func:`check_reconciliation`) runs only when a caller passes a reference series; no
 adapter has a second source for the same series in the default configuration, so it is not wired yet (STATUS).
 """

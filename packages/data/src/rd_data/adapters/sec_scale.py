@@ -2728,8 +2728,35 @@ def _additivity_errors(records: list[FundamentalFact], neighbours: _Neighbours) 
             first = spans.get((concept, unit, start, split - timedelta(days=1)))
             if split > start and first:
                 for combo in itertools.product(whole, first, spans[(concept, unit, split, end)]):
-                    held |= _misscaled_in(records, combo, neighbours)
+                    held |= _misscaled_in(records, combo, neighbours) or _one_fact_slipped(records, combo, neighbours)
     return held
+
+
+def _one_fact_slipped(records: list[FundamentalFact], combo: tuple[int, ...], neighbours: _Neighbours) -> set[int]:
+    """One fact of a ``whole = first + second`` sum keyed 10x or 100x off (or a tenth, a hundredth) or with its sign
+    reversed, on its own: its filing's other term of the sum is genuine, so rescaling the whole filing cannot repair
+    it (a third quarter x10 beside its own genuine nine months: 32,893 + 18,085 = 50,978 at MRK). Rescaling (or
+    flipping) that one fact makes the sum hold exactly, and it sits that step from its history (or, flipped, opposes
+    its history in sign) while no other single fact does: that fact is held."""
+    values = [records[i].value for i in combo]
+    if _adds_up(values) or not _precise(values):
+        return set()
+    found: list[int] = []
+    for pos, i in enumerate(combo):
+        own = frozenset({records[i].accession})
+        for factor in (*DECIMAL_FACTORS, -1.0):
+            scaled = [v * factor if k == pos else v for k, v in enumerate(values)]
+            whole, first, second = scaled
+            exact = abs(whole - first - second) <= FLIP_TOLERANCE * min(abs(whole), abs(first), abs(second))
+            if not (exact and _adds_up_with_every_term(scaled)):
+                continue
+            if factor < 0:
+                fits = records[i].concept in SIGN_CHECKED and neighbours.sign_against_history(i, own)
+            else:
+                fits = _toward(neighbours, [i], -math.log10(factor))
+            if fits:
+                found.append(i)
+    return set(found) if len(found) == 1 else set()
 
 
 def _prefix_errors(records: list[FundamentalFact], logs: list[float | None], neighbours: _Neighbours) -> set[int]:

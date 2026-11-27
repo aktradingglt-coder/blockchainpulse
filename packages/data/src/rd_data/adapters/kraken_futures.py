@@ -274,6 +274,23 @@ class KrakenFuturesAdapter(BaseAdapter):
             gap_window=limit,
             gap_from=start,
         )
+        breaks = _chain_breaks(usable, width)
+        if breaks:
+            report = DataQualityReport(
+                report.subject,
+                (
+                    *report.checks,
+                    CheckResult(
+                        "open_vs_previous_close",
+                        passed=False,
+                        blocking=False,
+                        detail=f"{len(breaks)} bar(s) whose open does not continue the previous close held",
+                    ),
+                ),
+                tuple(sorted({*report.quarantined, *(bars.index(b) for b in breaks)})),
+                report.record_count,
+            )
+            usable = [b for b in usable if b not in breaks]
         requested = [b for b in bars if b.ts >= start][:limit] if start is not None else bars[-limit:]
         asked = {b.ts for b in requested}
         window = [b for b in usable if b.ts in asked]  # held bars leave a hole; the window never shifts
@@ -419,6 +436,28 @@ class KrakenFuturesAdapter(BaseAdapter):
             ),
             DataRequest(kind=RequestKind.CRYPTO_DERIVATIVES, params={"symbols": "BTC/USD:USD,ETH/USD:USD"}),
         ]
+
+
+#: Kraken's candles chain: each opens at the previous candle's close (59 of 59 daily boundaries of the recording,
+#: exactly). The rule applies when at least this share of a response's adjacent boundaries chain (a source or symbol
+#: whose candles do not chain is not judged by it).
+CHAIN_SHARE = 0.9
+
+
+def _chain_breaks(bars: list[Bar], width: timedelta) -> list[Bar]:
+    """Bars a broken chain (an open that does not continue the previous close) puts in doubt, among bars no other
+    check held (a held bar leaves a gap, and its boundaries are not judged): the bar before the break, whose close may
+    be the slipped figure, and every bar from the break to the next one (a block keyed off) or to the end (a level
+    shifted from there on)."""
+    adjacent = [k for k in range(1, len(bars)) if bars[k].ts - bars[k - 1].ts == width]
+    broken = [k for k in adjacent if bars[k].open != bars[k - 1].close]
+    if not broken or len(adjacent) - len(broken) < CHAIN_SHARE * len(adjacent):
+        return []
+    held: set[int] = set()
+    for n, k in enumerate(broken):
+        end = broken[n + 1] if n + 1 < len(broken) else len(bars)
+        held.update(range(k - 1, end))
+    return [bars[k] for k in sorted(held)]
 
 
 #: Metrics computed from the mark price; quarantined with it when mark and index disagree.

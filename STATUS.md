@@ -50,7 +50,7 @@ under ×2.5 and volume slips); awaiting review round 32.** P2 does not start unt
 | Per-package coverage gate: rd_data ≥ 90% lines and branches (measured in `CRITIC_LEDGER.md`) | `make coverage`, `scripts/check_coverage.py` |
 
 Schema-derived (synthetic, labelled) cassettes remain for keyed vendors EIA, FRED and Twelve Data until keys exist
-(D-011); the P11 release gate fails while any remain. Cassette size: ~12 MB in total, mostly SEC company facts (7.4 MB).
+(D-011); the P11 release gate fails while any remain. Cassette size: ~12 MB in total, mostly SEC (7.7 MB across three cassettes; company facts 5.6 MB).
 
 ## Next
 
