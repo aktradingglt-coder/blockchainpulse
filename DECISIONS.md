@@ -572,7 +572,7 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
 12. *Shifted statements.* A filing's face statement for one period — the facts its statement identities relate: the
     balance sheet, the income statement, the cash-flow statement (with its period's cash-flow lines by name, and in
     any period that reports a cash-flow total, as WFC's change in cash forms no identity) — is held when at least 6 of its facts have history
-    and a comparative in their own filing, and 75% of them sit the same power of 10 or 100 from both (within 10^0.5;
+    and a comparative in their own filing, and 60% of them sit the same power of 10 or 100 from both (within 10^0.5;
     the statement's median within 10^0.3), or, for a balance sheet, oppose both in sign. Such a statement closes every
     identity, and its footnotes keep the column's median where it was, so only its history shows it (round 28: WFC's
     first-quarter 2017 balance sheet ÷10 and its cash flows ×10, and JPM's 2012 cash flows ×10, were served whole). The
