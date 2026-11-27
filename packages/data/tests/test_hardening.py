@@ -4586,7 +4586,7 @@ async def test_cot_long_and_short_swapped_are_refused(report_type: str, weeks: i
     def swap(body: str) -> str:
         rows = json.loads(body)  # newest first
         for row in rows[:weeks]:
-            for long_f, short_f, _ in FIELDS[report_type].values():  # type: ignore[index]
+            for long_f, short_f, _ in FIELDS[report_type].values():  # type: ignore[index]  # report_type is a ReportType literal
                 lf = next(n for n in long_f if n in row)
                 sf = next(n for n in short_f if n in row)
                 row[lf], row[sf] = row[sf], row[lf]
