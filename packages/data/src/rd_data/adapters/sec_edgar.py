@@ -265,8 +265,16 @@ class SecEdgarAdapter(BaseAdapter):
                             continue
                         filed = _date_or_none([fact.get("filed")], 0)
                         end = _date_or_none([fact.get("end")], 0)
-                        if filed is None or end is None or filed > latest_allowed or filed < end:
-                            # filed in the future, or before the period it reports ended: not point-in-time correct.
+                        start = _date_or_none([fact.get("start")], 0) if fact.get("start") else None
+                        if (
+                            filed is None
+                            or end is None
+                            or filed > latest_allowed
+                            or filed < end
+                            or (start and start > end)
+                        ):
+                            # filed in the future, or before the period it reports ended: not point-in-time correct;
+                            # or a period that starts after it ends (none in 1.31 million facts of 45 filers).
                             # One such fact is set aside (reported) rather than blocking the company's other facts.
                             impossible += 1
                             continue
@@ -291,6 +299,8 @@ class SecEdgarAdapter(BaseAdapter):
                         except (KeyError, ValueError, TypeError):
                             # a malformed row outside the requested concepts only leaves that row out of the checks
                             rejected += not wanted or concept in wanted
+        records, misdated = _without_misdated_filings(records)
+        impossible += misdated
         if not records and not rejected:
             raise NotFound(f"sec: no XBRL facts for CIK {cik}", provider=self.name)
         if wanted and not any(f.concept in wanted for f in records):
@@ -318,7 +328,9 @@ class SecEdgarAdapter(BaseAdapter):
                 "point_in_time",
                 passed=not impossible,
                 blocking=False,
-                detail=f"{impossible} fact(s) undated, filed in the future or before their period ended, left out"
+                detail=f"{impossible} fact(s) undated, filed in the future or before their period ended, with a"
+                " period that starts after it ends, or of a filing whose facts disagree on its filing date or that is"
+                " dated on or before its own period end, left out"
                 if impossible
                 else "ok",
             ),
@@ -419,3 +431,25 @@ def _parse_accepted(text: str) -> datetime | None:
 def _filing_url(cik: str, accession: str, primary: str | None) -> str:
     folder = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}"
     return f"{folder}/{primary}" if primary else f"{folder}/{accession}-index.htm"
+
+
+def _without_misdated_filings(records: list[FundamentalFact]) -> tuple[list[FundamentalFact], int]:
+    """The facts left once misdated filings (see _misdated_filings) are taken out, and how many were taken out."""
+    undated = _misdated_filings(records)
+    kept = [f for f in records if f.accession not in undated]
+    return kept, len(records) - len(kept)
+
+
+def _misdated_filings(records: list[FundamentalFact]) -> set[str]:
+    """Filings whose dates cannot be a filing's: facts of one accession that disagree on its filing date (one filing has
+    one date; none of 3,066 accessions of 45 filers do), or a filing dated on or before the period end of its own
+    current column (a 10-Q or 10-K is filed after its period closes: at least 10 days after on 3,055 of them). The
+    point-in-time key of every fact of such a filing is in doubt, so all of them are left out."""
+    dates: dict[str, set[date]] = {}
+    for f in records:
+        dates.setdefault(f.accession, set()).add(f.filed)
+    out = {a for a, d in dates.items() if len(d) > 1}
+    for accession, idx in current_columns(records).items():
+        if accession not in out and idx and records[idx[0]].filed <= records[idx[0]].period_end:
+            out.add(accession)
+    return out

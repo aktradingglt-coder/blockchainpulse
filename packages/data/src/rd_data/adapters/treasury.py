@@ -13,7 +13,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import ClassVar
 from zoneinfo import ZoneInfo
 
@@ -26,6 +26,7 @@ from rd_data.quality import (
     QA_CONTEXT,
     CheckResult,
     DataQualityReport,
+    check_copied_rows,
     check_duplicates,
     check_provider_order,
     check_range,
@@ -77,6 +78,8 @@ AMBIGUOUS_END_RUN = 3
 #: (the largest daily move of any tenor in the recorded 2026 file is 0.16 point); one that stays (the curve keyed x2
 #: or ÷10 from some day on) is held however many days share it (D-033).
 YIELD_IMPLAUSIBLE_MOVE = 1.5
+#: datetime.weekday() of Saturday.
+SATURDAY = 5
 #: Consecutive publication days with an identical full curve that mean the source stopped updating.
 FROZEN_DAYS = 5
 URL = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{year}/all"
@@ -120,12 +123,21 @@ class TreasuryAdapter(BaseAdapter):
         if future:
             rejected += len(future)
             all_points = [p for p in all_points if _quoted_at(p.ts) <= raw.retrieved_at]
+        # Treasury never quotes a curve on a Saturday or a Sunday: such a row is not a published curve (a weekend row
+        # dated after a stalled feed's last day would otherwise make the response look newer than it is). Bond-market
+        # holidays differ from exchange holidays (Good Friday), so only weekends are refused.
+        weekend = [p for p in all_points if p.ts.weekday() >= SATURDAY]
+        if weekend:
+            rejected += len(weekend)
+            all_points = [p for p in all_points if p.ts.weekday() < SATURDAY]
         if not files[0].points and not rejected and not missing_columns:
             raise NotFound(f"us_treasury: no curve rows for {year}", provider=self.name)
         range_check = check_range([p.yield_pct for p in all_points], lo=YIELD_RANGE[0], hi=YIELD_RANGE[1], what="yield")
         bad_prints, jumps = _bad_prints_by_tenor(all_points, exclude=set(range_check.indices))
         kinks = _kinked_tenors(all_points, exclude=set(range_check.indices))
-        held = {*range_check.indices, *bad_prints, *kinks}
+        copies = _copied_curves(all_points)
+        off_session = _off_session_days(all_points)
+        held = {*range_check.indices, *bad_prints, *kinks, *copies.indices, *off_session.indices}
         points = [p for p in all_points if p.ts.year == year]  # context from the previous year is never returned
         quarantined = [p for i, p in enumerate(all_points) if i in held and p.ts.year == year]
         usable = [p for i, p in enumerate(all_points) if i not in held and p.ts.year == year]
@@ -133,6 +145,8 @@ class TreasuryAdapter(BaseAdapter):
         checks: list[CheckResult] = [
             _missing_business_days(sorted({p.ts for p in points})),
             _frozen_curve(all_points, days),
+            copies,
+            off_session,
             CheckResult(
                 "csv_header",
                 passed=not missing_columns,
@@ -368,6 +382,57 @@ def _missing_business_days(days: list[datetime]) -> CheckResult:
     if missing:
         detail += f" (e.g. {', '.join(d.isoformat() for d in missing[:5])}; bond-market holidays differ from NYSE)"
     return CheckResult("calendar_gaps", passed=not missing, blocking=fraction > MAX_GAP_FRACTION, detail=detail)
+
+
+def _good_friday(year: int) -> date:
+    """Good Friday of a Gregorian year (Easter by the anonymous Gregorian algorithm, less two days)."""
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = divmod(b, 4)
+    g = (8 * b + 13) // 25
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l_ = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 19 * l_) // 433
+    month = (h + l_ - 7 * m + 90) // 25
+    day = (h + l_ - 7 * m + 33 * month + 19) % 32
+    return date(year, month, day) - timedelta(days=2)
+
+
+def _off_session_days(points: list[TreasuryYieldPoint]) -> CheckResult:
+    """Weekday rows dated a day the exchanges are closed for a holiday (Labor Day, Thanksgiving), which the bond market
+    also observes: not a published curve, so held (not refused: the bond market opens on Good Friday, kept, and on some
+    unscheduled exchange closures)."""
+    held: list[int] = []
+    days: set[date] = set()
+    for i, p in enumerate(points):
+        day = p.ts.date()
+        if day.weekday() < SATURDAY and day != _good_friday(day.year) and not _is_session(day):
+            held.append(i)
+            days.add(day)
+    if held:
+        detail = (
+            f"{len(held)} yield(s) dated on an exchange holiday quarantined ({', '.join(sorted(map(str, days))[:5])})"
+        )
+        return CheckResult("off_session", passed=False, blocking=False, detail=detail, indices=tuple(held))
+    return CheckResult("off_session", passed=True, blocking=False, detail="ok")
+
+
+def _is_session(day: date) -> bool:
+    return NYSE.closes_after(day - timedelta(days=1), 1)[0].date() == day
+
+
+def _copied_curves(points: list[TreasuryYieldPoint]) -> CheckResult:
+    """Days whose whole curve (every tenor's yield) repeats the publication day before: a copy carried forward, not a
+    day's quotes (no two consecutive days of the recorded 2026 file share a curve). Every point of such a day is
+    held."""
+    curves: dict[datetime, list[int]] = {}
+    for i, p in enumerate(points):
+        curves.setdefault(p.ts, []).append(i)
+    days = sorted(curves)
+    shape = {d: tuple(sorted((points[i].tenor, points[i].yield_pct) for i in curves[d])) for d in days}
+    check = check_copied_rows([shape[d] for d in days], what="day(s) with the curve of the day before")
+    held = tuple(sorted(i for k in check.indices for i in curves[days[k]]))
+    return CheckResult(check.name, passed=check.passed, blocking=False, detail=check.detail, indices=held)
 
 
 def _frozen_curve(points: list[TreasuryYieldPoint], days: list[datetime]) -> CheckResult:

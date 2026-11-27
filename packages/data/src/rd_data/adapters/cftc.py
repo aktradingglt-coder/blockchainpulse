@@ -30,6 +30,7 @@ from rd_data.quality import (
     QA_CONTEXT,
     DataQualityReport,
     check_cadence,
+    check_copied_rows,
     check_open_interest_moves,
     check_positioning,
     check_provider_order,
@@ -217,21 +218,26 @@ class CftcAdapter(BaseAdapter):
             [r.as_of for r in records][-int(request.params.get("weeks", 156)) :], period=timedelta(days=7)
         )
         oi_outliers, oi_moves = check_open_interest_moves(records)
+        # a week whose every position and open interest repeat the week before is a copy carried forward
+        copied = check_copied_rows(
+            [
+                (r.open_interest, tuple(sorted((k, c.long, c.short, c.spreading) for k, c in r.categories.items())))
+                for r in records
+            ],
+            what="week(s)",
+        )
+        withheld = tuple(sorted({*oi_outliers.indices, *copied.indices}))
         quality = with_schema_rejections(
             DataQualityReport(
-                base.subject, (order, *base.checks, cadence, oi_outliers, oi_moves), oi_outliers.indices, len(records)
+                base.subject, (order, *base.checks, cadence, oi_outliers, oi_moves, copied), withheld, len(records)
             ),
             rejected,
         )
         weeks = int(request.params.get("weeks", 156))
-        held = [r for i, r in enumerate(records) if i in set(oi_outliers.indices)]
+        held = [r for i, r in enumerate(records) if i in set(withheld)]
         first = records[-weeks:][0].as_of if records else None  # the weeks asked for, held ones included
         # held weeks leave a hole; the window never reaches further back than the weeks asked for
-        records = [
-            r
-            for i, r in enumerate(records)
-            if i not in set(oi_outliers.indices) and (first is None or r.as_of >= first)
-        ]
+        records = [r for i, r in enumerate(records) if i not in set(withheld) and (first is None or r.as_of >= first)]
         quarantined = tuple(r for r in held if first is None or r.as_of >= first)
         as_of = records[-1].as_of if records else None
         released = release_time(as_of) if as_of else None

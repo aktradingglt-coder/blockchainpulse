@@ -11,7 +11,7 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from rd_core.clock import ensure_utc
 
@@ -99,6 +99,12 @@ class FundamentalFact(_Record):
     filed: date
     accession: str
     frame: str | None = None
+
+    @model_validator(mode="after")
+    def _period_in_order(self) -> FundamentalFact:
+        if self.period_start is not None and self.period_start > self.period_end:
+            raise ValueError("period_start after period_end")
+        return self
 
 
 class Filing(_Record):

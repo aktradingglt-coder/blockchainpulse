@@ -4707,3 +4707,207 @@ def test_a_whole_balance_column_slipped_in_consecutive_quarters_is_held_where_fa
     assert all(end in {date(2025, 12, 31), *(e for _, e, _ in seeded)} for _, end, _ in got)
     clean, _ = sec_scale.scale_errors(_quarterly_balance_sheets(1.0, 0, statement=small)[0])
     assert not clean
+
+
+# ------------------------------------------------------------------------------------- review round 30 (P1)
+
+
+def _sec_newest(data: dict[str, Any]) -> str:
+    """The accession of the newest 10-K/10-Q in a company-facts body."""
+    return str(
+        max(
+            (f["filed"], f["accn"])
+            for c in data["facts"]["us-gaap"].values()
+            for u in c["units"].values()
+            for f in u
+            if f.get("form") in ("10-K", "10-Q")
+        )[1]
+    )
+
+
+def _sec_edit_newest(edit: Callable[[dict[str, Any], str], None]) -> Mutator:
+    def apply(data: dict[str, Any]) -> None:
+        edit(data, _sec_newest(data))
+
+    return _json_edit(apply)
+
+
+async def test_sec_periods_that_start_after_they_end_are_never_served() -> None:
+    """Start and end swapped on every duration fact of the newest filing: no such period exists (none in 1.31 million
+    facts of 45 filers), so those facts are left out and reported, never served."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+
+    def swap(data: dict[str, Any], newest: str) -> None:
+        for c in data["facts"]["us-gaap"].values():
+            for u in c["units"].values():
+                for f in u:
+                    if f["accn"] == newest and f.get("start") and f["start"] < f["end"]:
+                        f["start"], f["end"] = f["end"], f["start"]
+
+    resp = await _replay(SecEdgarAdapter, request, {0: _sec_edit_newest(swap)})
+    facts = [f for f in resp.records if isinstance(f, FundamentalFact)]
+    assert all(f.period_start is None or f.period_start <= f.period_end for f in facts)
+    assert any("point_in_time" in w for w in resp.quality.warnings)
+    with pytest.raises(ValueError, match="period_start after period_end"):
+        _fact("2026-06-30", "2026-03-31", 1.0, "a")
+
+
+@pytest.mark.parametrize("seed", ["own_end", "split"])
+async def test_sec_filing_dates_that_cannot_be_a_filings_are_never_served(seed: str) -> None:
+    """Every fact of the newest filing dated its own period end, or half of them 45 days later than the rest: one filing
+    has one date, after its period closes (at least 10 days after on 3,055 filings of 45 filers), so no fact of that
+    filing is served and the point-in-time check reports them."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+
+    def misdate(data: dict[str, Any], newest: str) -> None:
+        k = 0
+        for c in data["facts"]["us-gaap"].values():
+            for u in c["units"].values():
+                for f in u:
+                    if f["accn"] == newest:
+                        if seed == "own_end":
+                            f["filed"] = f["end"]
+                        elif k % 2:
+                            f["filed"] = (date.fromisoformat(f["filed"]) + timedelta(days=45)).isoformat()
+                        k += 1
+
+    clean = await _replay(SecEdgarAdapter, request)
+    newest = max((f for f in clean.records if isinstance(f, FundamentalFact)), key=lambda f: f.filed).accession
+    try:
+        resp = await _replay(SecEdgarAdapter, request, {0: _sec_edit_newest(misdate)})
+    except Stale:
+        return  # the filing left out, what remains is too old to serve
+    assert not any(isinstance(f, FundamentalFact) and f.accession == newest for f in resp.records)
+    assert any("point_in_time" in w for w in resp.quality.warnings)
+
+
+def _share_facts(cover: Sequence[float], average: Sequence[float]) -> list[FundamentalFact]:
+    """Quarterly filings, each with its cover shares outstanding and its weighted average diluted shares (synthetic)."""
+    out: list[FundamentalFact] = []
+    for k, (c, a) in enumerate(zip(cover, average, strict=True)):
+        end = date(2024, 3, 31) + timedelta(days=91 * k)
+        filed, accession = end + timedelta(days=35), f"s{k}"
+        on_cover = FundamentalFact(
+            cik="0000000001", concept="EntityCommonStockSharesOutstanding", taxonomy="dei", unit="shares", value=c,
+            period_end=end + timedelta(days=30), form="10-Q", filed=filed, accession=accession,
+        )  # fmt: skip
+        mean = FundamentalFact(
+            cik="0000000001", concept="WeightedAverageNumberOfDilutedSharesOutstanding", taxonomy="us-gaap",
+            unit="shares", value=a, period_start=end - timedelta(days=90), period_end=end, form="10-Q", filed=filed,
+            accession=accession,
+        )  # fmt: skip
+        out.extend((on_cover, mean))
+    return out
+
+
+@pytest.mark.parametrize(("side", "factor"), [("cover", 10.0), ("cover", 0.01), ("average", 10.0)])
+def test_cover_shares_a_decimal_off_the_filings_own_average_are_held(side: str, factor: float) -> None:
+    """The newest cover page's shares outstanding x10 or /100 (or the weighted average x10): the two sit a power of 10
+    apart in one filing, and only the slipped side also breaks from the filing before, so it alone is held."""
+    cover = [4.30e9, 4.31e9, 4.29e9, 4.30e9, 4.28e9]
+    average = [4.32e9, 4.31e9, 4.31e9, 4.30e9, 4.29e9]
+    (cover if side == "cover" else average)[-1] *= factor
+    records = _share_facts(cover, average)
+    held, _ = sec_scale.scale_errors(records)
+    concept = (
+        "EntityCommonStockSharesOutstanding" if side == "cover" else "WeightedAverageNumberOfDilutedSharesOutstanding"
+    )
+    assert {(records[i].concept, records[i].accession) for i in held} == {(concept, "s4")}
+    clean, _ = sec_scale.scale_errors(_share_facts([*cover[:-1], 4.28e9], [*average[:-1], 4.29e9]))
+    assert not clean
+
+
+@pytest.mark.parametrize("weeks", [1, 3])
+async def test_cot_weeks_copied_from_the_week_before_are_held(weeks: int) -> None:
+    """The newest week (or three) a verbatim copy of the week before, only the date moved on: a stalled feed, not a
+    report. The copies are held, so the response is as old as the last genuine week."""
+    request = _plan(CftcAdapter, RequestKind.COT, report_type="tff", futures_only=None)
+    clean = await _replay(CftcAdapter, request)
+
+    def copy(body: str) -> str:
+        rows = json.loads(body)  # newest first
+        for k in range(weeks - 1, -1, -1):
+            rows[k] = {**rows[k + 1], "report_date_as_yyyy_mm_dd": rows[k]["report_date_as_yyyy_mm_dd"]}
+        return json.dumps(rows)
+
+    try:
+        resp = await _replay(CftcAdapter, request, {0: copy})
+    except Stale:
+        return
+    assert len(resp.quarantined) == weeks
+    assert resp.as_of is not None
+    assert clean.as_of is not None
+    assert resp.as_of < clean.as_of
+    assert any("copied_rows" in w for w in resp.quality.warnings)
+
+
+async def test_treasury_copied_curves_weekend_and_holiday_rows() -> None:
+    """A curve repeated for the next six days inside the year is held on those days; a row dated a Saturday is
+    refused (Treasury never publishes one); a row dated Labor Day is held (the bond market also closes)."""
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+
+    def repeat(rows: list[list[str]]) -> None:
+        source = next(k for k, r in enumerate(rows) if r and r[0] == "10/01/2026")
+        for k in range(source - 6, source):
+            rows[k] = [rows[k][0], *rows[source][1:]]
+
+    resp = await _replay(TreasuryAdapter, request, {0: _csv_edit(repeat)})
+    assert len(resp.quarantined) == 6 * len(COLUMNS)
+    assert any("copied_rows" in w for w in resp.quality.warnings)
+
+    def dated(day: str) -> Mutator:
+        def edit(rows: list[list[str]]) -> None:
+            k = next(i for i, r in enumerate(rows) if r and r[0] == "10/16/2026")
+            rows.insert(k, [day, *rows[k][1:]])  # rows run newest first
+
+        return _csv_edit(edit)
+
+    with pytest.raises(DataQualityError, match="schema"):
+        await _replay(TreasuryAdapter, request, {0: dated("10/17/2026")})
+
+    def labor_day(rows: list[list[str]]) -> None:
+        k = next(i for i, r in enumerate(rows) if r and r[0] == "09/08/2026")
+        shifted = [f"{float(v) + 0.01:.2f}" if v else v for v in rows[k][1:]]  # synthetic, not a copy of 09/08
+        rows.insert(k + 1, ["09/07/2026", *shifted])  # older than 09/08: after it (newest first)
+
+    resp = await _replay(TreasuryAdapter, request, {0: _csv_edit(labor_day)})
+    assert {p.ts.date() for p in resp.quarantined if isinstance(p, TreasuryYieldPoint)} == {date(2026, 9, 7)}
+
+
+@pytest.mark.parametrize("seed", ["copies", "frozen_closes"])
+async def test_kraken_candles_copied_forward_or_with_frozen_closes_are_held(seed: str) -> None:
+    """Candle 20 repeated on the next seven days, or nine closes frozen at one price (the range widened to stay sane)
+    inside the window: no market prints the same candle, or the same daily close nine days running."""
+    request = _plan(KrakenFuturesAdapter, RequestKind.BARS)
+
+    def edit(data: dict[str, Any]) -> None:
+        candles = data.get("candles")
+        if not isinstance(candles, list):
+            return
+        if seed == "copies":
+            for k in range(21, 28):
+                candles[k] = {**candles[20], "time": candles[k]["time"]}
+        else:
+            price = float(candles[20]["close"])
+            for k in range(20, 29):
+                c = candles[k]
+                c["close"] = str(price)
+                c["high"] = str(max(float(c["high"]), price))
+                c["low"] = str(min(float(c["low"]), price))
+
+    cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request))
+    mutate = {i: _json_edit(edit) for i in range(len(cassette.interactions))}
+    resp = await _replay(KrakenFuturesAdapter, request, mutate)
+    assert len(resp.quarantined) in (7, 8)
+    assert any(w.startswith(("copied_rows", "frozen_closes")) for w in resp.quality.warnings)
+
+
+@pytest.mark.parametrize("factor", [1.3, 0.7, 1.05])
+async def test_kraken_ticker_scaled_whole_is_held_against_the_pairs_index(factor: float) -> None:
+    """Every price of PF_XBTUSD and its absolute funding scaled together (consistent with each other): only the index
+    the pair's other contracts carry (within 0.03% of each other on the recording) shows it, so mark, index and
+    funding are held."""
+    fields = ("markPrice", "indexPrice", "last", "bid", "ask", "high24h", "low24h", "open24h", "vwap24h", "fundingRate")
+    resp = await _derivatives(lambda t: _scale(t, factor, *fields))
+    shown = {m.metric for m in resp.records if isinstance(m, CryptoDerivativeMetric) and m.symbol == "BTC/USD:USD"}
+    assert not shown & {"mark_price", "index_price", "funding_rate"}

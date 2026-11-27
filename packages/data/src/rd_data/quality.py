@@ -1,8 +1,15 @@
-"""Data-quality checks run on every ingestion (PROMPT §5.3). Blocking failures stop use, they do not just log.
+"""Data-quality checks of PROMPT §5.3, run by every adapter on every fetch. Blocking failures stop use, they do not
+just log.
 
 Each check returns a :class:`CheckResult`; :func:`check_bars`, :func:`check_series` and :func:`check_positioning`
 assemble a :class:`DataQualityReport` that is stored with the evidence it guards. Outliers are *quarantined*:
 excluded from the usable series but kept, with their indices, in the report.
+
+Which checks each source runs is the adapter's choice: rows copied forward (identical to the row before) are held
+for bars, COT weeks and Treasury curves; a run of identical closes is checked for bars, anywhere in the window; macro
+series (FRED, EIA) are not checked for repeats, because a policy rate or a reported figure can stay the same for weeks.
+Cross-source reconciliation (:func:`check_reconciliation`) runs only when a caller passes a reference series; no
+adapter has a second source for the same series in the default configuration, so it is not wired yet (STATUS).
 """
 
 from __future__ import annotations
@@ -10,7 +17,7 @@ from __future__ import annotations
 import itertools
 import math
 import statistics
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -426,6 +433,34 @@ def check_stale_run(values: Sequence[float], *, run: int = STALE_RUN, market_ope
     return _ok("stale_quotes")
 
 
+def check_copied_rows(rows: Sequence[Hashable], *, what: str) -> CheckResult:
+    """Rows identical in every field to the row before them (all but the date): a copy carried forward by a stalled
+    feed, never a new observation. A market moves at least one of its figures from one session or week to the next:
+    the recorded COT weeks (6 series), Treasury curves (200 days) and Kraken bars hold no such copy. Each copy is
+    quarantined; the first row of the run is kept."""
+    copies = tuple(i for i in range(1, len(rows)) if rows[i] == rows[i - 1])
+    if copies:
+        return _fail(
+            "copied_rows",
+            f"{len(copies)} {what} identical to the one before quarantined",
+            blocking=False,
+            indices=copies,
+        )
+    return _ok("copied_rows", blocking=False)
+
+
+def frozen_runs(values: Sequence[float], *, run: int = STALE_RUN) -> tuple[int, ...]:
+    """Positions inside a run of at least ``run`` identical values (after the run's first), anywhere in the series."""
+    out: list[int] = []
+    start = 0
+    for i in range(1, len(values) + 1):
+        if i == len(values) or values[i] != values[start]:
+            if i - start >= run:
+                out.extend(range(start + 1, i))
+            start = i
+    return tuple(out)
+
+
 # ------------------------------------------------------------------------------------------------- bar checks
 
 
@@ -612,6 +647,18 @@ def check_bars(
     fields = check_field_spikes(bars)
     checks.extend([spikes, jumps, fields])
     checks.append(check_stale_run(closes, market_open_at_end=market_open_at_end))
+    copied = check_copied_rows([(b.open, b.high, b.low, b.close, b.volume) for b in bars], what="bar(s)")
+    frozen = frozen_runs(closes)
+    checks.append(copied)
+    if frozen:
+        checks.append(
+            _fail(
+                "frozen_closes",
+                f"{len(frozen)} close(s) in a run of {STALE_RUN}+ identical closes quarantined",
+                blocking=False,
+                indices=frozen,
+            )
+        )
     # Gaps are judged on the bars the caller asked for (the last gap_window bars, or those from gap_from on, with the
     # bar before as an anchor), not on the extra QA history behind them.
     if gap_from is not None:
@@ -627,7 +674,7 @@ def check_bars(
         checks.append(check_reconciliation(bars, reference))
     if split_dates is not None:
         checks.append(check_splits(bars, split_dates, blocking=corporate_actions_known))
-    quarantined = tuple(sorted({*spikes.indices, *fields.indices}))
+    quarantined = tuple(sorted({*spikes.indices, *fields.indices, *copied.indices, *frozen}))
     usable = [b for i, b in enumerate(bars) if i not in set(quarantined)]
     report = DataQualityReport(subject, tuple(checks), quarantined, len(bars))
     return report, usable

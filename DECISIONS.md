@@ -288,6 +288,17 @@ terms allow display but forbid derived data, which the three-tag model could not
   every magnitude plausible) was served in every report type (round 29); a swap is now caught unless a category's
   long and short differ by under about 0.1% of open interest, where the swap changes nothing material. Positions and
   open interest scaled together keep their shares and are not caught by this check.
+- Rows copied forward (P1 review round 30): a COT week whose every position and open interest repeat the week before,
+  a Treasury day whose whole curve repeats the day before, and a bar identical in open, high, low, close and volume to
+  the bar before are held (none in the recorded COT weeks of 6 series, the 200 recorded Treasury days or the
+  recorded Kraken bars); bars also hold every close inside a run of 5 or more identical closes anywhere in the window
+  (the stale-quote check saw only the end). Macro series (FRED, EIA) are not checked for repeats: a policy rate stays
+  the same for weeks. A Treasury row dated a Saturday or a Sunday is refused (never published), and one dated a
+  weekday exchange holiday other than Good Friday (Labor Day, Thanksgiving) is held, not refused, as the bond market
+  opens on Good Friday and on some unscheduled exchange closures (round 30: a weekend row made a blocked response
+  look merely stale). A Kraken contract's index must sit within 1% of the median index of the pair's other
+  contracts (they agree within 0.03% on the recording), so a whole ticker scaled together (its mark, index, quotes
+  and funding consistent with each other) is held.
 - Corporate actions: an unexplained split-ratio jump blocks the series only when split dates come from a
   corporate-actions source; without one (Twelve Data today) it is a warning, because a genuine −33% or ×2 day cannot
   be told from an unadjusted split.
@@ -730,10 +741,22 @@ company's very first filing has nothing in the response to be compared with, bey
   or ÷10, on 1b88aa3): of 3,808 facts seeded at the 14 calibration filers that harness reads, none are served at ×10
   and 73 at ÷10, all of NVDA's newest balance sheet (a fast grower ÷10 sits 10^-0.7 from its genuine history, outside
   the step window); of 5,889 at 30 filers outside the calibration set, none (before: 1,404 and 2,625 served at ×10).
+- *Dates (P1 review round 30).* A fact whose period starts after it ends is never valid (the schema refuses it; the
+  adapter leaves it out and reports it: none in 1.31 million facts of 45 filers). A filing whose facts disagree on its
+  filing date (none of 3,066 accessions do) or that is dated on or before its own current column's period end (the
+  shortest genuine gap is 10 days, on 3,055 filings) has all its facts left out: their point-in-time key is in doubt.
+  Not detected: a filing date moved earlier but still after the period end (every fact dated a week or two before
+  the true filing); the filings index carries the true date and is not yet cross-checked against company facts.
+- *Cover shares (P1 review round 30).* A filing's cover-page shares outstanding (all classes) and its latest weighted
+  average shares sitting 10^(1±0.5) or 10^(2±0.5) apart (never on 2,673 filings of 45 filers; the genuine gaps are
+  powers of 1000 or under 10^0.5) mean one of them was keyed a decimal off: the side that also breaks from the same
+  figure in the filing before is held, and both when neither or both do (round 30: the cover share count ×10 was
+  served at 28 of 28 out-of-sample filers).
 - *Outside the calibration set.* The rules were calibrated on the 15 filers above; on 30 others (round 29 reviewer's
   set, 839,278 facts, data to 2026-11-24) clean data has 1,174 facts held (0.14%, twice the calibration rate), 10 of
   them in a newest filing (MCD share counts filed in millions; JNJ and PEP antidilutive share counts). PG's newest
-  10-Q serves a single revenue, cost or operating-income line ×10 (5 of 5 seeds), and in 2019 snapshots a flow column
+  10-Q serves a single revenue, cost or operating-income line ×10 (5 of 5 seeds; SBUX's and DIS's annual revenue
+  ×10 likewise, round 30), and in 2019 snapshots a flow column
   with every sign reversed is served at 5 of 45 filers (DIS, KO, PFE, VZ, GE): those single-line and sign rules do
   not yet carry over to every filer (round 29, open).
 

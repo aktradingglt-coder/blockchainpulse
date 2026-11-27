@@ -874,6 +874,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
             flagged.add(i)
     flagged |= _unexplained_breaks(records, held, recent)
     held |= _beyond_assets(records, logs, held)
+    held |= _cover_share_errors(records)
     held |= _statement_shifts(records, neighbours, held)
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
@@ -891,6 +892,56 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
         if len(held) == before:
             break
     return held, flagged - held
+
+
+COVER_SHARES = "EntityCommonStockSharesOutstanding"
+_AVERAGE_SHARES = ("WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfSharesOutstandingBasic")
+#: The cover page's shares outstanding (all classes) against the weighted average shares of the same filing's latest
+#: period: on 2,673 filings of 45 filers never 10^(1±0.5) or 10^(2±0.5) apart (the genuine gaps are powers of 1000,
+#: the scale quirks the other rules handle, or under 10^0.5: issuance and buybacks).
+COVER_SHARE_STEPS = (1, 2)
+COVER_SHARE_NEAR = 0.5
+
+
+def _cover_share_errors(records: list[FundamentalFact]) -> set[int]:
+    """A filing's cover shares outstanding and its weighted average shares a power of 10 or 100 apart: one of them was
+    keyed a decimal off. The side that also breaks from the same figure in the filing before is held; when neither or
+    both do, both are."""
+    filed_on: dict[str, date] = {}
+    cover: dict[str, list[int]] = {}
+    average: dict[str, tuple[date, int, int]] = {}  # accession: (period end, preference, fact)
+    for i, f in enumerate(records):
+        filed_on[f.accession] = f.filed
+        if f.unit != "shares" or f.value <= 0:
+            continue
+        if f.concept == COVER_SHARES:
+            cover.setdefault(f.accession, []).append(i)
+        elif f.concept in _AVERAGE_SHARES:
+            rank = (f.period_end, -_AVERAGE_SHARES.index(f.concept))
+            best = average.get(f.accession)
+            if best is None or rank > (best[0], best[1]):
+                average[f.accession] = (*rank, i)
+    order = sorted(filed_on, key=lambda a: (filed_on[a], a))
+    cover_total = {a: sum(records[i].value for i in idx) for a, idx in cover.items()}
+    out: set[int] = set()
+    for k, accession in enumerate(order):
+        if accession not in cover_total or accession not in average:
+            continue
+        mean = records[average[accession][2]].value
+        gap = abs(math.log10(cover_total[accession] / mean))
+        if not any(abs(gap - step) <= COVER_SHARE_NEAR for step in COVER_SHARE_STEPS):
+            continue
+        before = [a for a in order[:k] if a in cover_total and a in average]
+        prior = before[-1] if before else None
+        cover_broke = (
+            prior is not None and abs(math.log10(cover_total[accession] / cover_total[prior])) > COVER_SHARE_NEAR
+        )
+        mean_broke = prior is not None and abs(math.log10(mean / records[average[prior][2]].value)) > COVER_SHARE_NEAR
+        if cover_broke or not mean_broke:
+            out.update(cover[accession])
+        if mean_broke or not cover_broke:
+            out.add(average[accession][2])
+    return out
 
 
 def _statement_family(f: FundamentalFact) -> str:

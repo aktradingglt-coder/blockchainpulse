@@ -372,8 +372,8 @@ class KrakenFuturesAdapter(BaseAdapter):
             _warning(
                 diverged,
                 f"mark and index more than {MAX_MARK_INDEX_GAP:.0%} apart, or mark more than x{MAX_MARK_QUOTE_FACTOR} "
-                "from the ticker's own last trade, bid and ask (or its index from the pair's other contracts), "
-                "quarantined",
+                "from the ticker's own last trade, bid and ask (or its index more than 1% from the pair's other "
+                "contracts), quarantined",
                 "mark_vs_index",
             ),
             _warning(funding_off, "funding rate disagrees with the ticker's relative funding, quarantined", "funding"),
@@ -446,6 +446,10 @@ def _volume_inconsistent(tickers: Mapping[str, Any], symbols: set[str]) -> list[
 #: perpetuals of the recorded tickers: at most x1.24 (an illiquid FX perpetual's wide book), under x1.01 for 99% of
 #: them. A mark keyed a digit off (with its index, so the mark-index check cannot see it) sits x10 away.
 MAX_MARK_QUOTE_FACTOR = 1.5
+#: How far a contract's index may sit from the median index of the exchange's other contracts on the same pair: on
+#: the recording the 8 XBT:USD contracts' indexes agree within 0.03%, and every pair's within 0.03%. A whole ticker
+#: scaled together (mark, index, quotes and funding consistent with each other) shows only here.
+MAX_PAIR_INDEX_FACTOR = 1.01
 #: The funding rate served (CCXT: absolute funding over the mark price) against the ticker's own relativeFundingRate.
 #: Measured on the same 211 perpetuals: within 2.6% and never of the other sign (Kraken computes the relative figure
 #: at a slightly different price). A slipped absolute figure or a slipped mark price moves it by a factor.
@@ -484,7 +488,7 @@ def _mark_off_quotes(tickers: Mapping[str, Any], symbols: set[str], everything: 
         index = as_float(info.get("indexPrice"))
         quotes = [q for q in (as_float(info.get(k)) for k in ("last", "bid", "ask")) if q is not None and q > 0]
         others = [v for s, v in indexes.get(str(info.get("pair")), []) if s != str(info.get("symbol"))]
-        if _off(mark, quotes, limit) or _off(index, others, limit):
+        if _off(mark, quotes, limit) or _off(index, others, math.log(MAX_PAIR_INDEX_FACTOR)):
             out.append(symbol)
     return out
 
