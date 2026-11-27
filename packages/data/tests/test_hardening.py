@@ -3974,12 +3974,12 @@ def test_a_cash_flow_statement_whose_own_identity_never_closes_is_held_by_its_ca
     """The same slip where the filer leaves a discontinued-operations flow untagged, so the statement's own identity
     breaks every year and no statement forms around the change in cash (MMM 2026). The change in cash still breaks
     closing minus opening cash, and rescaling (or flipping) it with the period's facts that moved with it closes it
-    exactly: those are held; buybacks, which sit on their history at the slipped value, are not taken by name."""
+    exactly: those are held. Buybacks, which sit on their history at the slipped value, are not taken by name, but
+    join the rest of the period's cash-flow statement once most of it is held."""
     records, seeded = _cash_flow_records(factor, untagged=0.5e9)
     held, _ = sec_scale.scale_errors(records)
-    moved = seeded if factor < 0 else seeded - {"PaymentsForRepurchaseOfCommonStock"}
     assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
-        (c, 2025, "a") for c in moved
+        (c, 2025, "a") for c in seeded
     }
     clean, _ = sec_scale.scale_errors(_cash_flow_records(1.0, untagged=0.5e9)[0])
     assert not clean
