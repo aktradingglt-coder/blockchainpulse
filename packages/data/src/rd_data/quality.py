@@ -647,7 +647,13 @@ def check_bars(
     fields = check_field_spikes(bars)
     checks.extend([spikes, jumps, fields])
     checks.append(check_stale_run(closes, market_open_at_end=market_open_at_end))
-    copied = check_copied_rows([(b.open, b.high, b.low, b.close, b.volume) for b in bars], what="bar(s)")
+    # a bar repeating the bar before in open, high, low and volume (its close touched or not) is a copy: volume never
+    # repeats to the unit between two genuine bars of a traded market
+    # (without a volume, as for FX, only a bar repeating the one before in full is)
+    copied = check_copied_rows(
+        [(b.open, b.high, b.low, b.volume) if b.volume else (b.open, b.high, b.low, b.close, b.volume) for b in bars],
+        what="bar(s)",
+    )
     frozen = frozen_runs(closes)
     checks.append(copied)
     if frozen:

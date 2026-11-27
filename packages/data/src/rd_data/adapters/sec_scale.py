@@ -875,6 +875,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
     flagged |= _unexplained_breaks(records, held, recent)
     held |= _beyond_assets(records, logs, held)
     held |= _cover_share_errors(records)
+    held |= _operating_above_revenue(records)
     held |= _statement_shifts(records, neighbours, held)
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
@@ -941,6 +942,56 @@ def _cover_share_errors(records: list[FundamentalFact]) -> set[int]:
             out.update(cover[accession])
         if mean_broke or not cover_broke:
             out.add(average[accession][2])
+    return out
+
+
+_REVENUE_LINES = (
+    "Revenues",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "SalesRevenueNet",
+    "RevenueFromContractWithCustomerIncludingAssessedTax",
+)
+#: Positive operating income never reaches revenue: on 7,093 filing periods of 45 filers it is at most 66% of the
+#: largest revenue line. Above it, one of the two was keyed off.
+OPERATING_SHARE_OF_REVENUE = 1.0
+#: How far a line must sit from its own filing's prior-year comparative to be the one that slipped.
+OWN_COMPARATIVE_BREAK = 0.5
+
+
+def _operating_above_revenue(records: list[FundamentalFact]) -> set[int]:
+    """A filing period's positive operating income above its revenue: the side that also breaks (by 10^0.5) from the
+    prior-year figure its own filing prints beside it is held, and both when neither or both do."""
+    revenue: dict[tuple[str, date | None, date], list[int]] = {}
+    operating: dict[tuple[str, date | None, date], int] = {}
+    lines: dict[_LineKey, list[FundamentalFact]] = {}
+    for i, f in enumerate(records):
+        if f.period_start is None or f.unit != "USD":
+            continue
+        key = (f.accession, f.period_start, f.period_end)
+        if f.concept in _REVENUE_LINES and f.value > 0:
+            revenue.setdefault(key, []).append(i)
+            lines.setdefault((f.accession, f.concept, f.unit, _duration(f)), []).append(f)
+        elif f.concept == "OperatingIncomeLoss" and f.value > 0:
+            operating[key] = i
+            lines.setdefault((f.accession, f.concept, f.unit, _duration(f)), []).append(f)
+
+    def breaks(i: int) -> bool:
+        own = _own_comparative(records[i], lines)
+        return own is not None and abs(math.log10(records[i].value) - own[0]) > OWN_COMPARATIVE_BREAK
+
+    out: set[int] = set()
+    for period, op in operating.items():
+        tops = revenue.get(period)
+        if not tops:
+            continue
+        top = max(tops, key=lambda i: records[i].value)
+        if records[op].value <= OPERATING_SHARE_OF_REVENUE * records[top].value:
+            continue
+        op_broke, rev_broke = breaks(op), breaks(top)
+        if op_broke or not rev_broke:
+            out.add(op)
+        if rev_broke or not op_broke:
+            out.update(i for i in tops if records[i].value == records[top].value)
     return out
 
 

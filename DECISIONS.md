@@ -285,12 +285,22 @@ terms allow display but forbid derived data, which the three-tag model could not
   rejected. Each position must give the share of open interest the row prints for it (`pct_of_oi_*`, one decimal):
   on the six recorded cassettes (3,840 shares) the recomputed share is never more than 0.05 point off, so a gap over
   0.06 fails the row's validation and refuses the response. Long and short swapped (every net position reversed,
-  every magnitude plausible) was served in every report type (round 29); a swap is now caught unless a category's
-  long and short differ by under about 0.1% of open interest, where the swap changes nothing material. Positions and
-  open interest scaled together keep their shares and are not caught by this check.
-- Rows copied forward (P1 review round 30): a COT week whose every position and open interest repeat the week before,
-  a Treasury day whose whole curve repeats the day before, and a bar identical in open, high, low, close and volume to
-  the bar before are held (none in the recorded COT weeks of 6 series, the 200 recorded Treasury days or the
+  every magnitude plausible) was served in every report type (round 29); a swap that leaves the shares in place is
+  now caught unless a category's long and short differ by under about 0.1% of open interest. Swapped together with
+  their shares, or one category's columns moved into another's, the shares agree again (round 31: 70 of 70 such
+  seeds served), so each week's positions must also move from the week before by the changes the row prints
+  (`change_in_*`, open interest's too): on the six recorded cassettes (4,484 changes, report gaps of 6 to 8 days)
+  they agree exactly in the futures-only reports and within 1 contract in the combined ones, so a gap over 1.5
+  contracts per week marks the week. A wrong week breaks its own change and the next week's; when the weeks either
+  side reconcile through both weeks' printed changes only that week is held, otherwise every week from it on (a
+  swap kept in later weeks is consistent with itself). A week's positions and open interest scaled with its shares
+  left alone (round 31: ×2 was served) no longer follow from the week before, whether its printed changes are scaled
+  with them or not, so that week is held too.
+- Rows copied forward (P1 review round 30, widened in round 31): a COT week whose every position and open interest
+  repeat the week before, a Treasury day repeating the day before in every tenor (no two recorded consecutive days
+  share more than 12 of their 14 tenors), and a bar repeating the bar before in
+  open, high, low and volume (its close touched or not; a bar without volume, as FX, only in full) are held. A
+  Treasury copy with one tenor nudged is not caught: a genuine quiet day (2026-02-03) moved only two tenors, by 0.01 (none in the recorded COT weeks of 6 series, the 200 recorded Treasury days or the
   recorded Kraken bars); bars also hold every close inside a run of 5 or more identical closes anywhere in the window
   (the stale-quote check saw only the end). Macro series (FRED, EIA) are not checked for repeats: a policy rate stays
   the same for weeks. A Treasury row dated a Saturday or a Sunday is refused (never published), and one dated a
@@ -747,6 +757,14 @@ company's very first filing has nothing in the response to be compared with, bey
   shortest genuine gap is 10 days, on 3,055 filings) has all its facts left out: their point-in-time key is in doubt.
   Not detected: a filing date moved earlier but still after the period end (every fact dated a week or two before
   the true filing); the filings index carries the true date and is not yet cross-checked against company facts.
+- *Duplicates and bounds (P1 review round 31).* One filing reports a fact once: a second value for the same
+  concept, unit, period and filing is refused whatever its `frame` (the check had keyed on the frame, so a copy
+  without one served both values; there is no duplicate of any kind in 1.31 million facts of 45 filers). Positive
+  operating income above the same period's largest revenue line (never above 66% of it on 7,093 filing periods)
+  holds the side that also breaks by 10^0.5 from the prior-year figure its filing prints, both when neither or both
+  do (round 31: PG's quarterly operating income ×10, $59.37B against $23.28B of revenue, was served). Revenue ×10
+  alone is not caught: neither its prior-year comparative (TSLA's 2013 revenue grew 10^1.27) nor its ratio to cost
+  of revenue (tagging changes move CAT's and T's by 10^0.98 and 10^-1.9) gives a safe bound.
 - *Cover shares (P1 review round 30).* A filing's cover-page shares outstanding (all classes) and its latest weighted
   average shares sitting 10^(1±0.5) or 10^(2±0.5) apart (never on 2,673 filings of 45 filers; the genuine gaps are
   powers of 1000 or under 10^0.5) mean one of them was keyed a decimal off: the side that also breaks from the same

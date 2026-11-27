@@ -29,6 +29,7 @@ from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
 from rd_data.quality import (
     QA_CONTEXT,
+    CheckResult,
     DataQualityReport,
     check_cadence,
     check_copied_rows,
@@ -142,6 +143,76 @@ def _unshared(row: Mapping[str, Any], names: tuple[str, ...], value: float, oi: 
     return share is not None and oi > 0 and abs(100 * value / oi - share) > SHARE_TOLERANCE
 
 
+#: A position's printed week-on-week change (``change_in_*``) against the difference of the two weeks' positions: on
+#: the six recorded cassettes (4,484 changes, report gaps of 6 to 8 days) they agree exactly in the futures-only
+#: reports and within 1 contract in the combined ones (rounded option deltas).
+CHANGE_TOLERANCE = 1.5
+#: Reports this far apart are consecutive (holiday weeks move the report day by a day or two).
+CONSECUTIVE_DAYS = 10
+
+
+def _change_field(position_field: str) -> str:
+    """``m_money_positions_long_all`` -> ``change_in_m_money_long_all`` (and the ``swap__positions`` quirk)."""
+    return "change_in_" + position_field.replace("__positions_", "_").replace("_positions_", "_")
+
+
+def _changes(row: Mapping[str, Any], report_type: ReportType) -> dict[str, tuple[float, float | None]]:
+    """Each long and short position (and open interest) with the week-on-week change the row prints for it."""
+    out: dict[str, tuple[float, float | None]] = {}
+    oi = as_float(row.get("open_interest_all"))
+    if oi is not None:
+        out["open_interest_all"] = (oi, as_float(row.get("change_in_open_interest_all")))
+    for long_f, short_f, _ in FIELDS[report_type].values():
+        for names in (long_f, short_f):
+            name = next((n for n in names if n in row), None)
+            value = as_float(row.get(name)) if name else None
+            if name and value is not None:
+                out[names[0]] = (value, as_float(row.get(_change_field(name))))
+    return out
+
+
+def check_changes(days: list[date], changes: list[dict[str, tuple[float, float | None]]]) -> CheckResult:
+    """Weeks whose positions do not move from the week before by the changes the row itself prints: columns moved,
+    swapped or keyed wrong, which the shares of open interest cannot show when they were moved with them (long and
+    short swapped with their shares, one category's columns in another's). A wrong week breaks both its own changes
+    and the next week's; when the week before and the week after reconcile through both weeks' printed changes only
+    that week is held, and otherwise every week from it on (a swap kept in later weeks is consistent with itself)."""
+
+    def breaks(k: int, base: int) -> bool:
+        """Whether week k's positions differ from week base's by more than the changes weeks base+1..k print."""
+        if (days[k] - days[base]).days > CONSECUTIVE_DAYS * (k - base):
+            return False  # a gap in the reports: the printed change is against a week that is not here
+        for name, (value, _) in changes[k].items():
+            before = changes[base].get(name)
+            steps = [changes[j].get(name, (0.0, None))[1] for j in range(base + 1, k + 1)]
+            if before is None or any(c is None for c in steps):
+                continue
+            moved = sum(c for c in steps if c is not None)
+            if abs(value - before[0] - moved) > CHANGE_TOLERANCE * len(steps):
+                return True
+        return False
+
+    held: set[int] = set()
+    k = 1
+    while k < len(days):
+        if not breaks(k, k - 1):
+            k += 1
+            continue
+        if k + 1 < len(days) and breaks(k + 1, k) and not breaks(k + 1, k - 1):
+            held.add(k)  # one wrong week: the weeks either side reconcile through it
+            k += 2
+            continue
+        held.update(range(k, len(days)))
+        break
+    indices = tuple(sorted(held))
+    if indices:
+        detail = (
+            f"{len(indices)} week(s) whose positions do not follow from the week before by their printed changes held"
+        )
+        return CheckResult("printed_changes", passed=False, blocking=False, detail=detail, indices=indices)
+    return CheckResult("printed_changes", passed=True, blocking=False, detail="ok")
+
+
 class CftcAdapter(BaseAdapter):
     name: ClassVar[str] = "cftc"
     asset_classes = frozenset(
@@ -200,6 +271,7 @@ class CftcAdapter(BaseAdapter):
                 f"cftc: no {report_type} rows for market {request.params['market_code']}", provider=self.name
             )
         records: list[PositioningReport] = []
+        changes: list[dict[str, tuple[float, float | None]]] = []  # per record: field -> (position, printed change)
         rejected = 0
         asked = str(request.params["market_code"])
         kind = "FutOnly" if futures_only else "Combined"
@@ -209,6 +281,7 @@ class CftcAdapter(BaseAdapter):
                 continue
             try:
                 records.append(self._row(row, report_type, futures_only=futures_only))
+                changes.append(_changes(row, report_type))
             except (KeyError, ValueError, TypeError):
                 rejected += 1
         # a row released after we retrieved it is mislabelled or fabricated, held copy or not: the response is refused
@@ -222,7 +295,9 @@ class CftcAdapter(BaseAdapter):
                 provider=self.name,
             )
         order = check_provider_order([r.as_of for r in records], descending=True)  # requested newest first
-        records.sort(key=lambda r: r.as_of)
+        paired = sorted(zip(records, changes, strict=True), key=lambda rc: rc[0].as_of)
+        records = [r for r, _ in paired]
+        unexplained = check_changes([r.as_of for r in records], [c for _, c in paired])
         base = check_positioning(records, subject=f"cftc:{report_type}:{request.params['market_code']}")
         # Missing weeks are judged on the weeks asked for, not on the extra QA history behind them.
         cadence = check_cadence(
@@ -237,10 +312,13 @@ class CftcAdapter(BaseAdapter):
             ],
             what="week(s)",
         )
-        withheld = tuple(sorted({*oi_outliers.indices, *copied.indices}))
+        withheld = tuple(sorted({*oi_outliers.indices, *copied.indices, *unexplained.indices}))
         quality = with_schema_rejections(
             DataQualityReport(
-                base.subject, (order, *base.checks, cadence, oi_outliers, oi_moves, copied), withheld, len(records)
+                base.subject,
+                (order, *base.checks, cadence, oi_outliers, oi_moves, copied, unexplained),
+                withheld,
+                len(records),
             ),
             rejected,
         )

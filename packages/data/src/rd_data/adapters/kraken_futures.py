@@ -352,6 +352,8 @@ class KrakenFuturesAdapter(BaseAdapter):
         # Too old to use, or stamped after we fetched it (a clock or data error): either way not shown.
         stale_symbols = sorted(
             {m.symbol for m in metrics if now - m.ts > SYMBOL_MAX_AGE or m.ts > raw.retrieved_at + FUTURE_SLACK}
+            # a suspended contract does not trade: its last figures are not a current market
+            | {s for s in parsed["funding"] if parsed["tickers"][s]["info"].get("suspended") is True}
         )
         off_quotes = _mark_off_quotes(parsed["tickers"], set(parsed["funding"]), _all_tickers(raw))
         diverged = sorted({*_mark_index_divergence(metrics), *off_quotes})
@@ -368,7 +370,9 @@ class KrakenFuturesAdapter(BaseAdapter):
         requested = [x.strip() for x in str(request.params["symbols"]).split(",")]
         missing = [x for x in requested if x not in {m.symbol for m in metrics}]
         extra_checks = (
-            _warning(stale_symbols, f"older than {SYMBOL_MAX_AGE} or future-dated, quarantined", "stale_symbols"),
+            _warning(
+                stale_symbols, f"older than {SYMBOL_MAX_AGE}, future-dated or suspended, quarantined", "stale_symbols"
+            ),
             _warning(
                 diverged,
                 f"mark and index more than {MAX_MARK_INDEX_GAP:.0%} apart, or mark more than x{MAX_MARK_QUOTE_FACTOR} "

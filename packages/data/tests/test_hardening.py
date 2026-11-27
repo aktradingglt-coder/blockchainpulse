@@ -22,7 +22,7 @@ from rd_core.clock import FixedClock
 from rd_core.settings import Settings
 from rd_data.adapters import sec_scale
 from rd_data.adapters.base import AdapterContext, BaseAdapter, DataRequest, DataResponse, RequestKind
-from rd_data.adapters.cftc import FIELDS, CftcAdapter
+from rd_data.adapters.cftc import FIELDS, CftcAdapter, check_changes
 from rd_data.adapters.eia import EiaAdapter
 from rd_data.adapters.fred import FredAdapter
 from rd_data.adapters.kraken_futures import KrakenFuturesAdapter
@@ -50,6 +50,7 @@ from rd_data.schemas import (
     FundamentalFact,
     Instrument,
     MacroObservation,
+    PositioningReport,
     TreasuryYieldPoint,
 )
 
@@ -343,8 +344,8 @@ async def test_fred_monthly_value_is_fresh_on_release_day() -> None:
 async def test_kraken_intraday_bars_are_judged_from_their_close(ctx_factory: Any) -> None:
     hour = datetime(2026, 10, 21, 10, tzinfo=UTC)
     candles = [
-        {"time": int((hour - timedelta(hours=k + 1)).timestamp() * 1000), "open": "100", "high": "101",
-         "low": "99", "close": f"{100 + 0.1 * math.sin(k)}", "volume": "5"}
+        {"time": int((hour - timedelta(hours=k + 1)).timestamp() * 1000), "open": f"{100 + 0.1 * math.cos(k)}",
+         "high": "101", "low": "99", "close": f"{100 + 0.1 * math.sin(k)}", "volume": f"{5 + k % 3}"}
         for k in range(30, -1, -1)
     ]  # fmt: skip
     ctx, _ = ctx_factory(_kraken_handler(candles), now=hour + timedelta(minutes=5), cache=False)
@@ -1093,8 +1094,8 @@ async def test_kraken_future_ticker_gap_and_misaligned_bar(ctx_factory: Any) -> 
 
     hour = datetime(2026, 10, 21, 10, tzinfo=UTC)
     candles = [
-        {"time": int((hour - timedelta(hours=k + 1)).timestamp() * 1000), "open": "100", "high": "101",
-         "low": "99", "close": f"{100 + 0.1 * math.sin(k)}", "volume": "5"}
+        {"time": int((hour - timedelta(hours=k + 1)).timestamp() * 1000), "open": f"{100 + 0.1 * math.cos(k)}",
+         "high": "101", "low": "99", "close": f"{100 + 0.1 * math.sin(k)}", "volume": f"{5 + k % 3}"}
         for k in range(40, -1, -1)
         if not 10 <= k < 20  # a ten-hour hole
     ]  # fmt: skip
@@ -4915,3 +4916,130 @@ async def test_kraken_ticker_scaled_whole_is_held_against_the_pairs_index(factor
     resp = await _derivatives(lambda t: _scale(t, factor, *fields))
     shown = {m.metric for m in resp.records if isinstance(m, CryptoDerivativeMetric) and m.symbol == "BTC/USD:USD"}
     assert not shown & {"mark_price", "index_price", "funding_rate"}
+
+
+# ------------------------------------------------------------------------------------- review round 31 (P1)
+
+
+def _swap_fields(row: dict[str, Any], a: str, b: str) -> None:
+    if a in row and b in row:
+        row[a], row[b] = row[b], row[a]
+
+
+@pytest.mark.parametrize("weeks", [1, 3])
+@pytest.mark.parametrize("report_type", ["legacy", "disaggregated", "tff"])
+async def test_cot_long_short_swapped_with_their_shares_is_held(report_type: str, weeks: int) -> None:
+    """Long and short swapped in every category of the newest week (or three) together with their printed shares of
+    open interest, so the shares still agree: the positions no longer move from the week before by the changes the
+    row prints, so the swapped weeks are held and no reversed net is served."""
+    request = _plan(CftcAdapter, RequestKind.COT, report_type=report_type, futures_only=None)
+    clean = await _replay(CftcAdapter, request)
+
+    def swap(body: str) -> str:
+        rows = json.loads(body)  # newest first
+        for row in rows[:weeks]:
+            for long_f, short_f, _ in FIELDS[report_type].values():  # type: ignore[index]  # a ReportType literal
+                lf = next(n for n in long_f if n in row)
+                sf = next(n for n in short_f if n in row)
+                _swap_fields(row, lf, sf)
+                _swap_fields(row, "pct_of_oi_" + lf.replace("__positions_", "_").replace("_positions_", "_"),
+                             "pct_of_oi_" + sf.replace("__positions_", "_").replace("_positions_", "_"))  # fmt: skip
+        return json.dumps(rows)
+
+    try:
+        resp = await _replay(CftcAdapter, request, {0: swap})
+    except Stale:
+        return
+    newest = sorted(r.as_of for r in clean.records if isinstance(r, PositioningReport))[-weeks:]
+    assert not any(isinstance(r, PositioningReport) and r.as_of in newest for r in resp.records)
+    assert any(w.startswith("printed_changes") for w in resp.quality.warnings)
+
+
+def test_one_wrong_cot_week_inside_the_window_is_held_alone() -> None:
+    """A week whose positions were swapped breaks its own printed change and the next week's, but the weeks either
+    side reconcile through both weeks' printed changes: only that week is held."""
+    days = [date(2026, 9, 1) + timedelta(days=7 * k) for k in range(6)]
+    longs = [100.0, 110.0, 95.0, 120.0, 118.0, 130.0]
+    rows = [{"long": (v, None if k == 0 else v - longs[k - 1])} for k, v in enumerate(longs)]
+    rows[2] = {"long": (400.0, rows[2]["long"][1])}  # week 2 keyed wrong, its printed change genuine
+    result = check_changes(days, rows)
+    assert result.indices == (2,)
+    assert check_changes(
+        days, [{"long": (v, None if k == 0 else v - longs[k - 1])} for k, v in enumerate(longs)]
+    ).passed
+
+
+async def test_sec_second_value_for_one_fact_is_refused_whatever_its_frame() -> None:
+    """The newest revenue fact repeated with a value x1.2 and no frame: one filing reports a fact once (no duplicate
+    of any kind in 1.31 million facts of 45 filers), so the response is refused rather than serving both values."""
+    request = _plan(SecEdgarAdapter, RequestKind.COMPANY_FACTS)
+
+    def duplicate(data: dict[str, Any], newest: str) -> None:
+        for c in data["facts"]["us-gaap"].values():
+            for u in c["units"].values():
+                fact = next((f for f in u if f["accn"] == newest and f.get("start")), None)
+                if fact is not None:
+                    copy = {k: v for k, v in fact.items() if k != "frame"}
+                    u.append({**copy, "val": fact["val"] * 1.2})
+                    return
+
+    with pytest.raises(DataQualityError, match="duplicate"):
+        await _replay(SecEdgarAdapter, request, {0: _sec_edit_newest(duplicate)})
+
+
+def test_operating_income_above_revenue_holds_the_side_that_slipped() -> None:
+    """Operating income x10 in the newest filing sits above its revenue (genuinely at most 66% of it on 7,093 filing
+    periods): it also breaks from the prior-year figure its filing prints, revenue does not, so it alone is held."""
+
+    def flow(concept: str, start: str, end: str, value: float, accession: str) -> FundamentalFact:
+        return FundamentalFact(
+            cik="0000000001", concept=concept, taxonomy="us-gaap", unit="USD", value=value,
+            period_start=date.fromisoformat(start), period_end=date.fromisoformat(end), form="10-Q",
+            filed=date.fromisoformat(end) + timedelta(days=30), accession=accession,
+        )  # fmt: skip
+
+    records = [
+        flow("Revenues", "2025-07-01", "2025-09-30", 22e9, "new"),
+        flow("Revenues", "2026-07-01", "2026-09-30", 23e9, "new"),
+        flow("OperatingIncomeLoss", "2025-07-01", "2025-09-30", 5.5e9, "new"),
+        flow("OperatingIncomeLoss", "2026-07-01", "2026-09-30", 59e9, "new"),  # x10
+    ]
+    held = sec_scale._operating_above_revenue(records)
+    assert {(records[i].concept, records[i].period_end.year) for i in held} == {("OperatingIncomeLoss", 2026)}
+
+
+async def test_treasury_near_copies_and_kraken_near_copy_bars_are_held() -> None:
+    """The newest three days repeating the day before (no two genuine consecutive days share more than 12 of 14
+    tenors), and the newest bars repeating the bar before in open, high, low and volume with the close nudged: copies,
+    held, so the responses are only as fresh as the genuine rows."""
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+
+    def nudge(rows: list[list[str]]) -> None:
+        for k in (3, 2, 1):  # newest first: row 1 is the newest day; an exact copy (a nudged one is a quiet day)
+            rows[k] = [rows[k][0], *rows[k + 1][1:]]
+
+    with pytest.raises(Stale):
+        await _replay(TreasuryAdapter, request, {0: _csv_edit(nudge)})
+
+    bars = _plan(KrakenFuturesAdapter, RequestKind.BARS)
+
+    def edit(data: dict[str, Any]) -> None:
+        candles = data.get("candles")
+        if isinstance(candles, list):
+            for k in range(len(candles) - 4, len(candles)):
+                prior = candles[k - 1]
+                candles[k] = {**prior, "time": candles[k]["time"], "close": str(float(prior["close"]) + 0.5)}
+
+    cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(bars))
+    resp = await _replay(KrakenFuturesAdapter, bars, {i: _json_edit(edit) for i in range(len(cassette.interactions))})
+    assert len(resp.quarantined) == 4
+    assert any(w.startswith("copied_rows") for w in resp.quality.warnings)
+
+
+async def test_a_suspended_kraken_contract_is_not_shown() -> None:
+    def suspend(t: dict[str, Any]) -> None:
+        t["suspended"] = True
+
+    resp = await _derivatives(suspend)
+    assert {m.symbol for m in resp.records if isinstance(m, CryptoDerivativeMetric)} == {"ETH/USD:USD"}
+    assert any(w.startswith("stale_symbols") for w in resp.quality.warnings)

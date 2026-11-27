@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
 import math
 import re
 from collections.abc import Mapping
@@ -26,7 +27,6 @@ from rd_data.quality import (
     QA_CONTEXT,
     CheckResult,
     DataQualityReport,
-    check_copied_rows,
     check_duplicates,
     check_provider_order,
     check_range,
@@ -78,6 +78,9 @@ AMBIGUOUS_END_RUN = 3
 #: (the largest daily move of any tenor in the recorded 2026 file is 0.16 point); one that stays (the curve keyed x2
 #: or ÷10 from some day on) is held however many days share it (D-033).
 YIELD_IMPLAUSIBLE_MOVE = 1.5
+#: A day sharing at least this many tenors with the day before, all unchanged, repeats it (see _copied_curves). A
+#: copy with one tenor nudged is not told from a quiet day: on 2026-02-03 only the 7Y and 10Y moved, by 0.01 each.
+COPY_MIN_TENORS = 10
 #: datetime.weekday() of Saturday.
 SATURDAY = 5
 #: Consecutive publication days with an identical full curve that mean the source stopped updating.
@@ -422,17 +425,26 @@ def _is_session(day: date) -> bool:
 
 
 def _copied_curves(points: list[TreasuryYieldPoint]) -> CheckResult:
-    """Days whose whole curve (every tenor's yield) repeats the publication day before: a copy carried forward, not a
-    day's quotes (no two consecutive days of the recorded 2026 file share a curve). Every point of such a day is
-    held."""
-    curves: dict[datetime, list[int]] = {}
+    """Days whose curve repeats the publication day before in every tenor (of at least COPY_MIN_TENORS compared): a
+    copy carried forward, not a day's quotes (no two consecutive days of the recorded 2026 file share more than 12 of
+    their 14 tenors). Every tenor is compared, held ones too: leaving held tenors out would make a quiet day whose only
+    movers were held (2026-02-03 moved only the 7Y and 10Y) look like a copy. Every point of such a day is held."""
+    curves: dict[datetime, dict[str, float]] = {}
+    index: dict[datetime, list[int]] = {}
     for i, p in enumerate(points):
-        curves.setdefault(p.ts, []).append(i)
+        index.setdefault(p.ts, []).append(i)
+        curves.setdefault(p.ts, {})[p.tenor] = p.yield_pct
     days = sorted(curves)
-    shape = {d: tuple(sorted((points[i].tenor, points[i].yield_pct) for i in curves[d])) for d in days}
-    check = check_copied_rows([shape[d] for d in days], what="day(s) with the curve of the day before")
-    held = tuple(sorted(i for k in check.indices for i in curves[days[k]]))
-    return CheckResult(check.name, passed=check.passed, blocking=False, detail=check.detail, indices=held)
+    copies: list[datetime] = []
+    for before, day in itertools.pairwise(days):
+        shared = curves[day].keys() & curves[before].keys()
+        if len(shared) >= COPY_MIN_TENORS and all(curves[day][t] == curves[before][t] for t in shared):
+            copies.append(day)
+    held = tuple(sorted(i for d in copies for i in index[d]))
+    if held:
+        detail = f"{len(copies)} day(s) repeating the curve of the day before quarantined"
+        return CheckResult("copied_rows", passed=False, blocking=False, detail=detail, indices=held)
+    return CheckResult("copied_rows", passed=True, blocking=False, detail="ok")
 
 
 def _frozen_curve(points: list[TreasuryYieldPoint], days: list[datetime]) -> CheckResult:
