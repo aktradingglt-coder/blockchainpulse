@@ -181,7 +181,9 @@ the adapter's licence is `byo_key_only` until the owner confirms them.
 ### D-030 · 2026-10-21 · Freshness origin: bar close and release time; fixed-width bars
 **Decision.** Freshness is always measured from when data *became* true. Bars are judged from their close (a 1h bar
 labelled 10:00 is as of 11:00). Macro and inventory series are judged from their release: FRED from the series'
-`last_updated`, EIA weekly series from the scheduled release (petroleum Wednesday, natural gas Thursday, 15:30 UTC
+`last_updated` (for a daily series never more than 3 days past its newest observation, as `last_updated` moves with
+revisions and metadata edits: a week-old yield was labelled fresh because the series was touched the day before, P1
+review round 29), EIA weekly series from the scheduled release (petroleum Wednesday, natural gas Thursday, 15:30 UTC
 after the week-ending Friday), capped at the time we retrieved the data. Bars of a fixed width other than one
 session (1h, 4h, 1w) get a rule derived from the daily-bar row of §5.4: stale once the next bar is overdue
 (close + width + delay + 5 min), blocked after three missed bars (close + 3 × width + delay + 30 min). Intraday bars
@@ -248,7 +250,15 @@ terms allow display but forbid derived data, which the three-tag model could not
   contract volume must match its 24h quote volume (within 10^-6): × the 24h VWAP for a linear (PF_) contract, equal
   for an inverse (PI_) one, whose contract is worth one quote unit; both hold to float precision on every ticker of
   the recording; else the volume is quarantined (P1 review rounds 24–25). A requested symbol the exchange did not
-  return is reported.
+  return is reported. The mark must also sit within ×1.5 of the median of the same ticker's last trade, bid and ask,
+  and the index within ×1.5 of the index the exchange's other contracts on the same pair carry (on the 211
+  perpetuals of the recording: the mark within ×1.24 of its quotes, an illiquid FX perpetual, and the pair's indexes
+  within 0.03% of each other), else mark, index and funding are quarantined; and the funding rate served (absolute
+  funding over the mark) must agree with the ticker's own relative funding within 5% and in sign (within 2.6% on
+  every perpetual of the recording), else the funding rate is quarantined (round 29: mark and index ×10 together,
+  every price of the ticker ÷10, and the absolute funding ×100 or sign-reversed alone were served). Open interest has
+  no such anchor: its ratio to the 24h quote volume ranges from 0.01 to 2,840 across the recording, so a slipped open
+  interest is not detected.
 - Bars (every source): a high more than 3× the bar's larger of open and close, or a low under a third of the smaller,
   is a bad print even when every bar shares it (a column keyed in the wrong unit, which the field's own series cannot
   show): the recorded Kraken bars' widest wicks are +3.0% and −4.5%; a genuine flash-crash wick beyond 3× would be
@@ -263,9 +273,21 @@ terms allow display but forbid derived data, which the three-tag model could not
   judged smallest run first and only against tenors still on the curve, so tenors keyed in the wrong unit together
   do not vouch for each other (round 27: 7Y and 10Y doubled, 20Y and 30Y ÷10, 2Y–5Y ÷10, the bills doubled). Measured only on the recorded 2026 file (201
   days): genuine curves stay within 0.08 of the band; the Treasury host is not reachable from the build environment
-  for a longer calibration (STATUS) (P1 review round 26).
+  for a longer calibration (STATUS) (P1 review round 26). Tenors keyed wrong together vouch for each other when
+  they are the majority: with every tenor from 2Y out ÷10, or from 1Y out ×2, the genuine bills were the run judged
+  off the curve and the slipped majority was served (round 29). An off-curve run of 3 or more tenors at one end of
+  the curve splits the day into two blocks the file cannot arbitrate, so that day's whole curve is held; one or two
+  end tenors against the rest are still held alone. Not detected: a whole file keyed in the wrong unit (every tenor
+  of every day ÷10 or ×2) has no anchor in the file, and at low rates (bills near zero) the 1.0-point band does not
+  see the bills ×10 (the round-29 reviewer's synthetic 2021-style file). Both need an outside anchor (the previous
+  year's file fetched every time, or another source's curve) or a longer calibration than the one recorded year.
 - COT: both the long and the short side (with spreading) must sum to open interest; rows for another market are
-  rejected.
+  rejected. Each position must give the share of open interest the row prints for it (`pct_of_oi_*`, one decimal):
+  on the six recorded cassettes (3,840 shares) the recomputed share is never more than 0.05 point off, so a gap over
+  0.06 fails the row's validation and refuses the response. Long and short swapped (every net position reversed,
+  every magnitude plausible) was served in every report type (round 29); a swap is now caught unless a category's
+  long and short differ by under about 0.1% of open interest, where the swap changes nothing material. Positions and
+  open interest scaled together keep their shares and are not caught by this check.
 - Corporate actions: an unexplained split-ratio jump blocks the series only when split dates come from a
   corporate-actions source; without one (Twelve Data today) it is a warning, because a genuine −33% or ×2 day cannot
   be told from an unadjusted split.
@@ -582,6 +604,16 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
     facts). Income statements are not judged on sign: a genuine loss reverses a whole income statement (C's fourth
     quarter and BRK's first quarter of 2009). With both tests it adds no clean holds (335 before and after, none in a
     newest filing).
+    A slip repeated over consecutive filings puts the later slipped quarters into each one's history on both sides
+    (the four nearest periods), so no slipped statement stood a clean step from its history. The faces are therefore
+    also taken in filing order against their earlier history alone, leaving out the facts already held and each face
+    this pass holds: the first slipped statement stands against genuine history and each later one against the
+    genuine periods before the run (round 29: three consecutive 10-Q balance sheets ÷10 served the newest at 13 of 14
+    calibration filers, BA and F among the out-of-sample ones). In both passes a fact counts toward a decimal step
+    only if it keeps the sign of its own comparative: a decimal slip never changes a sign, while a genuine collapse
+    into a loss sits 10^1 below a profitable history and its comparative with the opposite sign (round 29: MRK's
+    nine months to September 2026, a −$510M loss, had 16 genuine facts of its newest 10-Q held; the one-sided pass
+    also held 12 genuine lines of PFE's second-quarter 2026 loss).
 
 All checks run on every concept the company reports; a `concepts` filter narrows only what is returned, and the
 returned concepts alone date the response (a concept last reported years ago is as old as its last report).

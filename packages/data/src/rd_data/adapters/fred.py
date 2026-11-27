@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
 import orjson
@@ -163,12 +163,29 @@ class FredAdapter(BaseAdapter):
             licence_override=override,
             # When the newest observation is held back, the response is only as fresh as what it shows: freshness
             # then runs from the newest usable observation, not from the series' last update.
-            freshness_as_of=as_of if latest_held else (updated or as_of),
+            freshness_as_of=as_of if latest_held else _released(updated, as_of, frequency),
         )
 
     @staticmethod
     def recording_plan() -> list[DataRequest]:
         return [DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"})]
+
+
+#: A daily FRED observation is published within this long of its date (the H.15 yields the next business day, so a
+#: Friday's by Monday, a holiday Monday's by Tuesday). A series' ``last_updated`` can move on without a new
+#: observation (a revision, a metadata edit), so for daily series it never vouches for more than this past the newest
+#: observation: a week-old yield is not labelled fresh because the series was touched yesterday.
+DAILY_PUBLICATION_LAG = timedelta(days=3)
+
+
+def _released(updated: datetime | None, as_of: datetime | None, frequency: str) -> datetime | None:
+    """When the newest observation counts as released, for freshness: the series' last update, capped for daily
+    series at DAILY_PUBLICATION_LAG past the observation."""
+    if as_of is None or updated is None:
+        return updated or as_of
+    if frequency == "daily":
+        return min(updated, as_of + DAILY_PUBLICATION_LAG)
+    return updated
 
 
 def _last_updated(text: object) -> datetime | None:

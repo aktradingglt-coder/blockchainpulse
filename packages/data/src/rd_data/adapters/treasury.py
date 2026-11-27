@@ -68,6 +68,11 @@ NYSE = ExchangeCalendar("XNYS")
 #: the nearer one by more than the two neighbours differ, at either end of the curve) is a bad print, even when every
 #: day's value of that tenor shares it: the recorded 2026 curves stay within 0.08 of the band.
 KINK_BOUND = 1.0
+#: An off-curve run of this many tenors or more at one end of the curve splits the day into two blocks (the bills ÷10,
+#: or every tenor from 1Y or 2Y out keyed x2 or ÷10 with the bills genuine), and the day's file cannot say which block
+#: was keyed wrong: the smaller one is not the wrong one when the slip covers most tenors. That day's whole curve is
+#: held. One or two tenors at an end against a dozen on the curve are still held alone.
+AMBIGUOUS_END_RUN = 3
 #: A par yield moving more than this many percentage points in one day is a unit or decimal error, not a market move
 #: (the largest daily move of any tenor in the recorded 2026 file is 0.16 point); one that stays (the curve keyed x2
 #: or ÷10 from some day on) is held however many days share it (D-033).
@@ -310,8 +315,17 @@ def _kinked_tenors(points: list[TreasuryYieldPoint], *, exclude: set[int]) -> li
                 offs = _run_offsets(values, lo, hi, refs)
                 if all(o > KINK_BOUND for o in offs) or all(o < -KINK_BOUND for o in offs):
                     off_curve.update(range(lo, hi + 1))
+        if _end_run(off_curve, len(values)) >= AMBIGUOUS_END_RUN:
+            off_curve = set(range(len(values)))  # two blocks of the curve disagree: neither vouches for the other
         out.update(curve[k] for k in off_curve)
     return sorted(out)
+
+
+def _end_run(positions: set[int], count: int) -> int:
+    """The longest run of the given curve positions that starts at either end of a curve of ``count`` tenors."""
+    head = next((k for k in range(count) if k not in positions), count)
+    tail = next((k for k in range(count) if count - 1 - k not in positions), count)
+    return max(head, tail)
 
 
 def _run_references(count: int, lo: int, hi: int) -> tuple[int, int] | None:

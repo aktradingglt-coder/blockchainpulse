@@ -22,7 +22,7 @@ from rd_core.clock import FixedClock
 from rd_core.settings import Settings
 from rd_data.adapters import sec_scale
 from rd_data.adapters.base import AdapterContext, BaseAdapter, DataRequest, DataResponse, RequestKind
-from rd_data.adapters.cftc import CftcAdapter
+from rd_data.adapters.cftc import FIELDS, CftcAdapter
 from rd_data.adapters.eia import EiaAdapter
 from rd_data.adapters.fred import FredAdapter
 from rd_data.adapters.kraken_futures import KrakenFuturesAdapter
@@ -4509,3 +4509,179 @@ def test_a_face_balance_sheet_slipped_as_a_whole_inside_a_genuine_column_is_held
         [*_seeded(statement, set(), 1.0, years, instants=True), *_seeded(notes, set(), 1.0, years, instants=True)]
     )
     assert not clean
+
+
+def _quarterly_balance_sheets(factor: float, slipped: int) -> tuple[list[FundamentalFact], set[tuple[str, date, str]]]:
+    """Quarterly balance sheets 2022-2026 (synthetic round figures growing 0.75% a quarter, not any filer's): each
+    10-Q prints its quarter end and, beside it, the prior year end; each 10-K its year end and the one before. The
+    statement of the ``slipped`` newest 10-Qs is keyed ``factor`` off at its own quarter end (its comparative and the
+    footnotes genuine). Returns the records and the (concept, period end, accession) of every seeded fact."""
+    base = _balance_sheet()
+    lines = {c: v[0] for c, v in base.items()}
+    lines |= {f"Note{k:02d}": (1 + 0.1 * k) * 1e9 for k in range(12)}
+    ends = [date(y, m, d) for y in range(2022, 2027) for m, d in ((3, 31), (6, 30), (9, 30), (12, 31))]
+    ends = [e for e in ends if e <= date(2026, 9, 30)]
+
+    def level(concept: str, end: date) -> float:
+        return lines[concept] * 1.0075 ** ends.index(end)
+
+    filings: list[tuple[str, date, date | None, bool]] = []
+    for end in ends:
+        prior = date(end.year - 1, 12, 31)
+        filings.append((f"q{end.isoformat()}", end, prior if prior in ends else None, end.month != 12))
+    quarters = [a for a, _, _, is_q in filings if is_q]
+    hit = set(quarters[-slipped:]) if slipped else set()
+    records: list[FundamentalFact] = []
+    seeded: set[tuple[str, date, str]] = set()
+    for accession, closing, comparative, is_q in filings:
+        for concept in lines:
+            for when in (closing, comparative):
+                if when is None:
+                    continue
+                value = level(concept, when)
+                if accession in hit and when == closing and concept in base:
+                    value *= factor
+                    seeded.add((concept, closing, accession))
+                fact = FundamentalFact(
+                    cik="0000000001", concept=concept, taxonomy="us-gaap", unit="USD", value=value,
+                    period_start=None, period_end=when, form="10-Q" if is_q else "10-K",
+                    filed=closing + timedelta(days=40), accession=accession,
+                )  # fmt: skip
+                records.append(fact)
+    return records, seeded
+
+
+@pytest.mark.parametrize("factor", [0.1, 10.0])
+@pytest.mark.parametrize("slipped", [2, 3, 4])
+def test_a_balance_sheet_slipped_in_consecutive_quarters_is_held_in_every_one(factor: float, slipped: int) -> None:
+    """The balance sheet of the two, three or four newest 10-Qs keyed at a tenth or 10x (the footnotes and the
+    prior-year comparatives genuine): the later slipped quarters sit in each one's history on both sides, so only the
+    filing order shows it. Every slipped statement is held, the newest too; beyond them only the genuine year end the
+    slipped quarters surround (most of its neighbours slipped) may be held with them, never a footnote; unslipped,
+    nothing."""
+    records, seeded = _quarterly_balance_sheets(factor, slipped)
+    held, _ = sec_scale.scale_errors(records)
+    got = {(records[i].concept, records[i].period_end, records[i].accession) for i in held}
+    assert seeded <= got
+    assert {(c, end) for c, end, _ in got - seeded} <= {(c, date(2025, 12, 31)) for c in _balance_sheet()}
+    clean, _ = sec_scale.scale_errors(_quarterly_balance_sheets(1.0, 0)[0])
+    assert not clean
+
+
+# ------------------------------------------------------------------------------------- review round 29 (P1)
+
+
+@pytest.mark.parametrize("weeks", [1, 4])
+@pytest.mark.parametrize("report_type", ["legacy", "disaggregated", "tff"])
+async def test_cot_long_and_short_swapped_are_refused(report_type: str, weeks: int) -> None:
+    """Long and short swapped in every category of the newest week (or four): every net position reversed, every
+    magnitude plausible. The row still prints each position's share of open interest, which the swapped positions no
+    longer give, so the rows fail validation and the response is refused."""
+    request = _plan(CftcAdapter, RequestKind.COT, report_type=report_type, futures_only=None)
+
+    def swap(body: str) -> str:
+        rows = json.loads(body)  # newest first
+        for row in rows[:weeks]:
+            for long_f, short_f, _ in FIELDS[report_type].values():  # type: ignore[index]
+                lf = next(n for n in long_f if n in row)
+                sf = next(n for n in short_f if n in row)
+                row[lf], row[sf] = row[sf], row[lf]
+        return json.dumps(rows)
+
+    with pytest.raises(DataQualityError, match="schema"):
+        await _replay(CftcAdapter, request, {0: swap})
+
+
+async def test_cot_rows_printing_their_shares_pass_untouched() -> None:
+    """The recorded rows' positions give the shares of open interest they print (to the CFTC's one decimal)."""
+    for report_type in ("legacy", "disaggregated", "tff"):
+        resp = await _replay(CftcAdapter, _plan(CftcAdapter, RequestKind.COT, report_type=report_type))
+        assert resp.records
+        assert not any("schema" in w for w in resp.quality.warnings)
+
+
+def _scale(t: dict[str, Any], factor: float, *fields: str) -> None:
+    for name in fields:
+        t[name] = t[name] * factor
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        ("markPrice", "indexPrice"),
+        ("markPrice",),
+        ("markPrice", "indexPrice", "last", "bid", "ask", "high24h", "low24h", "open24h", "vwap24h"),
+    ],
+)
+@pytest.mark.parametrize("factor", [10.0, 0.1])
+async def test_kraken_mark_keyed_a_digit_off_is_held_with_what_it_feeds(fields: tuple[str, ...], factor: float) -> None:
+    """The mark price (with its index, or with every price of the ticker) x10 or /10: the mark-index gap cannot see a
+    pair moved together, but the ticker's own last trade, bid and ask, the index on the pair's other contracts and the
+    ticker's relative funding can. Mark, index and funding are held; open interest is still shown."""
+    resp = await _derivatives(lambda t: _scale(t, factor, *fields))
+    shown = {m.metric for m in resp.records if isinstance(m, CryptoDerivativeMetric) and m.symbol == "BTC/USD:USD"}
+    assert not shown & {"mark_price", "index_price", "funding_rate"}
+    assert "open_interest" in shown
+
+
+@pytest.mark.parametrize("factor", [100.0, -1.0, 0.5])
+async def test_kraken_absolute_funding_slipped_alone_is_held(factor: float) -> None:
+    """The absolute funding figure x100, sign-reversed or halved, the relative one genuine: the served rate (absolute
+    over mark) disagrees with the ticker's own relative funding, so the funding rate is held and the rest shown."""
+    resp = await _derivatives(lambda t: _scale(t, factor, "fundingRate"))
+    shown = {m.metric for m in resp.records if isinstance(m, CryptoDerivativeMetric) and m.symbol == "BTC/USD:USD"}
+    assert "funding_rate" not in shown
+    assert {"mark_price", "index_price"} <= shown
+    assert any(w.startswith("funding") for w in resp.quality.warnings)
+
+
+async def test_kraken_recorded_tickers_pass_the_mark_and_funding_checks() -> None:
+    resp = await _derivatives(lambda _t: None)
+    assert not resp.quarantined
+    assert len(resp.records) == 10
+
+
+async def test_a_week_old_fred_daily_yield_is_not_fresh_because_the_series_was_touched(ctx_factory: Any) -> None:
+    """DGS10's newest observation is a week old while ``last_updated`` says yesterday (a revision, a metadata edit):
+    freshness runs from the observation plus the publication lag, so the yield is not labelled fresh."""
+    values = [4.08 + 0.03 * math.sin(k) for k in range(60)]
+    info, obs = _fred_daily(values)
+    body = json.loads(obs)
+    body["observations"] = [o for o in body["observations"] if o["date"] <= "2026-10-13"]
+    meta = json.loads(info)
+    meta["seriess"][0]["last_updated"] = "2026-10-21 15:18:02-05"
+    ctx, _ = ctx_factory(
+        lambda r: httpx.Response(200, text=json.dumps(meta) if r.url.path.endswith("/series") else json.dumps(body)),
+        now=datetime(2026, 10, 21, 22, tzinfo=UTC),
+        flags={"provider_fred": True},
+        **SETTINGS,
+    )
+    adapter = FredAdapter(ctx)
+    try:
+        resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"}))
+    except Stale:
+        return
+    finally:
+        await adapter.aclose()
+    assert resp.freshness is not None
+    assert resp.freshness.status is not Freshness.FRESH
+
+
+@pytest.mark.parametrize(("first", "factor"), [("2 Yr", 0.1), ("1 Yr", 2.0), ("1 Mo", 10.0 / 3)])
+async def test_a_curve_split_into_two_disagreeing_blocks_is_held_whole(first: str, factor: float) -> None:
+    """Every tenor from 2Y (or 1Y) out keyed /10 or x2 on every day, the bills genuine, or the bills alone scaled: the
+    day's curve breaks into two blocks of several tenors and the file cannot say which was keyed wrong, so no day is
+    served (the smaller block is not the wrong one when the slip covers most tenors)."""
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+    names = list(COLUMNS)
+    picked = set(names[names.index(first) :]) if first != "1 Mo" else set(names[: names.index("1 Yr")])
+
+    def edit(rows: list[list[str]]) -> None:
+        header = rows[0]
+        for row in rows[1:]:
+            for k, name in enumerate(header):
+                if name in picked and row[k]:
+                    row[k] = f"{float(row[k]) * factor:.2f}"
+
+    with pytest.raises(DataQualityError, match="every record was quarantined"):
+        await _replay(TreasuryAdapter, request, {0: _csv_edit(edit)})

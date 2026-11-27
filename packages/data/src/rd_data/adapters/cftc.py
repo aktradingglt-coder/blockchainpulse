@@ -121,6 +121,25 @@ def _first(row: Mapping[str, Any], names: tuple[str, ...]) -> float | None:
     return None
 
 
+#: The CFTC prints each position's share of open interest to one decimal; measured on the six recorded cassettes
+#: (3,840 shares) the share recomputed from the position is never more than 0.05 points away. A wider gap means the
+#: row's positions are not the ones its shares were computed from: long and short swapped (every net reversed, which no
+#: magnitude check sees), a position keyed in the wrong field or a slipped digit.
+SHARE_TOLERANCE = 0.06
+
+
+def _share_field(position_field: str) -> str:
+    """``m_money_positions_long_all`` -> ``pct_of_oi_m_money_long_all`` (and the ``swap__positions`` quirk)."""
+    return "pct_of_oi_" + position_field.replace("__positions_", "_").replace("_positions_", "_")
+
+
+def _unshared(row: Mapping[str, Any], names: tuple[str, ...], value: float, oi: float) -> bool:
+    """Whether the row prints a share of open interest for this position that the position does not give."""
+    name = next((n for n in names if n in row), None)
+    share = as_float(row.get(_share_field(name))) if name else None
+    return share is not None and oi > 0 and abs(100 * value / oi - share) > SHARE_TOLERANCE
+
+
 class CftcAdapter(BaseAdapter):
     name: ClassVar[str] = "cftc"
     asset_classes = frozenset(
@@ -229,15 +248,17 @@ class CftcAdapter(BaseAdapter):
 
     def _row(self, row: Mapping[str, Any], report_type: ReportType, *, futures_only: bool) -> PositioningReport:
         categories: dict[str, PositionCounts] = {}
+        oi = as_float(row.get("open_interest_all"))
+        if oi is None:
+            raise KeyError("open_interest_all")
         for category, (long_f, short_f, spread_f) in FIELDS[report_type].items():
             long_v, short_v = _first(row, long_f), _first(row, short_f)
             if long_v is None or short_v is None:
                 raise KeyError(f"missing {category} fields")
+            if _unshared(row, long_f, long_v, oi) or _unshared(row, short_f, short_v, oi):
+                raise ValueError(f"{category} positions disagree with their printed shares of open interest")
             spread_v = _first(row, spread_f) if spread_f else None
             categories[category] = PositionCounts(long=long_v, short=short_v, spreading=spread_v)
-        oi = as_float(row.get("open_interest_all"))
-        if oi is None:
-            raise KeyError("open_interest_all")
         report_date = str(row["report_date_as_yyyy_mm_dd"])[:10]
         return PositioningReport(
             market_code=str(row["cftc_contract_market_code"]),

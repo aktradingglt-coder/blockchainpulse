@@ -874,7 +874,7 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
             flagged.add(i)
     flagged |= _unexplained_breaks(records, held, recent)
     held |= _beyond_assets(records, logs, held)
-    held |= _statement_shifts(records, neighbours)
+    held |= _statement_shifts(records, neighbours, held)
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
     groups = _column_groups(records)
@@ -911,7 +911,7 @@ def _column_groups(records: list[FundamentalFact]) -> list[list[int]]:
     return list(groups.values())
 
 
-def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours) -> set[int]:
+def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours, held: set[int]) -> set[int]:
     """A filing's face statement for one period (the facts its statement identities relate: a balance sheet, an
     income statement, a cash-flow statement) keyed a power of 10 or 100 off, or with its signs reversed, as a whole:
     at least STATEMENT_SHIFT_MIN of its facts have history and STATEMENT_SHIFT_SHARE of them sit the same decimal step
@@ -920,7 +920,14 @@ def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours) -
     median where it was (WFC's 2017 first-quarter balance sheet at a tenth, JPM's 2012 cash flows x10), so only its
     own history shows it. Each of those facts must also sit the step (or the sign) off the comparative its own filing
     prints beside it: a fast grower's genuine statement can sit a power of 10 above its history (NVDA's 2026 income
-    statement) but not above the prior-year column next to it. Its moved siblings in the filing's period join it."""
+    statement) but not above the prior-year column next to it. Its moved siblings in the filing's period join it.
+
+    A slip repeated over consecutive filings (each quarter's statement keyed the same wrong way) puts the later slipped
+    periods into each one's history on both sides, so the faces are also taken in filing order against their earlier
+    history alone, leaving out the facts already held and the faces this pass holds: the first slipped statement
+    stands against genuine history, and each later one against the genuine periods before the run. A decimal step
+    counts only facts that keep their comparative's sign: a genuine collapse into a loss also sits a power of 10 below
+    a profitable history (see _face_shift)."""
     faces = _statement_faces(records)
     if not faces:
         return set()
@@ -931,37 +938,113 @@ def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours) -
         lines.setdefault((f.accession, f.concept, f.unit, _duration(f)), []).append(f)
     out: set[int] = set()
     for key, face in faces.items():
-        balance = key[-1] == "balance"
-        steps: dict[int, tuple[float, float, float]] = {}  # fact: (step from history, from own comparative, its value)
-        for k in face:
-            d = neighbours.level_step(k)
-            own = _own_comparative(records[k], lines)
-            size = neighbours.logs[k]
-            if d is not None and own is not None and size is not None:
-                steps[k] = (d, size - own[0], own[1])
-        if len(steps) < STATEMENT_SHIFT_MIN:
+        moved = _face_shift(records, face, neighbours.level_step, lines, flipped if key[-1] == "balance" else None)
+        if moved is not None:
+            out |= _with_siblings(records, closed, {k for k in face if moved(k) is not False}, moved, by_name=False)
+    filed_on: dict[str, date] = {}
+    for f in records:
+        filed_on[f.accession] = max(filed_on.get(f.accession, f.filed), f.filed)
+    removed = {_removed_key(records[i]) for i in held | out}  # grows in place as faces are held
+
+    def earlier(k: int) -> float | None:
+        return _earlier_step(neighbours, k, removed)
+
+    for key in sorted(faces, key=lambda k: (filed_on[k[0]], k[0], k[2])):
+        face = faces[key]
+        if face <= out:
             continue
-        need = STATEMENT_SHIFT_SHARE * len(steps)
-        centre = statistics.median(d for d, _, _ in steps.values())
-        step = round(centre)
-        moved: Callable[[int], bool | None] | None = None
-        own_centre = statistics.median(o for _, o, _ in steps.values())
-        if (
-            abs(step) in COLUMN_DECIMAL_STEPS
-            and abs(centre - step) <= COLUMN_DECIMAL_NEAR
-            and abs(own_centre - step) <= COLUMN_DECIMAL_NEAR
-            and sum(abs(d - step) <= NEAR_POWER and abs(o - step) <= NEAR_POWER for d, o, _ in steps.values())
-            >= STATEMENT_STEP_SHARE * len(steps)
-        ):
-            moved = _stepped(neighbours, step)
-        elif balance and (  # a genuine loss reverses a whole income statement; a balance sheet never reverses
-            sum(bool(flipped(k)) and records[k].value * v < 0 for k, (_, _, v) in steps.items()) >= need
-        ):
-            moved = flipped
+        moved = _face_shift(records, face, earlier, lines, None)
         if moved is None:
             continue
-        out |= _with_siblings(records, closed, {k for k in face if moved(k) is not False}, moved, by_name=False)
+        hit = _with_siblings(records, closed, {k for k in face if moved(k) is not False}, moved, by_name=False)
+        out |= hit
+        removed |= {_removed_key(records[i]) for i in hit}
     return out
+
+
+def _face_shift(
+    records: list[FundamentalFact],
+    face: set[int],
+    step_of: Callable[[int], float | None],
+    lines: dict[_LineKey, list[FundamentalFact]],
+    flipped: Callable[[int], bool | None] | None,
+) -> Callable[[int], bool | None] | None:
+    """How a face statement moved as a whole against its history as ``step_of`` measures it (see _statement_shifts):
+    the test of which of its facts moved, or None. Sign reversals are weighed only when ``flipped`` is given. A fact
+    counts as stepped only if it keeps the sign of its own comparative: a decimal slip never changes a sign, while a
+    genuine collapse into a loss sits a power of 10 below a profitable history and its comparative with the opposite
+    sign (MRK's nine months to September 2026, PFE's second quarter of 2026)."""
+    steps: dict[int, tuple[float, float, float]] = {}  # fact: (step from history, from own comparative, its value)
+    for k in face:
+        d = step_of(k)
+        own = _own_comparative(records[k], lines)
+        size = records[k].value
+        if d is not None and own is not None and size:
+            steps[k] = (d, math.log10(abs(size)) - own[0], own[1])
+    if len(steps) < STATEMENT_SHIFT_MIN:
+        return None
+    centre = statistics.median(d for d, _, _ in steps.values())
+    step = round(centre)
+    own_centre = statistics.median(o for _, o, _ in steps.values())
+    if (
+        abs(step) in COLUMN_DECIMAL_STEPS
+        and abs(centre - step) <= COLUMN_DECIMAL_NEAR
+        and abs(own_centre - step) <= COLUMN_DECIMAL_NEAR
+        and sum(
+            abs(d - step) <= NEAR_POWER and abs(o - step) <= NEAR_POWER and records[k].value * v > 0
+            for k, (d, o, v) in steps.items()
+        )
+        >= STATEMENT_STEP_SHARE * len(steps)
+    ):
+
+        def stepped(i: int) -> bool | None:
+            d = step_of(i)
+            return None if d is None else abs(d - step) <= NEAR_POWER
+
+        return stepped
+    # a genuine loss reverses a whole income statement; a balance sheet never reverses
+    if flipped is not None and (
+        sum(bool(flipped(k)) and records[k].value * v < 0 for k, (_, _, v) in steps.items())
+        >= STATEMENT_SHIFT_SHARE * len(steps)
+    ):
+        return flipped
+    return None
+
+
+_RemovedKey = tuple[str, str, str, int | None, date]  # accession, concept, unit, duration, period end
+
+
+def _removed_key(f: FundamentalFact) -> _RemovedKey:
+    return (f.accession, f.concept, f.unit, _duration(f), f.period_end)
+
+
+def _earlier_step(neighbours: _Neighbours, i: int, removed: set[_RemovedKey]) -> float | None:
+    """Signed orders of magnitude to a fact from the same period as other filings report it, else from the nearest
+    NEIGHBOURS earlier periods of its series in other filings, leaving out the removed facts; None without either."""
+    f = neighbours.records[i]
+    value = neighbours.logs[i]
+    if value is None:
+        return None
+    dur = _duration(f)
+    periods = neighbours.series.get((f.concept, f.unit, dur), {})
+
+    def kept(e: date) -> list[float]:
+        return [
+            v for acc, v in periods.get(e, []) if acc != f.accession and (acc, f.concept, f.unit, dur, e) not in removed
+        ]
+
+    same = kept(f.period_end)
+    if same:
+        return value - statistics.median(same)
+    levels: list[float] = []
+    for e in sorted((e for e in periods if e < f.period_end), reverse=True):
+        if (f.period_end - e).days > NEIGHBOUR_WINDOW_DAYS:
+            break
+        if values := kept(e):
+            levels.append(statistics.median(values))
+        if len(levels) == NEIGHBOURS:
+            break
+    return value - statistics.median(levels) if levels else None
 
 
 def _statement_faces(records: list[FundamentalFact]) -> dict[tuple[str, date | None, date, str], set[int]]:

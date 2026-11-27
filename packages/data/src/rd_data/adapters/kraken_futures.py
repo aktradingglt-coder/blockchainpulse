@@ -8,6 +8,8 @@ raw values are displayable only in the self-hosted edition until the owner confi
 
 from __future__ import annotations
 
+import math
+import statistics
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
@@ -351,20 +353,30 @@ class KrakenFuturesAdapter(BaseAdapter):
         stale_symbols = sorted(
             {m.symbol for m in metrics if now - m.ts > SYMBOL_MAX_AGE or m.ts > raw.retrieved_at + FUTURE_SLACK}
         )
-        diverged = _mark_index_divergence(metrics)
+        off_quotes = _mark_off_quotes(parsed["tickers"], set(parsed["funding"]), _all_tickers(raw))
+        diverged = sorted({*_mark_index_divergence(metrics), *off_quotes})
+        funding_off = _funding_off(parsed["tickers"], metrics)
         volume_off = _volume_inconsistent(parsed["tickers"], set(parsed["funding"]))
         quarantine_idx = sorted(
             out_of_range
             | {i for i, m in enumerate(metrics) if m.symbol in stale_symbols}
             | {i for i, m in enumerate(metrics) if m.symbol in diverged and m.metric in _MARK_DERIVED}
             | {i for i, m in enumerate(metrics) if m.symbol in volume_off and m.metric == "volume_24h"}
+            | {i for i, m in enumerate(metrics) if m.symbol in funding_off and m.metric == "funding_rate"}
         )
         usable = [m for i, m in enumerate(metrics) if i not in set(quarantine_idx)]
         requested = [x.strip() for x in str(request.params["symbols"]).split(",")]
         missing = [x for x in requested if x not in {m.symbol for m in metrics}]
         extra_checks = (
             _warning(stale_symbols, f"older than {SYMBOL_MAX_AGE} or future-dated, quarantined", "stale_symbols"),
-            _warning(diverged, f"mark and index more than {MAX_MARK_INDEX_GAP:.0%} apart quarantined", "mark_vs_index"),
+            _warning(
+                diverged,
+                f"mark and index more than {MAX_MARK_INDEX_GAP:.0%} apart, or mark more than x{MAX_MARK_QUOTE_FACTOR} "
+                "from the ticker's own last trade, bid and ask (or its index from the pair's other contracts), "
+                "quarantined",
+                "mark_vs_index",
+            ),
+            _warning(funding_off, "funding rate disagrees with the ticker's relative funding, quarantined", "funding"),
             _warning(volume_off, "24h volume x 24h VWAP differs from the quote volume, quarantined", "volume_vs_quote"),
             _warning(missing, "requested but not returned by the exchange", "missing_symbols"),
         )
@@ -428,6 +440,82 @@ def _volume_inconsistent(tickers: Mapping[str, Any], symbols: set[str]) -> list[
         if abs(volume * price - quote) > VOLUME_QUOTE_TOLERANCE * max(abs(quote), 1.0):
             out.append(symbol)
     return out
+
+
+#: How far the mark price may sit from the median of the same ticker's last trade, bid and ask. Measured on the 211
+#: perpetuals of the recorded tickers: at most x1.24 (an illiquid FX perpetual's wide book), under x1.01 for 99% of
+#: them. A mark keyed a digit off (with its index, so the mark-index check cannot see it) sits x10 away.
+MAX_MARK_QUOTE_FACTOR = 1.5
+#: The funding rate served (CCXT: absolute funding over the mark price) against the ticker's own relativeFundingRate.
+#: Measured on the same 211 perpetuals: within 2.6% and never of the other sign (Kraken computes the relative figure
+#: at a slightly different price). A slipped absolute figure or a slipped mark price moves it by a factor.
+FUNDING_TOLERANCE = 0.05
+#: Below this (per hour) a relative funding of zero and a served one are taken to agree.
+FUNDING_ZERO = 1e-9
+
+
+def _all_tickers(raw: RawPayload) -> list[Mapping[str, Any]]:
+    """Every contract's ticker in the tickers response (CCXT keeps only the symbols asked for)."""
+    for url, body in zip(raw.urls, raw.bodies, strict=True):
+        if url.rstrip("/").endswith("/tickers"):
+            try:
+                data = orjson.loads(body)
+            except orjson.JSONDecodeError:
+                return []
+            rows = data.get("tickers") if isinstance(data, dict) else None
+            return [t for t in rows if isinstance(t, dict)] if isinstance(rows, list) else []
+    return []
+
+
+def _mark_off_quotes(tickers: Mapping[str, Any], symbols: set[str], everything: list[Mapping[str, Any]]) -> list[str]:
+    """Perpetuals whose mark price is more than MAX_MARK_QUOTE_FACTOR from the median of their own last trade, bid and
+    ask, or whose index is that far from the index the exchange's other contracts on the same pair carry (every price
+    of one ticker keyed a digit off together): the mark (and what is derived from it) is not shown on that evidence."""
+    indexes: dict[str, list[tuple[str, float]]] = {}
+    for info in everything:
+        index = as_float(info.get("indexPrice"))
+        if info.get("pair") and index is not None and index > 0:
+            indexes.setdefault(str(info["pair"]), []).append((str(info.get("symbol")), index))
+    out = []
+    limit = math.log(MAX_MARK_QUOTE_FACTOR)
+    for symbol in sorted(symbols):
+        info = tickers[symbol]["info"]
+        mark = as_float(info.get("markPrice"))
+        index = as_float(info.get("indexPrice"))
+        quotes = [q for q in (as_float(info.get(k)) for k in ("last", "bid", "ask")) if q is not None and q > 0]
+        others = [v for s, v in indexes.get(str(info.get("pair")), []) if s != str(info.get("symbol"))]
+        if _off(mark, quotes, limit) or _off(index, others, limit):
+            out.append(symbol)
+    return out
+
+
+def _off(value: float | None, references: list[float], limit: float) -> bool:
+    """Whether a positive value sits more than ``limit`` (natural log) from the median of positive references."""
+    return (
+        value is not None
+        and value > 0
+        and bool(references)
+        and abs(math.log(value / statistics.median(references))) > limit
+    )
+
+
+def _funding_off(tickers: Mapping[str, Any], metrics: list[CryptoDerivativeMetric]) -> list[str]:
+    """Perpetuals whose served funding rate disagrees with the ticker's own relativeFundingRate (sign, or more than
+    FUNDING_TOLERANCE in ratio)."""
+    out = set()
+    for m in metrics:
+        if m.metric != "funding_rate":
+            continue
+        rel = as_float(tickers[m.symbol]["info"].get("relativeFundingRate"))
+        if rel is None:
+            continue
+        if abs(rel) < FUNDING_ZERO:
+            bad = abs(m.value) > FUNDING_ZERO
+        else:
+            bad = m.value * rel <= 0 or abs(m.value / rel - 1) > FUNDING_TOLERANCE
+        if bad:
+            out.add(m.symbol)
+    return sorted(out)
 
 
 def _mark_index_divergence(metrics: list[CryptoDerivativeMetric]) -> list[str]:
