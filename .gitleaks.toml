@@ -1,0 +1,67 @@
+# gitleaks configuration: the full default rule set plus project-specific rules.
+title = "research-desk"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "anthropic-key-any-length"
+description = "Anthropic API key (any length, stricter than the default rule)"
+regex = '''sk-ant-[A-Za-z0-9_\-]{20,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "url-embedded-password"
+description = "Credentials embedded in a connection URL (user part may be empty, e.g. redis://:pw@host)"
+# The password may contain "@", "/" or "$" (but not a "${VAR}" placeholder); it runs to the last "@" before the host.
+regex = '''[a-z][a-z0-9+.\-]*://[^:/@\s]*:((?:[^\s$]|\$[^{\s]){8,})@[^@\s]+'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["://"]
+
+[[rules]]
+id = "discord-webhook-url"
+description = "Discord webhook URL (the path token is the credential)"
+regex = '''https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/([\w-]{20,})'''
+secretGroup = 1
+keywords = ["discord"]
+
+[[rules]]
+id = "sentry-dsn"
+description = "Sentry DSN (public key in the URL user part)"
+regex = '''https://([0-9a-f]{32})@[a-z0-9.\-]+/\d+'''
+secretGroup = 1
+keywords = ["@"]
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot token"
+regex = '''(?:^|[^\d])(\d{6,12}:[A-Za-z0-9_\-]{30,})'''
+secretGroup = 1
+entropy = 3.0
+keywords = [":"]
+
+[[rules]]
+id = "paddle-key"
+description = "Paddle API key or notification (webhook) secret"
+regex = '''\b(pdl_[a-z0-9]+_[A-Za-z0-9_]{16,})'''
+secretGroup = 1
+keywords = ["pdl_"]
+
+[[rules]]
+id = "http-basic-auth"
+description = "HTTP Basic credentials in an Authorization header"
+regex = '''(?i)authorization["']?\s*[:=]\s*["']?basic\s+([A-Za-z0-9+/]{8,}={0,2})'''
+secretGroup = 1
+keywords = ["basic"]
+
+[[rules]]
+id = "api-key-hex-or-token-param"
+description = "API key value (hex or base62) in a header or key=value / query parameter"
+regex = '''(?i)(?:x-api-key|api[_-]?key|apikey)["']?\s*[:=]\s*["']?([A-Za-z0-9_\-]{24,})'''
+secretGroup = 1
+keywords = ["api_key", "api-key", "apikey", "x-api-key"]
+
+[allowlist]
+description = "Lockfiles hold integrity hashes, not secrets"
+paths = ['''(^|/)uv\.lock$''', '''(^|/)pnpm-lock\.yaml$''']

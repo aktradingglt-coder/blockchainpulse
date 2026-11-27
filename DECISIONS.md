@@ -1,0 +1,801 @@
+# DECISIONS.md
+
+Every ambiguous choice, with date, decision, alternatives and reason (PROMPT §1.2). Newest last.
+Rule of thumb applied throughout: prefer the option that is **safer, more testable and more reversible**.
+
+---
+
+### D-001 · 2026-10-21 · Working identity for all placeholders
+**Decision.** Product name `Research Desk (working name)`; legal entity `Research Desk (Private) Limited — working name, not yet incorporated`, country Pakistan; domain `example.com`; support email `support@example.com`; logo = generated text wordmark (`apps/web/public/brand/wordmark.svg`). All values live only in `config/product.yaml`.
+**Alternatives.** Inventing a brandable name/domain.
+**Reason.** PROMPT §2 rule 1 forbids inventing real-world identities; `example.com` is IANA-reserved. Owner task in STATUS.md and the Owner Launch Checklist.
+
+### D-002 · 2026-10-21 · Python 3.12, uv workspace, one lockfile
+**Decision.** `requires-python = ">=3.12,<3.13"`; a uv workspace where each `packages/*` and `apps/*` directory is a member with its own `pyproject.toml`; one root `uv.lock`. Import names are prefixed `rd_` (`rd_core`, `rd_data`, …) to avoid collisions with generic names like `core`.
+**Alternatives.** Single flat package; Poetry; Python 3.13.
+**Reason.** Workspace members enforce dependency direction (quant cannot import agents); one lockfile keeps pins exact; 3.12 is the floor named in PROMPT §4.1 and has the widest wheel support for the quant stack.
+
+### D-003 · 2026-10-21 · numpy + pandas (not polars) for quant
+**Decision.** Pure functions take/return numpy arrays or small typed dataclasses; pandas is used for calendar alignment and resampling at the edges; `pandas-stubs` for mypy.
+**Alternatives.** polars.
+**Reason.** statsmodels, exchange_calendars and pandas_market_calendars are pandas-native; one dataframe library only (PROMPT §4.1 "pick one").
+
+### D-004 · 2026-10-21 · Valkey instead of Redis server
+**Decision.** Run `valkey/valkey` (BSD-3-Clause) as the Redis-protocol server. Client library remains `redis-py`. Env var keeps the name `REDIS_URL`.
+**Alternatives.** Redis 7.4 (RSALv2/SSPL), Redis 8 (RSALv2/SSPLv1/AGPLv3 tri-licence).
+**Reason.** The self-hosted edition ships the server in the buyer's compose bundle; a permissive licence removes redistribution doubt. Protocol compatible, so swapping back is a one-line image change.
+
+### D-005 · 2026-10-21 · Job queue: Dramatiq on Redis-protocol broker; Postgres is the source of truth
+**Decision.** Dramatiq (Redis broker) for transport, retries with exponential backoff and the built-in dead-letter queue. Every research run's state lives in Postgres and is persisted after each transition; queue messages carry only IDs, so a lost message is recoverable by a reconciler that re-enqueues runs stuck in a non-terminal state.
+**Alternatives.** Arq (asyncio-native but in maintenance mode), Celery (heavier, more moving parts), Postgres-only queue.
+**Reason.** Mature retries and dead-letter out of the box; async actors supported; DB-as-truth gives resumability and idempotency independent of the broker.
+
+### D-006 · 2026-10-21 · Scheduler leader election via Postgres advisory lock + unique job keys
+**Decision.** The scheduler process holds `pg_try_advisory_lock(<constant>)` on a dedicated connection; only the holder fires. Each fire inserts into `scheduled_job_runs` with a unique key `(job_type, date, session)` so even two leaders cannot double-fire.
+**Reason.** Two independent guards; both testable without timing tricks.
+
+### D-007 · 2026-10-21 · Agent runtime: Anthropic Python SDK + our own orchestrator (deviation from §4.1 default)
+**Decision.** Agents run on the Messages API through `rd_agents.llm.LLMClient` (wrapping `anthropic` SDK), with our own typed tool registry, per-agent tool allow-lists, state machine and evidence ledger. The Claude Agent SDK is **not** used in the production worker.
+**Alternatives.** `claude-agent-sdk` (PROMPT default).
+**Reason (checked 2026-10-21, docs/vendor-notes/anthropic.md).** (1) The Agent SDK spawns the Claude Code CLI as a subprocess and ships built-in Bash/Read/Write/WebFetch tools; PROMPT §6.4 and §14 require that agents reading untrusted text have *no* shell, network or write tools — with our own loop the tool list is exactly what we register, nothing to disable. (2) `allowed_tools` auto-approves rather than restricts, and nested subagents are allowed by default; "only the Director dispatches" is simpler to guarantee when we own dispatch. (3) §6.5 byte-for-byte replay needs every request/response captured at the HTTP-call level, which `LLMClient` does directly. (4) Batch API and prompt caching are first-class in the Messages API. Reversible: `LLMClient` is an interface.
+
+### D-008 · 2026-10-21 · Auth: decided at P7, constraint recorded now
+**Decision (provisional).** Must be self-hostable (no SaaS-only auth), support email + OAuth, TOTP MFA for admins, orgs/teams. Candidate: Better Auth (MIT, Next.js) issuing JWTs verified by FastAPI via JWKS. Final choice recorded at P7.
+
+### D-009 · 2026-10-21 · Container images pulled via `mirror.gcr.io`, pinned by digest
+**Decision.** Compose and Dockerfiles reference `mirror.gcr.io/<repo>:<tag>@sha256:<digest>`. Digests in docs/vendor-notes/containers.md.
+**Reason.** Docker Hub anonymous pulls are rate-limited (hit during the build). The digest pins content regardless of registry; the mirror is a public Google endpoint. Owners may swap the registry prefix with no other change.
+
+### D-010 · 2026-10-21 · FRED adapter off by default
+**Decision.** Build and test the FRED adapter, ship with `provider_fred: false`. Source US yields/macro from primary US-government publishers first.
+**Reason.** FRED's legal terms (search snippet, 2026-10-21) prohibit using FRED content to develop or train software including LLMs/generative AI; our product feeds values to LLM agents. Legal opinion needed → STATUS.md Blocked on humans.
+
+### D-011 · 2026-10-21 · Live vendor endpoints unreachable from the build sandbox → cassettes recorded in CI
+**Decision.** Contract-test cassettes are recorded by a GitHub Actions workflow (`record-cassettes.yml`, manual trigger, open egress, public keyless sources only; keyed sources need repo secrets). Until a cassette has been recorded from the live source, its file carries `"provenance": "schema-derived"` and the contract test reports it as such; CI fails the release gate (P11) if any cassette is still schema-derived.
+**Reason.** Honesty rule (§1.4): never pretend a hand-built response was recorded.
+
+### D-012 · 2026-10-21 · Observability defaults
+**Decision.** structlog JSON logs with a secret-redaction processor; OpenTelemetry SDK with OTLP/HTTP exporter only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (otherwise a no-op provider); Prometheus `/metrics` on the API; Sentry only when `SENTRY_DSN` is set.
+**Reason.** Zero external dependency in dev and self-hosted, full telemetry when configured.
+
+### D-013 · 2026-10-21 · Billing: Paddle sandbox default, Lemon Squeezy fallback
+Per PROMPT §2 rule 10. Pakistan seller onboarding/payout not confirmed from official docs → owner task (docs/vendor-notes/billing.md).
+
+### D-014 · 2026-10-21 · Frontend package manager: pnpm (pinned via `packageManager` field)
+**Reason.** Strict, content-addressed lockfile; available in the toolchain.
+
+### D-015 · 2026-10-21 · Secret scanning: gitleaks in pre-commit and CI
+gitleaks binary pinned by version and SHA-256 (`make tools`) runs in pre-commit (staged changes), in CI over the full
+git history, and over every committable file (`scripts/scan_committable.sh`, ignored files such as `.env` excluded).
+`tests/test_secret_scanning.py` plants keys of several shapes (including `redis://:password@`) and proves they are
+caught. Fixture and eval directories are covered by the same scan, so no separate regex test is needed.
+
+### D-016 · 2026-10-21 · Dramatiq licence noted (LGPL-3.0)
+**Decision.** Keep Dramatiq (D-005). It is used unmodified as an imported library, which LGPL-3.0 permits in proprietary
+products; the self-hosted bundle must ship its licence text and allow replacement of the library (Python packages are
+replaceable by design). Recorded for the P10 licence-notice bundle.
+
+### D-017 · 2026-10-21 · Worker logs: launcher configures JSON logging before Dramatiq starts
+**Decision.** The worker starts via `python -m rd_worker.main`, which configures structlog JSON logging (with
+redaction) in the Dramatiq supervisor process and then runs Dramatiq's CLI with `--skip-logging`, so neither the
+supervisor nor its children use Dramatiq's plain-text formatter.
+
+### D-018 · 2026-10-21 · Compose stack runs via `make dev` only
+**Decision.** `infra/compose/compose.yaml` paths are relative to the repo root and require the generated `.env`;
+`make dev` passes `--project-directory .` and `--env-file .env`. A CA bundle for TLS-intercepting proxies is staged
+(git-ignored) as a BuildKit secret and is empty by default, so builds elsewhere are unaffected.
+
+### D-019 · 2026-10-21 · Brand theme and fonts (§2 rule 3)
+**Decision.** Neutral theme in `config/design_tokens.yaml`: near-white/near-black surfaces, one blue accent
+(#1D4ED8 light, #7CB2FB dark), semantic green/red/amber, light and dark variants; every listed text/background pair
+≥ 4.5:1 (`packages/core/tests/test_design.py`). Fonts: Inter (sans) and JetBrains Mono (mono), both SIL OFL 1.1.
+**Alternatives.** Brand-like saturated palettes; system fonts only.
+**Reason.** Finance readers expect restraint; one accent keeps charts legible; OFL fonts are free to embed in PDFs and
+self-hosted bundles. Brand review is an owner task (STATUS H1).
+
+### D-020 · 2026-10-21 · Defaults: USD, UTC, 7-day trial, 70% margin, launch exclusions (§2 rules 4–8, 11)
+**Decision.** Display currency USD; server time UTC with each reader's IANA timezone in the UI (captured from the
+browser at sign-up, editable); trial 7 days; minimum gross margin 0.70; target users = the default list in §2;
+excluded coverage at launch = Pakistan-listed securities until a legal opinion is filed in `docs/legal/`.
+**Reason.** These are the values PROMPT §2 prescribes; recorded here so every value in `config/product.yaml` has a
+decision behind it.
+
+### D-021 · 2026-10-21 · Sales countries and blocked jurisdictions (§2 rule 5, §13.1)
+**Decision.** Sales worldwide by default, filtered by `config/jurisdiction_rules.yaml` on the buyer's billing
+country. Automatically blocked: CU, IR, KP, SY, RU, BY and the Crimea/Donetsk/Luhansk regions (UA-43, UA-14, UA-09).
+Pakistan (`PK`) is `not_yet_cleared` (no sales) until counsel advises on SECP Research Analyst Regulations.
+**Alternatives.** OFAC comprehensive list only (CU, IR, KP, SY, regions) — narrower.
+**Reason.** Safer superset of comprehensive US/EU/UK programs; easier to unblock a country later than to unwind
+sales made into a sanctioned one. Syria's US sanctions were largely lifted in 2025, but it stays blocked until counsel
+confirms (EU/UK and residual measures). Counsel review is owner task H7.
+
+### D-022 · 2026-10-21 · Credit costs (§12.1)
+**Decision.** Deep dive: quick 3 / standard 5 / extended 10 credits; Ask the Desk 1 credit per answer; screener run 1.
+Trial 3 credits (= one quick deep dive), Starter 20, Pro 100, Desk 400 pooled.
+**Reason.** PROMPT §12.2 expects a deep dive to cost about $1–2 in LLM spend before caching; pricing 1 credit at
+roughly $0.40–0.50 of LLM cost keeps a standard deep dive (5 credits) inside the per-credit value of every paid
+tier. To be re-derived from measured token usage at P11.
+
+### D-023 · 2026-10-21 · Proposed tier and licence prices (§2 rule 7) — revised after P0 review rounds 2 and 3
+**Decision.** Starter $49/mo ($539/yr), Pro $179/mo ($2,090/yr), Desk $719/mo for 5 seats ($8,450/yr); self-hosted
+$1,999 once with 12 months of updates and $599/yr renewal. Status `proposed`.
+**Basis.** (1) Comparables checked 2026-10-21 (`docs/vendor-notes/pricing-comparables.md`). (2) Pre-measurement
+unit economics, encoded in `config/product.yaml → commercial.cost_assumptions` and enforced by
+`test_every_paid_tier_meets_margin_guardrail_monthly_and_annual`:
+- p90 proxy: every credit spent, at the **upper** cost bound of $0.40 per credit (≈$2 per 5-credit deep dive before
+  caching, PROMPT §12.2);
+- amortised house research (R1/R3/R4/R5 generated once for everyone): $3 per seat per month, i.e. ≈$500/month of
+  house reports spread over ≥170 paying seats. Below that scale the house-report cost is a launch investment and the
+  per-tier guardrail does not hold — stated here rather than hidden;
+- merchant-of-record fee ≈5% + $0.50 per transaction (monthly: 12 fees a year; annual: one).
+Margin = (price − LLM − house − fee) / price for the billing period:
+| Tier | Monthly price → margin | Annual price → margin | Annual discount |
+| --- | --- | --- | --- |
+| Starter (20 cr) | $49 → 71.5% | $539 → 70.4% | 8.3% |
+| Pro (100 cr) | $179 → 70.7% | $2,090 → 70.3% | 2.7% |
+| Desk (400 cr, 5 seats) | $719 → 70.6% | $8,450 → 70.1% | 2.1% |
+History: round-1 draft ($39/$149/$599, annual = 10× monthly) ignored fees; round-2 revision ($169/$649) still failed
+on annual plans and omitted house reports (P0 review round 3, N3). Prices are deliberately conservative because the
+cost bound is pre-caching; P11's measured cost model (`scripts/cost_model.py`) replaces the assumptions and may
+allow lower prices or larger annual discounts. **Owner task.** Pricing confirmation (STATUS H6).
+
+### D-024 · 2026-10-21 · Market-data vendors contracted: none (§2 rule 9)
+**Decision.** `{{DATA_VENDORS}}` = none. Free/public sources (CFTC, SEC EDGAR, EIA, US Treasury/BLS/BEA, one crypto
+exchange via CCXT) are built live in P1; FRED is built but off (D-010); commercial adapters (Twelve Data first,
+Databento later) are built behind feature flags with fixture-backed tests. Contracts are owner task H5.
+
+### D-025 · 2026-10-21 · Package dependency direction enforced by import-linter
+**Decision.** `[tool.importlinter]` contracts in `pyproject.toml` (run in `make lint`, pre-commit and CI) encode
+ARCHITECTURE.md §3.1; each new package adds its contract when it is created.
+
+### D-026 · 2026-10-21 · Web container logs: Next.js defaults until P7
+**Decision.** The Next.js standalone server only prints start-up lines in P0 (no request handling beyond the landing
+page and health route). Structured JSON request logging for the web app (via instrumentation hook and the same
+redaction rules) is delivered with authentication in P7, when the web app starts handling user data.
+
+### D-027 · 2026-10-21 · COT freshness measured from the scheduled release, not the position date
+**Decision.** PROMPT §5.4's COT windows (stale after 8 days, blocked after 15) are measured from the scheduled
+public release (the Friday after the Tuesday position date, 20:30 UTC), not from the position date.
+**Alternatives.** Measure from the Tuesday position date (literal reading).
+**Reason.** Measured from Tuesday, the newest available report would be labelled "stale" every Wednesday–Friday
+before a newer one exists — telling readers data is out of date when it is the latest there is. From the release
+date, "stale" means a weekly release was missed, which is what the label should convey. Holiday-delayed releases
+only delay the label. Implemented in `rd_data.adapters.cftc.release_time`, tested in `test_adapters_unit.py`.
+
+### D-028 · 2026-10-21 · Zlib licence added to the dependency allow-list
+**Decision.** Add `Zlib` to the licence gate's allow-list (`scripts/check_licences.py`).
+**Reason.** NumPy (pulled in by `exchange_calendars`/`pandas` for P1 trading calendars) declares
+`BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0` for bundled components. Zlib is an OSI-approved permissive licence
+(attribution in source distributions, altered versions marked); it imposes nothing on a proprietary hosted or
+self-hosted product beyond the notice bundle produced in P10.
+
+### D-029 · 2026-10-21 · CCXT exchange for P1: Kraken Futures
+**Decision.** The one CCXT exchange adapter built in P1 is Kraken Futures (public perpetual OHLCV, funding, open
+interest, mark/index prices).
+**Alternatives.** Binance, Bybit, OKX.
+**Reason.** Contract cassettes are recorded from GitHub Actions runners in the US (D-011); Binance and Bybit refuse
+US IPs for derivatives endpoints, so their responses could not be recorded or drift-checked. Kraken Futures serves
+public endpoints to US IPs and has perpetuals on the majors. Display terms remain unverified (crypto-exchanges.md):
+the adapter's licence is `byo_key_only` until the owner confirms them.
+
+### D-030 · 2026-10-21 · Freshness origin: bar close and release time; fixed-width bars
+**Decision.** Freshness is always measured from when data *became* true. Bars are judged from their close (a 1h bar
+labelled 10:00 is as of 11:00). Macro and inventory series are judged from their release: FRED from the series'
+`last_updated` (for a daily series never more than 3 days past its newest observation, as `last_updated` moves with
+revisions and metadata edits: a week-old yield was labelled fresh because the series was touched the day before, P1
+review round 29), EIA weekly series from the scheduled release (petroleum Wednesday, natural gas Thursday, 15:30 UTC
+after the week-ending Friday), capped at the time we retrieved the data. Bars of a fixed width other than one
+session (1h, 4h, 1w) get a rule derived from the daily-bar row of §5.4: stale once the next bar is overdue
+(close + width + delay + 5 min), blocked after three missed bars (close + 3 × width + delay + 30 min). Intraday bars
+count open-market time of the instrument's calendar (a Friday 15:00 ET equity bar is not overdue over the weekend);
+bars a day or wider count wall-clock time. The delay of a delayed feed comes from the provider's recorded licence
+terms, never from the caller. Because an estimated release is capped at retrieval time, two guards keep the cap
+from hiding bad rows: the newest record may not be dated in the future, and an estimated release more than 12 hours
+after retrieval (data held before it was published) refuses the response.
+**Alternatives.** Measure from the observation/period date (the literal timestamp on the record); treat intraday bars
+as crypto funding/OI.
+**Reason.** The independent P1 review showed the literal reading blocks monthly and quarterly releases on release
+day, labels EIA data stale three days after its release, and makes 1h bars permanently stale and 4h bars blocked half
+the time. §5.4 does not list fixed-width bars; the daily-bar rule (1 missed bar stale, 3 blocked) is its closest row.
+
+### D-031 · 2026-10-21 · Bad prints vs genuine moves: what is quarantined
+**Decision.** Price series (bar closes, highs and lows; Treasury par yields, which are daily market prices): an
+extreme change (robust z > 10 on log returns, MAD with a mean-absolute-deviation fallback) that comes back within two
+points is a bad print and is quarantined. An extreme move in the last two points, or in the first two, cannot be told
+apart from a bad print and is quarantined as *unconfirmed* until later bars confirm it; confirmed level shifts are
+kept with a warning. A move beyond ×2.5 in one bar (a Treasury par yield: 1.5 points in a day) is implausible, so
+its run and its confirmation extend to five points (three bad ticks in a row are not a market move), and one that
+is not such a short bad print is never confirmed: every point after it is quarantined until the series comes back to
+where it was before the move (within half the move and within the implausible bound), or to the end of the series
+when it never does, however many points share it and whatever moves follow inside it — a genuine expiry roll, or a
+second slip part of the way back (round 27: the newest six Kraken bars ×1000, ×10, ×3 or ÷1000, and the whole curve
+×2 or ÷10 on its latest three days, were served as confirmed shifts; round 28: the rule was switched off by any later
+extreme move, so a COT shift spanning the E-mini S&P September roll, and bars, Treasury curves or EIA weeks shifted
+and then slipped again, were served fresh). A block inside the window is held whole and the points either side are
+served.
+The largest daily move of any tenor in the recorded 2026 Treasury file is 0.16 point. Volume is quarantined only when
+100× away from the series' median. Macro series: values outside the series' physical range and reverting outliers are quarantined. For *flow*
+statistics (monthly/quarterly releases such as unemployment or GDP) an extreme *latest* release is kept with a
+warning. *Levels* — EIA weekly quantities, COT open interest, and daily market series such as FRED yields, FX and
+commodity prices — are judged on relative changes: an extreme latest move is held until later observations confirm
+it (P1 review rounds 3 and 5), and the implausible-move rule above applies with each series' own bound: an EIA
+catalogue series' largest possible weekly change (crude stocks 40,000 thousand barrels), 1.5 points in a day for a
+daily FRED rate in percent (the Treasury par-yield bound), and ×2.5 otherwise (round 28: EIA and FRED had no such
+rule, so the newest weeks of crude stocks ÷10 or a block of weeks ÷10 inside the window, and the 10-year yield ×3 or
+×10 on its newest days, were served fresh). Open interest is held only beyond ×3/÷3 (expiry rolls of
+20–40% are shown and flagged); a move beyond ×3 that stays holds every week after it, not only the week of the jump
+(round 27: every field of the newest two weeks ×10, which still balances, served the second week fresh). Holding the
+newest points can leave a response too old to serve: it is then refused as stale rather than served fresh.
+Non-finite numbers are refused by every canonical schema.
+**Alternatives.** Quarantine only interior two-sided spikes (the original rule); quarantine every extreme latest
+value, macro included.
+**Reason.** A bad print on the latest bar is the most damaging error a report can repeat; holding it until
+confirmation costs at most two bars and the freshness label says so. Official statistics are revised rather than
+mis-printed, and hiding a genuine record release (e.g. April 2020 unemployment) would misstate the data.
+
+### D-032 · 2026-10-21 · Licence tags: display and derived rights are independent
+**Decision.** Add `display_only` to the licence tags: raw values may be shown, analytics derived from them may not.
+`ensure_displayable` passes `display_ok`/`display_only`; `ensure_derivable` passes `display_ok`/`derived_only`.
+**Reason.** PROMPT §5.1 makes derived analytics conditional on `derived_data_allowed` alone; some exchange and vendor
+terms allow display but forbid derived data, which the three-tag model could not represent (P1 review round 1).
+
+### D-033 · 2026-10-21 · Physical bounds and consistency checks (P1 review round 2)
+**Decision.** Values that cannot be true are quarantined, never shown:
+- EIA weekly stocks: ≥ 0 and below round figures above total U.S. working storage for the product (crude excl. SPR
+  800,000 thousand barrels; gasoline 400,000; distillate 300,000; Lower-48 working gas 6,000 Bcf). These are
+  engineering ceilings, not market data shown to users; refine against EIA's *Working and Shell Storage Capacity*
+  report when the host is reachable. A series mixing units is refused.
+- Kraken perpetuals: prices > 0, open interest and volume ≥ 0, funding within ±1% per hourly interval, and mark within
+  10% of index (otherwise mark, index and the funding derived from the mark are quarantined). A perpetual's 24h
+  contract volume must match its 24h quote volume (within 10^-6): × the 24h VWAP for a linear (PF_) contract, equal
+  for an inverse (PI_) one, whose contract is worth one quote unit; both hold to float precision on every ticker of
+  the recording; else the volume is quarantined (P1 review rounds 24–25). A requested symbol the exchange did not
+  return is reported. The mark must also sit within ×1.5 of the median of the same ticker's last trade, bid and ask,
+  and the index within ×1.5 of the index the exchange's other contracts on the same pair carry (on the 211
+  perpetuals of the recording: the mark within ×1.24 of its quotes, an illiquid FX perpetual, and the pair's indexes
+  within 0.03% of each other), else mark, index and funding are quarantined; and the funding rate served (absolute
+  funding over the mark) must agree with the ticker's own relative funding within 5% and in sign (within 2.6% on
+  every perpetual of the recording), else the funding rate is quarantined (round 29: mark and index ×10 together,
+  every price of the ticker ÷10, and the absolute funding ×100 or sign-reversed alone were served). Open interest has
+  no such anchor: its ratio to the 24h quote volume ranges from 0.01 to 2,840 across the recording, so a slipped open
+  interest is not detected.
+- Bars (every source): a high more than 3× the bar's larger of open and close, or a low under a third of the smaller,
+  is a bad print even when every bar shares it (a column keyed in the wrong unit, which the field's own series cannot
+  show): the recorded Kraken bars' widest wicks are +3.0% and −4.5%; a genuine flash-crash wick beyond 3× would be
+  withheld, not served (fails closed) (P1 review round 26). A response whose every bar is quarantined is refused.
+- Treasury yield-curve CSV: a body cut off is refused as an outage — a last row with missing fields or a number cut
+  short (Treasury prints every yield with two decimals), or a year's file that starts after the 7th of January (the
+  file runs newest first, so a cut between rows loses the year's oldest days) (P1 review round 24). A tenor's yield
+  more than 1.0 percentage point outside the band its neighbouring tenors draw that day (an end tenor: farther from
+  the nearer neighbour than the two nearest differ, by more than 1.0) is quarantined, even when every day's value of
+  that tenor shares it (the 10-year divided by 10, the 2-year doubled). The same holds for a run of adjacent tenors
+  all on one side of the band of the tenors around the run (at an end, all beyond the two nearest tenors outside it),
+  judged smallest run first and only against tenors still on the curve, so tenors keyed in the wrong unit together
+  do not vouch for each other (round 27: 7Y and 10Y doubled, 20Y and 30Y ÷10, 2Y–5Y ÷10, the bills doubled). Measured only on the recorded 2026 file (201
+  days): genuine curves stay within 0.08 of the band; the Treasury host is not reachable from the build environment
+  for a longer calibration (STATUS) (P1 review round 26). Tenors keyed wrong together vouch for each other when
+  they are the majority: with every tenor from 2Y out ÷10, or from 1Y out ×2, the genuine bills were the run judged
+  off the curve and the slipped majority was served (round 29). An off-curve run of 3 or more tenors at one end of
+  the curve splits the day into two blocks the file cannot arbitrate, so that day's whole curve is held; one or two
+  end tenors against the rest are still held alone. Not detected: a whole file keyed in the wrong unit (every tenor
+  of every day ÷10 or ×2) has no anchor in the file, and at low rates (bills near zero) the 1.0-point band does not
+  see the bills ×10 (the round-29 reviewer's synthetic 2021-style file). Both need an outside anchor (the previous
+  year's file fetched every time, or another source's curve) or a longer calibration than the one recorded year.
+- COT: both the long and the short side (with spreading) must sum to open interest; rows for another market are
+  rejected. Each position must give the share of open interest the row prints for it (`pct_of_oi_*`, one decimal):
+  on the six recorded cassettes (3,840 shares) the recomputed share is never more than 0.05 point off, so a gap over
+  0.06 fails the row's validation and refuses the response. Long and short swapped (every net position reversed,
+  every magnitude plausible) was served in every report type (round 29); a swap that leaves the shares in place is
+  now caught unless a category's long and short differ by under about 0.1% of open interest. Swapped together with
+  their shares, or one category's columns moved into another's, the shares agree again (round 31: 70 of 70 such
+  seeds served), so each week's positions must also move from the week before by the changes the row prints
+  (`change_in_*`, open interest's too): on the six recorded cassettes (4,484 changes, report gaps of 6 to 8 days)
+  they agree exactly in the futures-only reports and within 1 contract in the combined ones, so a gap over 1.5
+  contracts per week marks the week. A wrong week breaks its own change and the next week's; when the weeks either
+  side reconcile through both weeks' printed changes only that week is held, otherwise every week from it on (a
+  swap kept in later weeks is consistent with itself). A week's positions and open interest scaled with its shares
+  left alone (round 31: ×2 was served) no longer follow from the week before, whether its printed changes are scaled
+  with them or not, so that week is held too.
+- Rows copied forward (P1 review round 30, widened in round 31): a COT week whose every position and open interest
+  repeat the week before, a Treasury day repeating the day before in every tenor (no two recorded consecutive days
+  share more than 12 of their 14 tenors), and a bar repeating the bar before in
+  open, high, low and volume (its close touched or not; a bar without volume, as FX, only in full) are held. A
+  Treasury copy with one tenor nudged is not caught: a genuine quiet day (2026-02-03) moved only two tenors, by 0.01.
+  EIA's petroleum stocks (thousand barrels, which never repeat to the barrel) hold a week equal to the week before;
+  catalogue series hold a week not dated the week-ending Friday; and their lower bounds are a small fraction of what
+  U.S. storage holds in any week (10,000 thousand barrels for each petroleum stock, 50 Bcf for working gas), so the
+  series keyed in million barrels under the same unit is refused (round 32). Natural gas storage (whole Bcf, where
+  a week without net change can happen) is not checked for repeats.
+- Calendars for bars (P1 review round 32): a Twelve Data daily bar dated a day the market does not trade (an
+  equity on a day that is not an NYSE session, FX or a commodity on a Saturday) is held. Kraken's candles chain,
+  each opening at the previous close (59 of 59 recorded): where at least 90% of a response's adjacent candles
+  chain, a break holds the candle before it and every candle to the next break or to the end (a block keyed off, a
+  slipped close, a level shifted from there on), among candles no other check held. A slipped close on the newest
+  candle has no successor to show it; it is caught only beyond the price-spike bounds. A suspended Kraken contract
+  is quarantined. Unadjusted splits in Twelve Data equity bars stay a warning (no corporate-actions source yet). (none in the recorded COT weeks of 6 series, the 200 recorded Treasury days or the
+  recorded Kraken bars); bars also hold every close inside a run of 5 or more identical closes anywhere in the window
+  (the stale-quote check saw only the end). Macro series (FRED, EIA) are not checked for repeats: a policy rate stays
+  the same for weeks. A Treasury row dated a Saturday or a Sunday is refused (never published), and one dated a
+  weekday exchange holiday other than Good Friday (Labor Day, Thanksgiving) is held, not refused, as the bond market
+  opens on Good Friday and on some unscheduled exchange closures (round 30: a weekend row made a blocked response
+  look merely stale). A Kraken contract's index must sit within 1% of the median index of the pair's other
+  contracts (they agree within 0.03% on the recording), so a whole ticker scaled together (its mark, index, quotes
+  and funding consistent with each other) is held.
+- Corporate actions: an unexplained split-ratio jump blocks the series only when split dates come from a
+  corporate-actions source; without one (Twelve Data today) it is a warning, because a genuine −33% or ×2 day cannot
+  be told from an unadjusted split.
+- EIA catalogue series also carry a maximum weekly change (crude 40,000 kbbl, gasoline and distillate 25,000 kbbl,
+  working gas 500 Bcf — above any recorded weekly build or draw); a week beyond it is held, and so is every week
+  after it until the series comes back (D-031), wherever the move sits (round 28: only the latest week was checked,
+  so the newest weeks or a block of weeks inside the window ÷10 were served).
+- Treasury curves: a row is read from quotes at about 15:30 New York time, so a row dated a day that has not reached
+  that time at retrieval has not happened yet and is refused, as CFTC and EIA refuse their future rows (round 28).
+- Percent series (FRED) have a floor of −100% and no ceiling: hyperinflation and some lending rates exceed 100%.
+**Reason.** P1 review round 2 seeded each of these through the adapters and they passed QA; the bounds are wide
+enough that no genuine value approaches them.
+
+### D-034 · 2026-10-21 · Circuit-breaker probes cover a whole fetch; bounded responses
+**Decision.** In half-open state the single admitted probe belongs to one *fetch* (a context token), so providers
+that need several HTTP calls per fetch (FRED: series + observations; Kraken: instruments + data) can complete it and
+close the circuit. Success is recorded only after a body parses and clears the last error shown on the status page. A probe that ends
+without a verdict (rate-limited, bad request) is given back at once. HTTP 401/403 count as failures, so a revoked
+key shows the source as down.
+Responses above 64 MB are refused without buffering, and one call waits at most 60 s in total between retries
+(a longer `Retry-After` is reported as `RateLimited` with the hint, for the caller or scheduler to honour).
+**Reason.** P1 review round 3 showed a multi-call provider could never recover once its circuit opened (the second
+call met the taken probe), and that `Retry-After` × retries could stall a fetch for minutes.
+
+### D-035 · 2026-10-21 · QA always sees at least 30 points of history
+**Decision.** Every series adapter fetches at least `QA_CONTEXT` = 30 points (bars, weeks, days) whatever window was
+asked for, runs every quality check on that history, and trims the response to the request afterwards. For a
+`since` window the extra history is sized by how many bars the window can hold by now (an incremental poll "since
+the last stored bar" may hold only a few). Gap checks block only on gaps inside the returned window. Early in a
+year the Treasury adapter also fetches the previous year's file as context (never returned). A series still too
+short to check reports "bad prints could not be checked" as a warning rather than passing silently. Week-on-week
+open-interest moves are held only beyond ×3/÷3 (expiry rolls of 20–40% are shown, flagged). EIA supports weekly
+series only until monthly/quarterly periods and release calendars are modelled; unlisted weekly series assume the
+earliest (Wednesday) release so a genuine release is never refused as "not yet published".
+**Reason.** P1 review round 4: with a short window (`limit=2`, `weeks=4`, a six-day January file) the bad-print and
+stock-move checks had fewer than the 11 points they need, so a ×50 latest close passed as fresh.
+
+### D-036 · 2026-10-21 (rev. 2026-11-12, round 26) · SEC company facts: scale errors, not restatements
+**Decision.** An XBRL fact entered at the wrong scale (thousands as units and the like) is exactly a power of 1000 off,
+and nothing in the filing marks it. `rd_data.adapters.sec_scale` finds such facts from the rest of the same EDGAR
+response, and holds them (quarantine) or flags them (kept, with a warning). The evidence, in turn:
+1. *Neighbouring periods.* The median of the 4 nearest periods of the same concept, unit and duration, as reported by
+   other filings, within 5 years of the fact (a filer's figures from decades ago say little about today's scale).
+   - A fact more than 10^3.5 away is held.
+   - On a stable concept (typical distance under 10^0.15), a fact more than 10^2.5 away and within 10^0.5 of a power
+     of 1000 is held.
+   - Anything else more than 10^2.5 away in the 4 newest filings is flagged.
+2. *The same period in several filings.* Facts are grouped by scale. The group clearly nearest its neighbours (by
+   ≥ 10^1, judged without the disputing filings' own values) is kept; groups a power of 1000 from it are held. When
+   the neighbours do not decide, a group two or more filings report beats a single filing's value; otherwise both
+   filings' facts of that concept are held. A filing is held whole when most of what it shares with
+   other filings is a power of 1000 off. Currency amounts of $1M or more with four significant digits that two filings
+   report exactly 10 or 100 apart (within 10^0.0005) are a slipped decimal too, judged by half a step (round 27: the
+   newest filing's comparative equity, assets and revenue ×10 or ÷10 were served); per-share amounts and share counts
+   are restated exactly by splits, and WFC's fees rounded to $1M and $10M sit exactly 10 apart in clean data.
+3. *Sums across periods.* Year to date = earlier year to date + latest quarter, the parts usually from different
+   filings. A sum that rescaling one filing's facts by 10, 100, 1/10 or 1/100 makes hold exactly (within 0.1% of its
+   smallest term) holds that filing's facts when they sit on the slip's side of their history and the other filing's
+   do not sit the step off theirs: a second quarter's statement keyed in the wrong unit breaks its half-year against
+   the first quarter's genuine filing. Only figures of four or more significant digits beyond their rounding unit
+   count (GE's $5M and $10M NCI shares of OCI add up after such a rescale by chance), and the tolerance is the
+   smallest term's (a restated BRK 2022 half-year a tenth of which nearly matched two offsetting quarters, judged
+   against the largest term, held two genuine facts) (P1 review round 26). A single fact slipped on its own (the
+   quarter ×10, a tenth or sign-reversed beside its filing's genuine year to date, which a whole-filing rescale
+   cannot repair) is held when rescaling or flipping that one fact alone makes the sum hold exactly, it sits that
+   step (or opposes its history in sign) from its history, and no other single fact of the sum does; its table
+   sibling (the same filing's other figure of that concept to the same date) is held with it (round 32: MRK's third
+   quarter revenue ×10, 9M 50,978 = H1 32,893 + Q3 18,085, was served, as were single quarters at 13 of 30
+   out-of-sample filers). A slipped figure with no sum to repair it (an annual 10-K figure whose fourth quarter is
+   not tagged) is not caught this way.
+4. *The same year.* A year-to-date fact against the same year's shorter year-to-date from other filings, judged on the
+   ratio the concept shows in other years (at least 3 years, spread under 10^0.3).
+5. *The filing's own comparatives.* A newest-period cell about a power of 1000 from the prior years the same filing
+   reports beside it (at least two, agreeing within 10^0.5).
+6. *Exact relations within one filing and period*, solved together where they share facts:
+   - US-GAAP identities: income tax = current + deferred = federal + state + foreign (and each part's breakdown),
+     taxes paid, pre-tax domestic + foreign, SG&A, liabilities and equity = assets;
+   - statutory tax = statutory rate × pre-tax income;
+   - statement identities, each term under whichever of its usual tags the filing uses: change in cash (either cash
+     tag) = operating + investing + financing (+ FX, under any of three tags, when reported); comprehensive income =
+     net income + OCI (parent portion, or total); comprehensive income including NCI = profit + OCI, and = the
+     parent's + the NCI's, and (for filers with no profit line) = net income + NCI share + OCI, in total (843 of 855
+     clean instances within 0.1%) or as the parent's and the NCI's (384 of 439); profit = net income + NCI share; net income = income from continuing operations + discontinued operations, the parent's
+     shares (355 of 437: C 149 of 149, MMM 32 of 32, GOOGL 11 of 11, GE 163 of 245); income from continuing operations
+     including NCI = the parent's + the NCI's share, of continuing operations (155 of 201: C 69 of 74, GE 86 of 127) or
+     tagged as the NCI's share of net income (288 of 406: C 149 of 149, GE 135 of 233, MMM 4 of 24); income from
+     continuing operations (or profit, or net
+     income) = pre-tax income − tax, with equity-method income added after tax where the pre-tax line excludes it;
+     pre-tax income = revenue − costs and expenses, and = operating income + non-operating income (1,327 of 1,383
+     clean instances within 0.1%: AAPL 228, MSFT 221, MMM 225, AMZN 225, GOOGL 143, NVDA 123 of as many, META 162
+     of 178, GE 0 of 40; round 27); operating income = gross profit − operating expenses, and =
+     revenue − costs and expenses; a bank's revenue = net interest income + noninterest income (588 of 588 clean
+     instances within 0.1%), and so is its net revenue where tagged as such (223 of 223, JPM and WFC); a bank's
+     pre-tax income = net revenue (either total, or its two parts) − provision for credit losses − noninterest expense
+     (223 of 223 with net revenue, 365 of 373 with `Revenues`, 637 of 645 with the parts; every miss is a BAC 2010–11
+     filing); a bank's net interest income = interest income − interest expense (892 of 892: JPM 227, WFC 225, BAC
+     225, C 215; it applies at no other filer); net interest income after the provision = net interest income −
+     provision (with the total provision 370 of 478: 365 of 365 at JPM and WFC, 5 of 113 at C; with the loan-loss
+     provision alone 178 of 198: 176 of 176 at C, 2 of 22 at JPM; with the loans' credit-loss expense, as C tags its
+     provision since CECL, 42 of 75: 39 of 39 at C, 3 of 36 at JPM; an instance that does not close is left alone); revenue = contract revenue + other revenue (90 of 90, one filer); liabilities and equity
+     = liabilities + equity (including NCI, or the parent's and the NCI apart) + temporary equity where reported (in
+     total, or the parent's and the redeemable NCI apart; clean instances closing per variant: 1,710 and 1,736 of
+     1,762 with total equity, 849 and 889 of 889 with the parent's and the NCI apart); equity including NCI =
+     the parent's + NCI (934 of 935); equity = common stock + paid-in capital (or the two as one line, or, for a
+     filing with no paid-in-capital line, no-par common stock alone, as XOM tags it) + preferred (at par, or
+     including its paid-in capital as JPM and BAC tag it) − treasury stock + AOCI + retained earnings (1,195 of 1,347
+     with the lines apart; 305 of 394 with one line; AMZN 138 of 138, JPM 130 of 140, C 132 of 132; WFC (21 of 138)
+     and most BAC filings (8 of 96) do not close). With treasury stock tagged as a negative amount (a convention filers do
+     use: GE re-tagged it so in 2015) the same relation is kept as a veto only: where it closes exactly as reported,
+     its facts are taken as consistent, and neither a rescale nor a flip of them counts as a repair. AOCI has no such
+     convention in the calibration set (the opposite sign closes 1 clean instance of 1,741, by coincidence), so AOCI
+     flips are repaired. The NCI's share of OCI tagged with the opposite sign (C's 2011–14 filings) is likewise a
+     veto only: as an ordinary identity it held 29 genuine Citi facts; cash-flow-hedge and
+     AFS OCI
+     rollforwards; gross profit; current + noncurrent assets and liabilities. Several of these do not fit every
+     filer's statements (a net-income line that includes discontinued operations, costs that include non-operating
+     items, total OCI that includes the NCI's share): a relation that no repair below explains is left alone, and one
+     that closes only loosely never vetoes a sign repair;
+   - changes = closing − opening balance (goodwill, cash);
+   - relations whose lines and signs vary by filer (rate reconciliation, OCI and its parts, the unrecognized tax
+     benefit rollforward): the signs are learned from the filing's own table, and the relation is used only if they
+     close it in all its years but at most one (and in at least two). Among sign assignments closing the same years,
+     the one with the smallest residual wins: a line tiny next to the table's balance closes it within the tolerance
+     with either sign, but only its true sign leaves no residual. Tables of more than 12 lines are not learned.
+
+   A relation counts as broken evidence only if rescaling a minimal group of its facts by a power of 1000 closes it,
+   and only if the rescaled facts and the rest are both needed for it to close. That group is held if its own history
+   (other filings, or failing that its own comparatives as evidence against it) blames it. Otherwise the facts of the
+   relations it closes are held. A relation that closes exactly as reported (within 0.1%) must stay exact under a
+   repair, not merely within 1%. Statement identities and footnote tables are searched for rescales as separate
+   systems (joined, the tax table would be too large to search whole). When no rescale explains a broken relation,
+   flipping the sign of one fact may, closing it exactly (within 0.1%: reported figures are exact up to rounding, and
+   a flip that lands inside the 1% tolerance is a coincidence) without breaking any relation of the joined system
+   that closes exactly as reported, so a total another identity confirms is never the one flipped. Relations that
+   close only loosely, and relations whose signs were learned from the filing (they adapt to a sign error carried
+   through a whole filing, as a flipped tax total in every column of a 10-K), do not veto a flip. The fact is held when its sign opposes
+   most of its (at least two) neighbouring periods, or when it is the only fact whose flip closes that relation;
+   otherwise nothing is held. Headline totals over trailing periods are also checked: trailing twelve months = the
+   last fiscal year + this year to date − last year to date, each part from the same filing where it reports it.
+   These relations chain periods together, so each is checked on its own: a flip that closes one exactly, without
+   breaking any relation that closes exactly as reported, is held as above. A slipped decimal (one fact typed 10× or
+   100× off, or a tenth or a hundredth) is found the same way: when no power-of-1000 rescale explains a broken
+   relation, rescaling one fact by 10, 100, 1/10 or 1/100 that closes it exactly (within 0.1%) without breaking any
+   relation that closes exactly as reported explains it. The facts whose rescale closes it and that sit about that
+   far from their own history are held; with no history to decide, every one of them is. Relations whose signs were
+   learned from the filing are not repaired this way (on clean data one JPM 2013 tax-benefit line closed so by
+   coincidence). Several facts slipped together (two totals, a revenue and its cost) are found by the same group
+   search as power-of-1000 rescales, with steps of 10 and 100 that must close exactly; it runs over statement
+   identities and footnote tables joined (a pair such as assets and liabilities-and-equity still equal each other,
+   but each breaks its own statement identity), and history blames a side by half the step. Every fact of such a
+   group that has history must sit about the step from it (within 10^0.5): without that, groups of small lines whose
+   rescale happened to land inside the 0.1% tolerance of a large relation held 31 genuine JPM 2009 and GE facts.
+   A whole statement keyed 10× or 100× off, or with every sign reversed, inside a column that is otherwise genuine
+   (an income or cash-flow statement is 30–50% of its flow column, so the column's median does not move) is too large
+   for that group search. It is grown from a term of a broken relation along the relations that close exactly as
+   reported (their terms add up with it, so they share its scale or sign); 60% of the grown facts with history must
+   sit the step off it (within 10^0.5) or, for a flip, have the opposite sign to it; the period's other facts that
+   moved too, and are tied by no relation that closes as reported to a fact left out, join it. The statement is held
+   when rescaling or flipping it closes the broken relation exactly (within 0.1%), needing both sides. Where the
+   relation ties a flow statement to balances it does not contain (the change in cash against closing minus opening
+   cash, with or without disposal-group cash, as GE and TSLA tag it), that exact closure is the evidence: a rescaled
+   statement need only sit on the slip's side of its history at the median (a fast grower's genuine flows sit far
+   above theirs: NVDA's cash flows at a tenth of their value sit only 10^-0.2 to 10^-0.6 below their history), and a
+   flipped one need not oppose its history at all (financing and exchange flows change sign on their own). Flips are
+   tried only there: tables and rollforwards change sign conventions between filings in clean data, and trying flips
+   on them held 231 genuine C, GE and TSLA facts. A slipped cash-flow statement also takes its period's cash-flow lines by element
+   name (proceeds, payments, repayments, working-capital changes), which swing so far on their own that a slipped one
+   can sit on its history (XOM debt repayments genuinely 10^1.0 above theirs). This search runs before the smaller
+   groups, which could otherwise split the statement (two balances close a cash change across two years). Facts that
+   close a relation exactly with held facts are held with them when both sit off the rest of their column on the same
+   side (by 10^0.25 or more at the median): a slipped figure cannot add up exactly with genuine ones of its size
+   (GOOGL 2026 pre-tax income and tax, 10^0.3-0.5 below their history beside a held net income). Measured against
+   their history instead of their column, AMZN's genuine 2025 growth (every flow 10^0.3-0.5 above its history)
+   carried one held tax line into 17 genuine lines. Income to common stock equal to a held net income of the same
+   filing and period (within 10^0.05) is held with it, so the EPS ratio weighs EPS and shares against it; on clean
+   data this adds the two META 2012 figures beside its held net income (337 clean holds). A change in cash that no
+   statement closes around as reported (MMM's 2026 statement leaves a discontinued-operations flow untagged, so its
+   own identity breaks every year) is grown from itself alone: it takes only the period's facts that moved with it,
+   not every cash-flow line by name; MMM's statement 10×, 100× or ÷10 off, or flipped, then holds all but the 2–3
+   lines that sit on their history at the slipped value. A lone term of another rollforward is left alone: trying
+   flips on GE's and TSLA's goodwill rollforwards (filers report the goodwill change under either sign) held 34
+   genuine facts.
+   Before restricted cash joined the statement (filings before 2018), the change in cash runs between cash and cash
+   equivalents alone, and that tie is checked too (969 of 987 clean instances close), as is GE's to its cash including
+   discontinued operations (40 of 40; round 27: whole cash-flow statements ÷10 in 2015 and 2019 as-of snapshots were
+   served at AAPL, GOOGL, XOM, TSLA, GE and others). A lone change in cash is rescaled by any step its moved siblings
+   share: it swings too far for its own history to show the slip's side (TSLA's 2015 change ÷10 still sits 10^0.27
+   above it). The bottom of
+   an income statement flipped together (net and comprehensive income, OCI, EPS) closes its own relations and breaks
+   only net income = pre-tax income − tax: a flip is tried there from net, comprehensive or continuing-operations
+   income, grown along the relations that close as reported, and held when it closes that relation exactly. A held
+   non-operating line does not carry the relations it closes into its totals (it swings on its own, and a slipped
+   one is repaired by its relation): AMZN's genuine 2026 non-operating income, held beside an earlier filing ÷1000,
+   otherwise carried its whole genuine half-year statement. Relations that balance within 1% but not exactly are tried
+   too, for rescales only (flips only where a relation is broken beyond 1%: GE's genuine 2015 loss, its OCI tagged
+   twice, closed a merely inexact relation once flipped and held 126 genuine facts): a small NCI share keeps MMM's
+   profit = net income + NCI share within 1% when net income and profit slipped ×10 together.
+   A broken relation that nothing above explains, in a relation the filer's other filings close (at least four other
+   instances, 95% of them within 1%), shows a figure entered wrong by some other factor (assets ×1.5 beside
+   liabilities and equity), but it cannot be told from the filer's own tagging of that period: holding such breaks
+   held 201 more genuine facts on clean data (GOOGL's newest equity components, JPM 2009 totals, BRK comprehensive
+   income). Its facts in the
+   four most recent filings are flagged instead (kept, and named in the quality report for review); on clean data
+   the flag marks 19 recent facts at 2 of the 15 filers (MMM cash-flow totals beside a disposal-group line, GOOGL's
+   newest equity components) (P1 review round 26).
+6a. *Ratios at the filer's own level.* EPS × weighted shares = income to common stock (diluted and basic, and
+   diluted EPS × basic shares for filers that tag no diluted share count, as XOM; income available to common stock
+   where the filing tags it, else net income), and cash is nearly all of cash including restricted cash (either
+   total's tag), hold at a level of the filer's own rather than exactly. EPS: preferred dividends still move the level
+   of a bank that tags no income to common stock by up to 10^1.5 (C, 2009), so an instance is a slipped decimal only
+   when its level sits 10 or 100 times (within 10^0.1) from the filer's median level; no clean instance of the 15
+   filers sits there, EPS of any size included. Against net income, BAC's genuine FY2011 EPS ($0.01 on $1.4B of net
+   income, nearly all of it preferred dividends) sat 10^-1.09 from the level its 2012 10-K's history showed and was
+   held in the 2012–14 10-Ks; against income to common stock it sits at 10^0.09 (round 26 regression check) (three 2008–10 NVDA filings sit exactly 10^3 off, shares tagged in thousands, which this rule leaves
+   to the power-of-1000 checks). Stock splits move EPS and shares together and leave the level alone. Cash: its share
+   of the total moves at most 10^0.27 from a filer's level in clean data (META, 2026), so any move of 10^0.5 or more
+   is a slip. A term confirmed by an exact relation of its own filing (net income, the cash total) is not blamed; of
+   the others, the one clearly farthest from its history is held, else all of them. An EPS instance at its usual
+   level (within 10^0.3, EPS × shares of net income's sign) although one of its terms is held moved with that term
+   (net income and EPS slipped together): of EPS and shares, the one history clearly blames (by 10^0.25 over the
+   other) is held with it. Looser, this held 29 genuine NVDA 2008–10 and META 2012 EPS facts next to held share
+   counts and income. When an EPS ratio slips while net income's identities close, and net income's whole flow
+   column sits within 10^0.5 of that step off its history, the statement was keyed in the wrong unit: the column is
+   held, not EPS, also when a size bound held net income first (a fast grower's genuine column sits up to 10^0.4
+   above its neighbours, NVDA 2026, too far for the column rule of rule 11 alone).
+   A balance that the cash ratio blames by a step of 10 or 100 takes with it the balances of its filing and date that
+   sit the same step off their history: a balance sheet keyed in the wrong unit beside a genuine cash total need not
+   break any exact relation (GOOGL leaves $18B of its equity untagged; seeded ÷10, its assets $92.2B were served).
+   Diluted EPS sits within 10^0.3 of basic EPS in clean data (cents rounding of small EPS), so a move of 10^0.5
+   between them is a slip, and basic EPS beside a held diluted EPS it agrees with is held with it. An income that
+   another EPS instance of its period agrees with (at its usual level) is vouched for: it is neither blamed nor taken
+   for a slipped statement, and the EPS that disagrees moved (AMZN's genuine 2026 income sits 10^0.5–0.7 above its
+   history, where a statement keyed 10× off would, so its diluted EPS ÷10 held the genuine income statement; GOOGL's
+   diluted EPS ÷10 blamed its genuine income to common, its EPS history broken by the 2022 split). Income to common
+   beside a held net income it does not equal is not what an EPS keyed with that net income agrees with: the
+   instance is weighed against the held net income instead (GOOGL 2026, net income and both EPS a tenth of their
+   value beside a genuine $174.7B to common, served its EPS).
+6b. *Parts over their totals.* A never-negative part more than twice its never-negative total in one filing and
+   period (current assets, cash, PP&E, goodwill, intangibles, inventory, receivables, loans and securities of total
+   assets or of liabilities and equity; deposits, current liabilities, payables and long-term debt of total
+   liabilities; cash, inventory and receivables of current assets; payables of current liabilities; cost of revenue of
+   costs and expenses): one of the two slipped. No clean part exceeds its total by more than 6% (MMM's Q3-2022 cost
+   of revenue over its costs and expenses; one BAC 2008 total of assets tagged 0) and genuine shares reach 0.84, so a
+   decimal slip in either lands far past the bound. History blames one, else both are held; a held total takes the
+   twin it equals (assets, liabilities and equity) with it, as no identity sees two totals slipped together where
+   neither has parts tagged that close. Whichever check holds one twin, the other, equal to it and more than 10^0.5
+   from its own history, is held too.
+7. *Impossible size.* A currency fact is held when it exceeds a multiple of the company's total assets. Total assets
+   is the median of the 4 nearest period ends, from other filings, held facts left out. The multiples were measured on
+   the 15 filers below with the bound itself switched off:
+
+   | Lines | Held above | Largest clean value |
+   | --- | --- | --- |
+   | Tax amounts (expense and parts, reconciliation, taxes paid, deferred and uncertain tax) | 1× | 0.43× (about 30,000 facts) |
+   | Changes in balances (working capital, period increases) and OCI | 1× | 0.34×, 0.61× and 0.14× |
+   | Cash-flow lines (gross proceeds, payments, repayments; net cash by activity) | 2× | 0.96× (AAPL purchases of securities) and 0.72× |
+   | Revenue, cost and purchase lines | 20× | 2.34× (AMZN 2011 pro-forma revenue; 2.33× reported revenue) |
+   | Everything else | 3× | 1.51× (XOM gross PP&E) |
+
+   The only clean values above 3× outside revenue and cost lines are option intrinsic values that were themselves
+   entered at the wrong scale (NVDA FY2012–13, up to 14.9×; MMM Q1-2022, 4.1×): they are now held. Revenue and cost lines get a wide bound because asset turnover is higher for low-margin distributors
+   and traders than for any calibration filer; a ×1000 error still lands far above it. Exempt:
+   - companies under $10M of assets;
+   - derivative notionals and client assets under management, custody or fiduciary care;
+   - cumulative equity balances (paid-in capital, retained earnings or deficit, total equity, treasury stock), as
+     instants only: their flows and AOCI are bounded;
+   - dei market values.
+8. *Spreading.* A held fact's siblings in the same table, a filing's column once mostly held, one statement of one
+   of a filing's periods once mostly held (its cash-flow statement — the lines named as cash-flow lines or as the
+   non-cash adjustments to net income — or its income statement and notes, apart), and relations that close around a
+   held fact whose other facts are off their own history too, repeated until nothing more is held (round 28: a
+   cash-flow statement held ×10 served its deferred taxes and other non-cash items, and an income statement held for
+   reversed signs served its continuing operations, pre-tax income and EPS).
+9. *Balance jumps.* A balance in a recent filing that moved more than 10^2 from the previous period end is flagged.
+10. *Impossible signs.* A negative value of a balance or total that cannot be negative is held: assets, liabilities,
+    their current parts, liabilities and equity, cash, PP&E, goodwill, intangibles, inventory, receivables, payables,
+    long-term debt, contract revenue, cost of revenue and of goods sold, a bank's interest income and noninterest
+    expense, common stock at par and share counts, and (round 26) operating expenses and their lines (costs and
+    expenses, R&D, SG&A, G&A, selling and marketing, advertising, labour, share-based compensation expense, a bank's
+    operating and deposit interest expense), depreciation and amortization, capital expenditure, dividends paid and
+    interest paid, and (round 27) 33 balance-sheet lines (non-current and current debt, non-current liabilities,
+    lease liabilities and right-of-use assets, accrued, other and employee liabilities, other assets, deferred revenue,
+    marketable and held-to-maturity securities, trading securities, commercial paper and short-term borrowings,
+    deposits, net loans, paid-in capital and repurchase agreements; equity, retained earnings, treasury stock,
+    minority interest and deferred taxes are reported negative by some) (77 concepts; of 66,747 clean facts in 10-K and
+    10-Q filings and their amendments (66,322 and 425),
+    counted in every taxonomy before the adapter's own filters, one is negative: a
+    Citi Q4-2020 cost of revenue of −$46M, held with its annual figure;
+    total `Revenues` and a bank's net revenue are left out, as asset managers can report them negative). A flow held
+    here (a flow or a balance) seeds the search for a statement keyed with every sign reversed, whose identities still close: the facts
+    grown from it along the relations that close as reported are held with it when 60% of those with history oppose
+    it in sign (XOM's 2026 first quarter seeded with every sign reversed: revenue at −$85.1B is reached from costs
+    and expenses through pre-tax income), and an EPS whose product with shares has the sign of a held net income that
+    opposes its history follows it. For headline totals (net, operating and
+    pre-tax income, tax expense, net cash flows, revenue, a bank's net revenue, cost of revenue, operating expenses,
+    comprehensive income) and equity balances (equity, equity including NCI, retained earnings, AOCI: where two clean
+    filings report one period with opposite signs, they report different amounts, a restatement this rule ignores, as
+    AOCI at AAPL 2008 and XOM 2011),
+    filings that report the same amount with opposite signs, and half-year or year-to-date sums that one filing's
+    flip closes, are held on the side that one filing alone reports or that opposes most of its neighbouring periods'
+    signs; undecided cases are left alone. Other lines are not sign-checked across filings: their sign conventions
+    flip between filings so often (OCI, hedges, allowances) that checking them held 1,900 clean facts.
+11. *Shifted columns.* A filing's column for one date is held whole when at least 10 of its currency facts can be
+    compared with the same periods in other filings, their neighbouring periods, or (a line no other filing reports)
+    the filing's own other periods within 400 days, and the column sits a power of 1000 from them (median within
+    10^0.5, 60% of facts within 10^1), or, more tightly, a power of 10 or 100 (median within 10^0.3, 60% of facts
+    within 10^0.5: no clean column comes near; the closest, a 2010 META comparative, has its median at 10^-0.57 with
+    52% of its facts within 10^0.5 of 10^-1). Balances and flows are separate columns, as the balance sheet and the
+    other statements are keyed apart (and a mostly held column is held whole on the same split). For a young filer
+    this is often the only evidence; it adds no clean holds.
+12. *Shifted statements.* A filing's face statement for one period — the facts its statement identities relate: the
+    balance sheet, the income statement, the cash-flow statement (with its period's cash-flow lines by name, and in
+    any period that reports a cash-flow total, as WFC's change in cash forms no identity) — is held when at least 6 of
+    its facts have history and a comparative in their own filing, and the statement sits the same power of 10 or 100
+    from both (its medians from its history and from those comparatives within 10^0.3, and half its facts within
+    10^0.5 of the step on both: a bank's cash flows swing so far that only 56% of JPM's 2012 statement ×10 sits that
+    close), or, for a balance sheet, 60% of its facts oppose both in sign. Such a statement closes every identity, and its footnotes keep the column's median where it was, so only its history shows it (round 28: WFC's
+    first-quarter 2017 balance sheet ÷10 and its cash flows ×10, and JPM's 2012 cash flows ×10, were served whole). The
+    own-filing comparative is what tells a slip from fast growth: NVDA's genuine 2026 income statement sits 10^1 above
+    its history but not above the prior-year column printed beside it (without that test the rule held 41 genuine NVDA
+    facts). Income statements are not judged on sign: a genuine loss reverses a whole income statement (C's fourth
+    quarter and BRK's first quarter of 2009). With both tests it adds no clean holds (335 before and after, none in a
+    newest filing).
+    A slip repeated over consecutive filings puts the later slipped quarters into each one's history on both sides
+    (the four nearest periods), so no slipped statement stood a clean step from its history. The faces are therefore
+    also taken in filing order against their earlier history alone, leaving out the facts already held and each face
+    this pass holds: the first slipped statement stands against genuine history and each later one against the
+    genuine periods before the run (round 29: three consecutive 10-Q balance sheets ÷10 served the newest at 13 of 14
+    calibration filers, BA and F among the out-of-sample ones). That pass also takes each filing's whole balance-sheet
+    column for a period end (every currency balance there), as some filers tag too few identity facts for a face to
+    be judged (HAS: liabilities, equity and their total). In both passes a fact counts toward a decimal step
+    only if it keeps the sign of its own comparative: a decimal slip never changes a sign, while a genuine collapse
+    into a loss sits 10^1 below a profitable history and its comparative with the opposite sign (round 29: MRK's
+    nine months to September 2026, a −$510M loss, had 16 genuine facts of its newest 10-Q held; the one-sided pass
+    also held 12 genuine lines of PFE's second-quarter 2026 loss).
+
+All checks run on every concept the company reports; a `concepts` filter narrows only what is returned, and the
+returned concepts alone date the response (a concept last reported years ago is as old as its last report).
+
+A filing's current-period column is its us-gaap currency facts for its latest period end reported with at least half as
+many facts as its busiest one (a cover public float, a footnote amount dated after the quarter or a cover-only
+amendment does not move it; a 10-K's prior-year end with more facts does not either). When that column
+is held entirely, whether the whole filing or only the column is wrong, the filing no longer makes older figures
+current: the response's as-of date is the newest filing whose own column is shown, the figures are judged stale a week
+after the held filing arrived (blocked 120 days after their own filing), and a note names both filings. Its
+comparatives may still be served. Facts that are undated, filed in the future or filed before their period ended are
+set aside with a warning.
+
+**Alternatives.**
+- Quarantine every cross-filing disagreement: rejected, it hides restatements.
+- MAD per concept (PROMPT §5.3's robust z-score): rejected for company facts, as genuine one-offs sit up to 10^3
+  from their neighbours; outliers are caught instead by the relations of rules 6 and 6a, which a slipped decimal
+  breaks (held where a rescale or flip explains the break; flagged for review where nothing does, rule 6). A slip in
+  a line that is in no relation (and under the 10^2.5 flag) is not detected (see Limits).
+- A size bound on tax lines against the line's own history: measured and rejected (a genuine Meta tax line is 39× that
+  yardstick, while Microsoft's GILTI ×1000 lands at 30×). Against total assets the same lines separate cleanly (rule 7).
+- One size bound for every line (100×, 10× when flagged): too loose; ×1000 tax and cash-flow lines landed at 1.4–8.2×
+  total assets and were served (round 12).
+- A step-from-last-year rule for flows: measured and rejected (10 genuine 10^2–10^3 moves in the newest AMZN filings).
+- A "part ≤ total" bound for every line: measured and rejected. Genuine parts reach 815× their total when the other
+  parts offset (GE, Citi). Rule 6b keeps it only for never-negative parts of never-negative totals, at 2×.
+- A fixed-sign rate reconciliation: it closes in 50 of 360 clean instances, and once held genuine Apple facts by
+  chance.
+
+**Reason: measured.** Calibration used the recorded AMZN company facts (the contract cassette) and the full company
+facts of 14 more large filers: AAPL, MSFT, NVDA, JPM, C, WFC, BAC, BRK, XOM, GE, MMM, TSLA, META and GOOGL. These came
+from a public EDGAR cache; they were used for measurement only and are not committed.
+
+On clean data:
+- AMZN: 10 facts held, all in its FY2014 10-K, which reports the 2013–14 quarterly and annual income-tax expense with
+  the opposite sign to every other filing of those periods (a real error in the recorded data); 4 genuine one-offs
+  flagged.
+- The 15 filers together: 335 historical facts held, **none in any filer's newest filing**. These are a mix, not yet
+  classified, of real errors in old filings (share counts; NVDA's and MMM's option intrinsic values; sign
+  inconsistencies such as TSLA's positive 2010–11 domestic pre-tax income beside a pre-tax loss, or goodwill
+  "increases" in periods goodwill fell) and genuine values withheld. Before the round-11 changes the same data held
+  3,789.
+- The 59 AMZN 10-K and 10-Q filing dates since 2012, each as an as-of date: from 2015-01-30 on, every snapshot holds
+  the FY2014 10-K's 10 sign-flipped tax facts (at the four 2015 dates also 2–5 of that filing's rate-reconciliation
+  lines held with them, and at 04-24 and 07-24 two tax-expense facts of other filings; at the filing's own date its 2014 tax figures are withheld until the next filing restates
+  them); besides that filing, 10 snapshots hold 1–4 genuine facts in 3 concepts (purchase obligations, OCI translation,
+  noncurrent restricted cash). No wrong value is served at any date. The cost is withholding, which is the side these
+  rules err on (P2 backtests must treat held facts as missing).
+
+Each USD concept's current-period facts in one filing were seeded one at a time, in the full company facts as recorded
+(later 10-Qs are present for AAPL, NVDA and JPM; the round-12 reviewer found re-running as of each 10-K's own filing
+date changes the counts by at most 4). Counts are held / flagged / missed; seeds whose value is zero (unchanged by any
+scaling) are counted separately in every row.
+
+| Filing (USD concepts) | ÷1000 | ×1000 | Zero values |
+| --- | --- | --- | --- |
+| AMZN 10-Q 26-000026 (159) | 142 / 11 / 5 | 150 / 5 / 3 | 1 |
+| AMZN 10-K 26-000004 (245) | 213 / 24 / 7 | 233 / 6 / 5 | 1 |
+| AAPL 10-K FY2025 (174) | 160 / 13 / 1 | 171 / 2 / 1 | 0 |
+| MSFT 10-K FY2026 (232) | 198 / 18 / 11 | 218 / 6 / 3 | 5 |
+| NVDA 10-K FY2026 (196) | 156 / 19 / 16 | 186 / 3 / 2 | 5 |
+| JPM 10-K FY2025 (387) | 351 / 16 / 10 | 357 / 13 / 7 | 10 |
+
+Every ×1000 miss lands below its tier's size bound (for example MSFT's FDII line at 0.8× total assets, JPM's tax
+contingencies at 0.1×), so size alone cannot tell it apart. Mis-scaled current columns are held entirely in
+the newest filing of all 15 filers (both factors, rounds 12–13) and, through rule 11, in young filers' early filings
+(reviewer round 14 found them served for filers with 1–7 earlier filings before it). A whole filing mis-scaled in a
+company's very first filing has nothing in the response to be compared with, beyond the size bounds.
+
+**Limit (stated, not hidden).** The remaining misses are of four kinds:
+- *Rate reconciliations the filing's own years cannot vouch for.* NVDA FY2026 does not close as tagged (15% off with
+  the learned signs) and AAPL's does not either (the $10.2B EU state-aid charge uses Apple's own tag). AMZN's and JPM's
+  have 13 lines, beyond the 12 whose signs are learned (the round-13 reviewer found one assignment closing 2 of 3
+  years within 0.9% for each, probably by chance among 8,192). MSFT FY2026 reports its new table for one year only, so
+  there is nothing to learn the signs from. A wrong line in such a table cannot be told apart from the table itself.
+- *Lines whose relation is defined only in the filing's XBRL calculation linkbase*: cash-flow details (working-capital
+  changes, gross investing and financing flows), footnote rollforwards with filer-specific lines, and new single-year
+  tables. The company-facts API P1 uses does not carry which lines make up each section or their weights, and guessing
+  them from element names could hold real data.
+
+- *Sign errors in lines outside the identities of rule 6 and the sign-checked totals and balances of rule 10.*
+  Filers flip sign conventions between filings for many lines (OCI flows, hedges, allowances, treasury stock) in
+  clean data, so a flipped sign there cannot be told from a convention change within this source; and a flip that
+  moves an exact identity by less than its 1% tolerance is not distinguishable from rounding.
+- *Slipped decimals in lines outside the relations of rules 6 and 6a.* A line 10× or 100× off that no relation of
+  its filing contains, under the 10^2.5 flag of rule 3, is served: genuine moves of that size are common in such
+  lines (10 genuine 10^2–10^3 moves in the newest AMZN filings alone), so history cannot tell them apart. Measured
+  on the newest filing's current cells of 11 headline lines at all 15 filers (×10, ÷10, ×100: 462 seeds), 456 are
+  held; the 6 served are GE revenue, GE cash including restricted cash and MMM operating cash flow, lines that no
+  relation closes in those filings (round 24). Slips across several facts or a whole column are held through the
+  same relations and rule 11: of 124 seeded groups at the 15 filers (assets with liabilities and equity, revenue with
+  cost of revenue, net income with one or both EPS, net income with comprehensive income, ×10 or ÷10), 123 are held,
+  and 120 of 120 whole current columns (all facts or flows only, ×10, ÷10, ×100, ÷100); the one served is GE's
+  comparative revenue, the GE revenue line above (round 25). A whole income or cash-flow statement of the newest
+  filing ×10, ÷10 or ×100 (with or without EPS; 3,603 seeded facts at the 15 filers) is held but for 90 facts: 28
+  are BAC's cash-flow statement ÷10, whose change in cash is under 1% of its cash balances, so no relation shows the
+  slip; the rest are non-operating, other non-cash and noncontrolling-interest lines outside the relations (round 26,
+  on 90b3e53). With every sign reversed, 8 of 465 cash-flow facts, 18 of 343 income-statement facts and 18 of 393
+  with EPS are served, the same kinds of line, and C's annual income statement, which has no never-negative expense
+  line to seed it (on 9d6726e).
+- *Slips that history and the filing's own comparatives cannot show.* Measured on the round-28 reviewer's harnesses
+  (round 29, on c09cd78): of 3,168 facts seeded into the then-newest 10-Q's face balance sheet, income statement and
+  cash-flow statement in as-of snapshots (2012, 2017, 2021; ×10, ÷10, ×100, sign reversed), 79 are served, against
+  407 before. Statements mostly served: GE's first-quarter 2017 income statement ×10, ÷10 or ×100 (16 of 18 facts).
+  The rest are single lines outside any relation (loan-loss provisions, non-operating and minority-interest lines).
+  Of the cash-flow statements as of 2015 and 2019 that round 28 found served, TSLA's as of 2015-08-10 ×10 or ÷10
+  still serves 17 of 24 facts; XOM's (2015, 2019), AAPL's and MMM's (2015) are held. Of 2,148 facts seeded into
+  the newest filings' face balance sheets and income statements of 8 calibration filers, 30 are served (C's and
+  MMM's income statements with every sign reversed, which a genuine loss also does, and single lines of GE and MSFT);
+  round 28's ledger row gave 2 of 528, which counted two of those filers only.
+- *Slips repeated over consecutive filings* (round 29 reviewer's harness, the three newest 10-Qs' balance columns ×10
+  or ÷10, on 1b88aa3): of 3,808 facts seeded at the 14 calibration filers that harness reads, none are served at ×10
+  and 73 at ÷10, all of NVDA's newest balance sheet (a fast grower ÷10 sits 10^-0.7 from its genuine history, outside
+  the step window); of 5,889 at 30 filers outside the calibration set, none (before: 1,404 and 2,625 served at ×10).
+- *Dates (P1 review round 30).* A fact whose period starts after it ends is never valid (the schema refuses it; the
+  adapter leaves it out and reports it: none in 1.31 million facts of 45 filers). A filing whose facts disagree on its
+  filing date (none of 3,066 accessions do) or that is dated on or before its own current column's period end (the
+  shortest genuine gap is 10 days, on 3,055 filings) has all its facts left out: their point-in-time key is in doubt.
+  Not detected: a filing date moved earlier but still after the period end (every fact dated a week or two before
+  the true filing); the filings index carries the true date and is not yet cross-checked against company facts.
+- *Duplicates and bounds (P1 review round 31).* One filing reports a fact once: a second value for the same
+  concept, unit, period and filing is refused whatever its `frame` (the check had keyed on the frame, so a copy
+  without one served both values; there is no duplicate of any kind in 1.31 million facts of 45 filers). Positive
+  operating income above the same period's largest revenue line (never above 66% of it on 7,093 filing periods)
+  holds the side that also breaks by 10^0.5 from the prior-year figure its filing prints, both when neither or both
+  do (round 31: PG's quarterly operating income ×10, $59.37B against $23.28B of revenue, was served). Revenue ×10
+  alone is not caught: neither its prior-year comparative (TSLA's 2013 revenue grew 10^1.27) nor its ratio to cost
+  of revenue (tagging changes move CAT's and T's by 10^0.98 and 10^-1.9) gives a safe bound.
+- *Cover shares (P1 review round 30).* A filing's cover-page shares outstanding (all classes) and its latest weighted
+  average shares sitting 10^(1±0.5) or 10^(2±0.5) apart (never on 2,673 filings of 45 filers; the genuine gaps are
+  powers of 1000 or under 10^0.5) mean one of them was keyed a decimal off: the side that also breaks from the same
+  figure in the filing before is held, and both when neither or both do (round 30: the cover share count ×10 was
+  served at 28 of 28 out-of-sample filers).
+- *Outside the calibration set.* The rules were calibrated on the 15 filers above; on 30 others (round 29 reviewer's
+  set, 839,278 facts, data to 2026-11-24) clean data has 1,174 facts held (0.14%, twice the calibration rate), 10 of
+  them in a newest filing (MCD share counts filed in millions; JNJ and PEP antidilutive share counts). PG's newest
+  10-Q serves a single revenue, cost or operating-income line ×10 (5 of 5 seeds; SBUX's and DIS's annual revenue
+  ×10 likewise, round 30), and in 2019 snapshots a flow column
+  with every sign reversed is served at 5 of 45 filers (DIS, KO, PFE, VZ, GE): those single-line and sign rules do
+  not yet carry over to every filer (round 29, open).
+
+Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
+fundamentals into reports (STATUS). (P1 review rounds 6–12.)
