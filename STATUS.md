@@ -4,10 +4,10 @@ _Last updated: 2026-11-27_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–28 returned ONE MORE PASS; major
-findings worked through in ledger rows 5–32 (row 32 lists what round 28's seeds still serve: GE's first-quarter 2017
-income statement as of 2017, TSLA's cash flows as of 2015, single lines in no relation, and a balance-sheet slip repeated over AAPL's three newest
-filings in its two earlier columns); awaiting review round 29.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–29 returned ONE MORE PASS; major
+findings worked through in ledger rows 5–33 (row 33 lists what round 29's seeds still serve: NVDA's newest balance
+sheet ÷10 over three filings, whole-file Treasury unit slips, PG single lines and some 2019 sign-reversed flow
+columns outside the calibration set); awaiting review round 30.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -41,7 +41,7 @@ filings in its two earlier columns); awaiting review round 29.** P2 does not sta
 | HTTP: host allow-list (SSRF guard), retries with full jitter + Retry-After, typed errors, redacted URLs | `test_http.py` |
 | Shared rate limits (atomic Lua token buckets), circuit breaker, response cache — on real Valkey | `test_resilience.py`, `tests/integration/test_data_redis.py` |
 | Freshness per §5.4 with exchange calendars; COT measured from release (D-027) | `test_freshness.py` |
-| QA checks catch seeded bad data (gaps, spikes, duplicates, non-monotonic, OHLC violations, rejected rows; SEC company facts by the relations of D-036, whose stated limits apply) | `test_quality.py`, `test_hardening.py` |
+| QA checks for seeded bad data (gaps, spikes, duplicates, non-monotonic, OHLC violations, rejected rows; SEC company facts by the relations of D-036). Not yet met as an exit criterion: the stated limits of D-031, D-033 and D-036 list what seeds still pass (whole-window unit slips with no anchor, single SEC lines outside any relation, filers outside the calibration set) | `test_quality.py`, `test_hardening.py` |
 | Seeded bad data end to end through the adapters, mostly by corrupting real cassettes (bad prints, impossible values, NaN, wrong subject/series/year, renamed columns, malformed payloads, stale symbols) | `test_hardening.py` |
 | Provider circuit state on the status page | `/v1/status` → `providers`, `tests/integration/test_services.py` |
 | Adapters: CFTC (6 datasets), SEC EDGAR, US Treasury, EIA, Kraken Futures (CCXT), FRED (flag off), Twelve Data (flag off) | `test_adapters_unit.py`, `test_kraken_unit.py` |

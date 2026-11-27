@@ -722,11 +722,20 @@ company's very first filing has nothing in the response to be compared with, bey
   407 before. Statements mostly served: GE's first-quarter 2017 income statement ×10, ÷10 or ×100 (16 of 18 facts).
   The rest are single lines outside any relation (loan-loss provisions, non-operating and minority-interest lines).
   Of the cash-flow statements as of 2015 and 2019 that round 28 found served, TSLA's as of 2015-08-10 ×10 or ÷10
-  still serves 17 of 24 facts; XOM's (2015, 2019), AAPL's and MMM's (2015) are held. A
-  slip repeated across consecutive filings is not shown either: with AAPL's three newest balance sheets ×10 or ÷10,
-  the newest is held but 69–85 facts of the two earlier columns are served, as each slipped column is the other's
-  neighbour. Of 528 facts seeded into the newest filings' face statements, 2 are served (WFC's minority-interest share
-  with every sign reversed).
+  still serves 17 of 24 facts; XOM's (2015, 2019), AAPL's and MMM's (2015) are held. Of 2,148 facts seeded into
+  the newest filings' face balance sheets and income statements of 8 calibration filers, 30 are served (C's and
+  MMM's income statements with every sign reversed, which a genuine loss also does, and single lines of GE and MSFT);
+  round 28's ledger row gave 2 of 528, which counted two of those filers only.
+- *Slips repeated over consecutive filings* (round 29 reviewer's harness, the three newest 10-Qs' balance columns ×10
+  or ÷10, on 1b88aa3): of 3,808 facts seeded at the 14 calibration filers that harness reads, none are served at ×10
+  and 73 at ÷10, all of NVDA's newest balance sheet (a fast grower ÷10 sits 10^-0.7 from its genuine history, outside
+  the step window); of 5,889 at 30 filers outside the calibration set, none (before: 1,404 and 2,625 served at ×10).
+- *Outside the calibration set.* The rules were calibrated on the 15 filers above; on 30 others (round 29 reviewer's
+  set, 839,278 facts, data to 2026-11-24) clean data has 1,174 facts held (0.14%, twice the calibration rate), 10 of
+  them in a newest filing (MCD share counts filed in millions; JNJ and PEP antidilutive share counts). PG's newest
+  10-Q serves a single revenue, cost or operating-income line ×10 (5 of 5 seeds), and in 2019 snapshots a flow column
+  with every sign reversed is served at 5 of 45 filers (DIS, KO, PFE, VZ, GE): those single-line and sign rules do
+  not yet carry over to every filer (round 29, open).
 
 Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
 fundamentals into reports (STATUS). (P1 review rounds 6–12.)
