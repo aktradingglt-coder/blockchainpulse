@@ -1,13 +1,13 @@
 # STATUS.md
 
-_Last updated: 2026-11-17_
+_Last updated: 2026-11-27_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–27 returned ONE MORE PASS; major
-findings worked through in ledger rows 5–31 (row 31 lists what round 27's seeds still serve: single balance lines in
-no relation, BAC goodwill and PP&E ×10, Kraken bars ×1.5, a Treasury file ÷10 on every day); awaiting review round
-28.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–28 returned ONE MORE PASS; major
+findings worked through in ledger rows 5–32 (row 32 lists what round 28's seeds still serve: GE's first-quarter 2017
+income statement as of 2017, single lines in no relation, and a balance-sheet slip repeated over AAPL's three newest
+filings in its two earlier columns); awaiting review round 29.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
