@@ -91,6 +91,10 @@ _CASH_FLOW_ADJUSTMENT = re.compile(
 #: judged as moved against its history (STATEMENT_SHIFT_SHARE of them by the same decimal step or reversed in sign).
 STATEMENT_SHIFT_MIN = 6
 STATEMENT_SHIFT_SHARE = 0.6
+#: For a decimal step, the statement's median must sit at the step from both its history and its own comparatives
+#: (within COLUMN_DECIMAL_NEAR), and this share of its facts within NEAR_POWER of it on both: a bank's cash flows
+#: swing so far that only 56% of JPM's 2012 statement x10 sits that close, its medians at 10^0.93 and 10^0.89.
+STATEMENT_STEP_SHARE = 0.5
 PREVIOUS_WINDOW_DAYS = 400
 #: A currency fact larger than this multiple of the company's own total assets is held. Across about 400,000 clean
 #: us-gaap facts of 15 large filers, outside revenue and cost lines, the largest ratio is 1.5 (XOM gross PP&E); the only
@@ -941,9 +945,15 @@ def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours) -
         centre = statistics.median(d for d, _, _ in steps.values())
         step = round(centre)
         moved: Callable[[int], bool | None] | None = None
-        if abs(step) in COLUMN_DECIMAL_STEPS and abs(centre - step) <= COLUMN_DECIMAL_NEAR:
-            if sum(abs(d - step) <= NEAR_POWER and abs(o - step) <= NEAR_POWER for d, o, _ in steps.values()) >= need:
-                moved = _stepped(neighbours, step)
+        own_centre = statistics.median(o for _, o, _ in steps.values())
+        if (
+            abs(step) in COLUMN_DECIMAL_STEPS
+            and abs(centre - step) <= COLUMN_DECIMAL_NEAR
+            and abs(own_centre - step) <= COLUMN_DECIMAL_NEAR
+            and sum(abs(d - step) <= NEAR_POWER and abs(o - step) <= NEAR_POWER for d, o, _ in steps.values())
+            >= STATEMENT_STEP_SHARE * len(steps)
+        ):
+            moved = _stepped(neighbours, step)
         elif balance and (  # a genuine loss reverses a whole income statement; a balance sheet never reverses
             sum(bool(flipped(k)) and records[k].value * v < 0 for k, (_, _, v) in steps.items()) >= need
         ):

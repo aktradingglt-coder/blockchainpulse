@@ -571,10 +571,11 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
     this is often the only evidence; it adds no clean holds.
 12. *Shifted statements.* A filing's face statement for one period — the facts its statement identities relate: the
     balance sheet, the income statement, the cash-flow statement (with its period's cash-flow lines by name, and in
-    any period that reports a cash-flow total, as WFC's change in cash forms no identity) — is held when at least 6 of its facts have history
-    and a comparative in their own filing, and 60% of them sit the same power of 10 or 100 from both (within 10^0.5;
-    the statement's median within 10^0.3), or, for a balance sheet, oppose both in sign. Such a statement closes every
-    identity, and its footnotes keep the column's median where it was, so only its history shows it (round 28: WFC's
+    any period that reports a cash-flow total, as WFC's change in cash forms no identity) — is held when at least 6 of
+    its facts have history and a comparative in their own filing, and the statement sits the same power of 10 or 100
+    from both (its medians from its history and from those comparatives within 10^0.3, and half its facts within
+    10^0.5 of the step on both: a bank's cash flows swing so far that only 56% of JPM's 2012 statement ×10 sits that
+    close), or, for a balance sheet, 60% of its facts oppose both in sign. Such a statement closes every identity, and its footnotes keep the column's median where it was, so only its history shows it (round 28: WFC's
     first-quarter 2017 balance sheet ÷10 and its cash flows ×10, and JPM's 2012 cash flows ×10, were served whole). The
     own-filing comparative is what tells a slip from fast growth: NVDA's genuine 2026 income statement sits 10^1 above
     its history but not above the prior-year column printed beside it (without that test the rule held 41 genuine NVDA
