@@ -917,13 +917,7 @@ def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours) -
     own history shows it. Each of those facts must also sit the step (or the sign) off the comparative its own filing
     prints beside it: a fast grower's genuine statement can sit a power of 10 above its history (NVDA's 2026 income
     statement) but not above the prior-year column next to it. Its moved siblings in the filing's period join it."""
-    _, _, statements, _ = _instances(records)
-    faces: dict[tuple[object, ...], set[int]] = {}
-    for inst in statements:
-        for k, _ in inst:
-            f = records[k]
-            family = "balance" if f.period_start is None else _statement_family(f)
-            faces.setdefault((f.accession, f.period_start, f.period_end, family), set()).add(k)
+    faces = _statement_faces(records)
     if not faces:
         return set()
     closed = _closed_relations(records)
@@ -958,6 +952,24 @@ def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours) -
             continue
         out |= _with_siblings(records, closed, {k for k in face if moved(k) is not False}, moved, by_name=False)
     return out
+
+
+def _statement_faces(records: list[FundamentalFact]) -> dict[tuple[str, date | None, date, str], set[int]]:
+    """Each filing period's face statements: the facts its statement identities relate, by (accession, start, end,
+    statement). A cash-flow statement's identity relates only its totals, so its period's cash-flow lines by name
+    join its face."""
+    _, _, statements, _ = _instances(records)
+    faces: dict[tuple[str, date | None, date, str], set[int]] = {}
+    for inst in statements:
+        for k, _ in inst:
+            f = records[k]
+            family = "balance" if f.period_start is None else _statement_family(f)
+            faces.setdefault((f.accession, f.period_start, f.period_end, family), set()).add(k)
+    for i, f in enumerate(records):
+        key = (f.accession, f.period_start, f.period_end, "cash_flow")
+        if f.period_start is not None and key in faces and _CURRENCY.match(f.unit) and _statement_family(f) == key[3]:
+            faces[key].add(i)
+    return faces
 
 
 _LineKey = tuple[str, str, str, int | None]  # accession, concept, unit, duration
