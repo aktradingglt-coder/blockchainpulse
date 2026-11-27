@@ -173,6 +173,7 @@ class EiaAdapter(BaseAdapter):
             # Unlisted weekly series are physical quantities too (stocks, production, flows): a x10 week is never
             # real, so they are held like the catalogue's stocks.
             level_like=info.stock if info else True,
+            max_step=info.max_step if info else None,
         )
         units = sorted({o.unit for o in obs})
         extra = [

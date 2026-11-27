@@ -4222,61 +4222,111 @@ async def test_a_tenor_off_the_curve_on_every_day_is_quarantined(column: str, te
     assert any("curve_shape" in w for w in resp.quality.warnings)
 
 
-@pytest.mark.parametrize(("rows", "factor"), [(2, 10.0), (3, 1000.0), (3, 0.1), (6, 1000.0)])
-async def test_cot_weeks_after_an_implausible_shift_that_stays_are_all_quarantined(rows: int, factor: float) -> None:
-    """Every position field and open interest of the newest weeks x10, x1000 or /10: each row still balances, and the
-    weeks after the first sit at the new level, so only the shift itself shows it; every week of the shift is held,
-    however many weeks share it, not only the week of the jump, and with the newest weeks held the response is too
+def _position_field(key: str) -> bool:
+    """A COT row's contract counts (position fields, some spelt "postion" by the source, and open interest)."""
+    return "position" in key or "postion" in key or key.startswith("open_interest")
+
+
+@pytest.mark.parametrize(
+    ("report_type", "rows", "factor", "second"),
+    [
+        ("disaggregated", 2, 10.0, 1.0),
+        ("disaggregated", 3, 1000.0, 1.0),
+        ("disaggregated", 3, 0.1, 1.0),
+        ("disaggregated", 6, 1000.0, 1.0),
+        ("legacy", 6, 10.0, 1.0),  # the shift spans the genuine September expiry roll
+        ("legacy", 12, 0.1, 1.0),
+        ("legacy", 30, 1000.0, 1.0),
+        ("disaggregated", 8, 10.0, 0.5),  # and a second slip on the newest weeks
+    ],
+)
+async def test_cot_weeks_after_an_implausible_shift_that_stays_are_all_quarantined(
+    report_type: str, rows: int, factor: float, second: float
+) -> None:
+    """Every position field and open interest of the newest weeks x10, x1000 or /10 (and the newest three of them
+    halved again): each row still balances, and the weeks after the first sit at the new level, so only the shift
+    itself shows it; every week of the shift is held, however many weeks share it and whatever genuine extreme move
+    (the E-mini S&P quarterly roll) or second slip falls inside it, and with the newest weeks held the response is too
     old to serve."""
-    request = _plan(CftcAdapter, RequestKind.COT, report_type="disaggregated", futures_only=None)
+    request = _plan(CftcAdapter, RequestKind.COT, report_type=report_type, futures_only=None)
 
     def shifted(body: str) -> str:
         data = json.loads(body)
         for k in range(rows):
-            data[k] = {
-                key: (str(float(v) * factor) if ("positions" in key or key == "open_interest_all") else v)
-                for key, v in data[k].items()
-            }
+            f = factor * (second if k < 3 else 1.0)
+            data[k] = {key: (str(float(v) * f) if _position_field(key) else v) for key, v in data[k].items()}
         return json.dumps(data)
 
     with pytest.raises(Stale):
         await _replay(CftcAdapter, request, {0: shifted})
 
 
-@pytest.mark.parametrize("factor", [1000.0, 100.0, 10.0, 3.0, 0.001])
-async def test_bars_keyed_in_another_unit_from_some_day_on_are_quarantined(factor: float) -> None:
-    """The newest six daily bars (open, high, low and close) multiplied by one factor: the move into them is beyond
-    any single-bar move and never comes back, so the bars after it are held however many there are, rather than
-    taken as a confirmed level shift."""
+@pytest.mark.parametrize(
+    ("factor", "rows", "second"),
+    [(1000.0, 6, 1.0), (100.0, 6, 1.0), (10.0, 6, 1.0), (3.0, 6, 1.0), (0.001, 6, 1.0), (10.0, 8, 0.7), (0.1, 20, 1.6)],
+)
+async def test_bars_keyed_in_another_unit_from_some_day_on_are_quarantined(
+    factor: float, rows: int, second: float
+) -> None:
+    """The newest daily bars (open, high, low and close) multiplied by one factor, and the newest three of them by
+    another (a second slip part of the way back): the move into them is beyond any single-bar move and the series
+    never comes back to where it was, so the bars after it are held however many there are and whatever moves follow,
+    rather than taken as a confirmed level shift."""
     request = _plan(KrakenFuturesAdapter, RequestKind.BARS)
     cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request))
     candles_at = next(i for i, it in enumerate(cassette.interactions) if '"candles"' in it.body)
 
     def seed(data: dict[str, Any]) -> None:
-        for c in data["candles"][-6:]:
+        for k, c in enumerate(reversed(data["candles"][-rows:])):
             for name in ("open", "high", "low", "close"):
-                c[name] = str(float(c[name]) * factor)
+                c[name] = str(float(c[name]) * factor * (second if k < 3 else 1.0))
 
     resp = await _replay(KrakenFuturesAdapter, request, {candles_at: _json_edit(seed)})
-    assert len(resp.quarantined) == 6
+    assert len(resp.quarantined) == rows
     assert any("price_spikes" in w for w in resp.quality.warnings)
 
 
-@pytest.mark.parametrize("factor", [2.0, 0.1])
-async def test_the_whole_curve_keyed_in_another_unit_on_the_latest_days_is_quarantined(factor: float) -> None:
-    """Every tenor of the latest three days x2 or /10: each day's curve keeps its shape, and the move into those days
-    (several points) is far beyond any daily move, so all three days are held rather than taken as a new level, and
-    the response is refused as too old rather than served fresh."""
+@pytest.mark.parametrize(("start", "length", "factor"), [(20, 4, 10.0), (30, 8, 0.1), (12, 7, 1000.0)])
+async def test_a_block_of_bars_keyed_in_another_unit_inside_the_window_is_quarantined(
+    start: int, length: int, factor: float
+) -> None:
+    """A block of daily bars inside the window multiplied by one factor, longer than any bad print: the series comes
+    back to its level after it, so exactly the block is held and the bars either side are served."""
+    request = _plan(KrakenFuturesAdapter, RequestKind.BARS)
+    cassette = Cassette.load(CASSETTES / "kraken_futures" / cassette_name(request))
+    candles_at = next(i for i, it in enumerate(cassette.interactions) if '"candles"' in it.body)
+
+    def seed(data: dict[str, Any]) -> None:
+        for c in data["candles"][start : start + length]:
+            for name in ("open", "high", "low", "close"):
+                c[name] = str(float(c[name]) * factor)
+
+    clean = await _replay(KrakenFuturesAdapter, request)
+    resp = await _replay(KrakenFuturesAdapter, request, {candles_at: _json_edit(seed)})
+    assert len(resp.quarantined) == length
+    assert len(resp.records) == len(clean.records) - length
+    assert resp.as_of == clean.as_of
+
+
+@pytest.mark.parametrize(("factor", "days", "second"), [(2.0, 3, 1.0), (0.1, 3, 1.0), (2.0, 8, 0.7), (0.1, 10, 1.5)])
+async def test_the_whole_curve_keyed_in_another_unit_on_the_latest_days_is_quarantined(
+    factor: float, days: int, second: float
+) -> None:
+    """Every tenor of the latest days x2 or /10 (and of the newest three of them by a second factor, part of the way
+    back): each day's curve keeps its shape, and the move into those days (several points) is far beyond any daily
+    move, so all of them are held rather than taken as a new level, and the response is refused as too old rather
+    than served fresh."""
     request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
     clean = await _replay(TreasuryAdapter, request)
 
     def latest(body: str) -> str:
         rows = list(csv.DictReader(io.StringIO(body)))
-        newest = sorted(rows, key=lambda r: datetime.strptime(r["Date"], "%m/%d/%Y").replace(tzinfo=UTC))[-3:]
-        for row in newest:
+        newest = sorted(rows, key=lambda r: datetime.strptime(r["Date"], "%m/%d/%Y").replace(tzinfo=UTC))[-days:]
+        for n, row in enumerate(reversed(newest)):
+            f = factor * (second if n < 3 else 1.0)
             for k in row:
                 if k != "Date" and row[k]:
-                    row[k] = f"{float(row[k]) * factor:.2f}"
+                    row[k] = f"{float(row[k]) * f:.2f}"
         out = io.StringIO()
         writer = csv.DictWriter(out, fieldnames=list(rows[0]), lineterminator="\n")
         writer.writeheader()
@@ -4341,3 +4391,121 @@ async def test_every_wick_keyed_in_the_wrong_unit_is_quarantined(field: str, fac
     resp = await _replay(KrakenFuturesAdapter, request, {candles_at: _json_edit(one_bar)})
     assert len(resp.quarantined) == 1
     assert any("wick" in w for w in resp.quality.warnings)
+
+
+async def test_a_treasury_curve_for_a_session_not_yet_quoted_is_refused() -> None:
+    """A row dated the retrieval day, retrieved before that day's 15:30 New York quotes the curve is read from: the
+    session has not happened yet, so the row is refused like the other sources' future rows, not served fresh."""
+    request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
+    clean = await _replay(TreasuryAdapter, request)
+    assert clean.as_of is not None
+    nyse = ExchangeCalendar("XNYS")
+    next_day = nyse.closes_after(clean.as_of.date(), 1)[0].date()
+
+    def add_row(body: str) -> str:
+        lines = body.split("\n")
+        newest = lines[1].split(",")
+        lines.insert(1, ",".join([next_day.strftime("%m/%d/%Y"), *newest[1:]]))
+        return "\n".join(lines)
+
+    morning = datetime.combine(next_day, datetime.min.time(), tzinfo=UTC) + timedelta(hours=13)  # 09:00 New York
+    with pytest.raises(DataQualityError, match="schema"):
+        await _replay(TreasuryAdapter, request, {0: add_row}, now=morning)
+    evening = datetime.combine(next_day, datetime.min.time(), tzinfo=UTC) + timedelta(hours=22)
+    served = await _replay(TreasuryAdapter, request, {0: add_row}, now=evening)
+    assert served.as_of is not None
+    assert served.as_of.date() == next_day
+
+
+@pytest.mark.parametrize(
+    ("weeks", "factor", "at_end"), [(3, 0.1, True), (12, 0.01, True), (5, 0.5, True), (4, 0.1, False), (6, 1.8, False)]
+)
+async def test_eia_weeks_keyed_in_another_unit_are_held_wherever_they_sit(
+    ctx_factory: Any, weeks: int, factor: float, at_end: bool
+) -> None:
+    """Crude stocks of several weeks divided by 10 or 100, halved or nearly doubled, either the newest weeks or a block
+    inside the window: the move into them is beyond the series' largest possible weekly change, so every week of the
+    block is held, not only the newest: held newest weeks leave the response too old to serve, and a held block inside
+    the window leaves the newest weeks served."""
+    values = _crude()
+    lo = len(values) - weeks if at_end else 30
+    for k in range(lo, lo + weeks):
+        values[k] = (values[k] or 0.0) * factor
+    ctx, _ = ctx_factory(lambda _r: httpx.Response(200, json=_eia_body(values)), **SETTINGS)
+    adapter = EiaAdapter(ctx)
+    request = DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "WCESTUS1"})
+    try:
+        if at_end:
+            with pytest.raises(Stale):
+                await adapter.fetch(request)
+            return
+        resp = await adapter.fetch(request)
+    finally:
+        await adapter.aclose()
+    assert len(resp.quarantined) == weeks
+    assert resp.as_of == datetime(2026, 10, 16, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(("days", "factor"), [(3, 10.0), (8, 10.0), (4, 3.0), (5, 0.1)])
+async def test_fred_daily_yields_keyed_in_another_unit_on_the_latest_days_are_held(
+    ctx_factory: Any, days: int, factor: float
+) -> None:
+    """The 10-year yield of the newest days x10, x3 or /10: a move of several points in a day never happens, so every
+    one of those days is held rather than taken as a new level after the first few."""
+    values = [4.08 + 0.03 * math.sin(k) for k in range(60)]
+    for k in range(60 - days, 60):
+        values[k] *= factor
+    info, obs = _fred_daily(values)
+    ctx, _ = ctx_factory(
+        lambda r: httpx.Response(200, text=info if r.url.path.endswith("/series") else obs),
+        flags={"provider_fred": True},
+        **SETTINGS,
+    )
+    adapter = FredAdapter(ctx)
+    try:
+        resp = await adapter.fetch(DataRequest(kind=RequestKind.MACRO_SERIES, params={"series": "DGS10"}))
+    except Stale:
+        return  # the newest days held: what is left is too old to serve
+    finally:
+        await adapter.aclose()
+    assert len(resp.quarantined) == days
+    assert all(isinstance(o, MacroObservation) and 3 < (o.value or 0) < 5 for o in resp.records)
+
+
+def _balance_sheet() -> dict[str, tuple[float, ...]]:
+    """A balance sheet that adds up every year, growing 3% a year (synthetic round figures, not any filer's)."""
+    grow = tuple(1.03**y for y in range(6))
+    current, noncurrent, owed_now, owed_later = 40e9, 160e9, 30e9, 90e9
+    return {
+        "Assets": tuple((current + noncurrent) * g for g in grow),
+        "AssetsCurrent": tuple(current * g for g in grow),
+        "AssetsNoncurrent": tuple(noncurrent * g for g in grow),
+        "Liabilities": tuple((owed_now + owed_later) * g for g in grow),
+        "LiabilitiesCurrent": tuple(owed_now * g for g in grow),
+        "LiabilitiesNoncurrent": tuple(owed_later * g for g in grow),
+        "StockholdersEquity": tuple((current + noncurrent - owed_now - owed_later) * g for g in grow),
+        "LiabilitiesAndStockholdersEquity": tuple((current + noncurrent) * g for g in grow),
+    }
+
+
+@pytest.mark.parametrize("factor", [0.1, 10.0, 100.0, -1.0])
+def test_a_face_balance_sheet_slipped_as_a_whole_inside_a_genuine_column_is_held(factor: float) -> None:
+    """The newest balance sheet keyed at a tenth, 10x, 100x or with every sign reversed, while the footnotes of its
+    column are genuine (so the column's median does not move) and every balance identity still closes: only the
+    statement's own history and the comparative printed beside it show the slip. The statement is held, the
+    footnotes and the comparative are served, and the same records unslipped hold nothing."""
+    statement = _balance_sheet()
+    notes = {f"Note{k:02d}": tuple((1 + 0.1 * k) * 1e9 * 1.03**y for y in range(6)) for k in range(12)}
+    years = (2020, *_YEARS)
+    records = [
+        *_seeded(statement, set(statement), factor, years, instants=True),
+        *_seeded(notes, set(), 1.0, years, instants=True),
+    ]
+    held, _ = sec_scale.scale_errors(records)
+    assert {(records[i].concept, records[i].period_end.year, records[i].accession) for i in held} == {
+        (c, 2025, "a") for c in statement
+    }
+    clean, _ = sec_scale.scale_errors(
+        [*_seeded(statement, set(), 1.0, years, instants=True), *_seeded(notes, set(), 1.0, years, instants=True)]
+    )
+    assert not clean

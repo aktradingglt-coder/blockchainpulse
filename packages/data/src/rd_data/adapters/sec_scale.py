@@ -81,6 +81,16 @@ _CASH_FLOW_LINE = re.compile(
     r"^(NetCashProvidedByUsedIn|Proceeds|Payments|Repayments|IncreaseDecreaseIn|EffectOfExchangeRate|InterestPaid"
     r"|IncomeTaxesPaid|Cash(And)?CashEquivalents.*PeriodIncreaseDecrease)"
 )
+#: Cash-flow statement lines beyond _CASH_FLOW_LINE: the non-cash adjustments that reconcile net income to operating
+#: cash flow. A slipped cash-flow statement carries them with it (GOOGL's deferred taxes and other non-cash items).
+_CASH_FLOW_ADJUSTMENT = re.compile(
+    r"^(DeferredIncomeTax(es)?(ExpenseBenefit|AndTaxCredits)|OtherNoncash|ShareBasedCompensation|AllocatedShareBased"
+    r"|Depreciation|AmortizationOf|OtherOperatingActivities|IncreaseDecreaseInDeferredIncomeTaxes)"
+)
+#: Facts a statement identity relates, per filing period, at least this many with history, before a statement can be
+#: judged as moved against its history (STATEMENT_SHIFT_SHARE of them by the same decimal step or reversed in sign).
+STATEMENT_SHIFT_MIN = 6
+STATEMENT_SHIFT_SHARE = 0.75
 PREVIOUS_WINDOW_DAYS = 400
 #: A currency fact larger than this multiple of the company's own total assets is held. Across about 400,000 clean
 #: us-gaap facts of 15 large filers, outside revenue and cost lines, the largest ratio is 1.5 (XOM gross PP&E); the only
@@ -860,19 +870,108 @@ def scale_errors(records: list[FundamentalFact]) -> tuple[set[int], set[int]]:
             flagged.add(i)
     flagged |= _unexplained_breaks(records, held, recent)
     held |= _beyond_assets(records, logs, held)
+    held |= _statement_shifts(records, neighbours)
     tables = {(records[i].concept, records[i].unit, records[i].accession, records[i].period_end) for i in held}
     held |= {i for i, f in enumerate(records) if (f.concept, f.unit, f.accession, f.period_end) in tables}
-    # A filing's column (its facts for one period end) that is mostly held is held whole: the scale was set for the
-    # column, and the facts that slipped through the other checks share it.
-    column: dict[tuple[str, date, bool], list[int]] = {}
-    for i, f in enumerate(records):  # balances and flows apart, as their statements are keyed apart
-        column.setdefault((f.accession, f.period_end, f.period_start is None), []).append(i)
-    for idx in column.values():
-        hits = sum(i in held for i in idx)
-        if hits >= COLUMN_MIN_HELD and hits / len(idx) >= FILING_SCALE_SHARE:
-            held.update(idx)
-    held |= _identity_errors(records, held, neighbours)  # tables that add up around a held term share its scale
+    groups = _column_groups(records)
+    for _ in range(3):  # until no column or statement is newly held whole (each pass can only add)
+        before = len(held)
+        # A filing's column (its facts for one period end), or one statement of one of its periods, that is mostly
+        # held is held whole: the scale or sign was set for it, and the facts that slipped through the other checks
+        # share it (the cash-flow statement's non-cash adjustments, an income statement's minority-interest line).
+        for idx in groups:
+            hits = sum(i in held for i in idx)
+            if hits >= COLUMN_MIN_HELD and hits / len(idx) >= FILING_SCALE_SHARE:
+                held.update(idx)
+        held |= _identity_errors(records, held, neighbours)  # tables that add up around a held term share its scale
+        if len(held) == before:
+            break
     return held, flagged - held
+
+
+def _statement_family(f: FundamentalFact) -> str:
+    """The statement a flow fact belongs to, by name: the cash-flow statement or the income statement and its notes."""
+    if _CASH_FLOW_LINE.match(f.concept) or _CASH_FLOW_ADJUSTMENT.match(f.concept):
+        return "cash_flow"
+    return "income"
+
+
+def _column_groups(records: list[FundamentalFact]) -> list[list[int]]:
+    """Each filing's columns (one period end; balances and flows apart, as their statements are keyed apart) and,
+    within its flows, each period's (start and end) cash-flow and income statements, by name."""
+    groups: dict[tuple[object, ...], list[int]] = {}
+    for i, f in enumerate(records):
+        groups.setdefault((f.accession, f.period_end, f.period_start is None), []).append(i)
+        if f.period_start is not None:
+            groups.setdefault((f.accession, f.period_start, f.period_end, _statement_family(f)), []).append(i)
+    return list(groups.values())
+
+
+def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours) -> set[int]:
+    """A filing's face statement for one period (the facts its statement identities relate: a balance sheet, an
+    income statement, a cash-flow statement) keyed a power of 10 or 100 off, or with its signs reversed, as a whole:
+    at least STATEMENT_SHIFT_MIN of its facts have history and STATEMENT_SHIFT_SHARE of them sit the same decimal step
+    from it (within NEAR_POWER), or, for a balance sheet, oppose it in sign (a genuine loss reverses a whole income
+    statement: C and BRK in 2009). The statement still closes every identity and its footnotes keep the column's
+    median where it was (WFC's 2017 first-quarter balance sheet at a tenth, JPM's 2012 cash flows x10), so only its
+    own history shows it. Each of those facts must also sit the step (or the sign) off the comparative its own filing
+    prints beside it: a fast grower's genuine statement can sit a power of 10 above its history (NVDA's 2026 income
+    statement) but not above the prior-year column next to it. Its moved siblings in the filing's period join it."""
+    _, _, statements, _ = _instances(records)
+    faces: dict[tuple[object, ...], set[int]] = {}
+    for inst in statements:
+        for k, _ in inst:
+            f = records[k]
+            family = "balance" if f.period_start is None else _statement_family(f)
+            faces.setdefault((f.accession, f.period_start, f.period_end, family), set()).add(k)
+    if not faces:
+        return set()
+    closed = _closed_relations(records)
+    flipped = _reversed(neighbours, records)
+    lines: dict[_LineKey, list[FundamentalFact]] = {}
+    for f in records:
+        lines.setdefault((f.accession, f.concept, f.unit, _duration(f)), []).append(f)
+    out: set[int] = set()
+    for key, face in faces.items():
+        balance = key[-1] == "balance"
+        steps: dict[int, tuple[float, float, float]] = {}  # fact: (step from history, from own comparative, its value)
+        for k in face:
+            d = neighbours.level_step(k)
+            own = _own_comparative(records[k], lines)
+            size = neighbours.logs[k]
+            if d is not None and own is not None and size is not None:
+                steps[k] = (d, size - own[0], own[1])
+        if len(steps) < STATEMENT_SHIFT_MIN:
+            continue
+        need = STATEMENT_SHIFT_SHARE * len(steps)
+        centre = statistics.median(d for d, _, _ in steps.values())
+        step = round(centre)
+        moved: Callable[[int], bool | None] | None = None
+        if abs(step) in COLUMN_DECIMAL_STEPS and abs(centre - step) <= COLUMN_DECIMAL_NEAR:
+            if sum(abs(d - step) <= NEAR_POWER and abs(o - step) <= NEAR_POWER for d, o, _ in steps.values()) >= need:
+                moved = _stepped(neighbours, step)
+        elif balance and (  # a genuine loss reverses a whole income statement; a balance sheet never reverses
+            sum(bool(flipped(k)) and records[k].value * v < 0 for k, (_, _, v) in steps.items()) >= need
+        ):
+            moved = flipped
+        if moved is None:
+            continue
+        out |= _with_siblings(records, closed, {k for k in face if moved(k) is not False}, moved, by_name=False)
+    return out
+
+
+_LineKey = tuple[str, str, str, int | None]  # accession, concept, unit, duration
+
+
+def _own_comparative(f: FundamentalFact, lines: dict[_LineKey, list[FundamentalFact]]) -> tuple[float, float] | None:
+    """(log size, value) of the comparative f's own filing prints beside it: the same line, unit and duration for the
+    nearest other period end within PREVIOUS_WINDOW_DAYS; None when the filing prints none."""
+    best: tuple[int, FundamentalFact] | None = None
+    for g in lines.get((f.accession, f.concept, f.unit, _duration(f)), ()):
+        gap = abs((g.period_end - f.period_end).days)
+        if g.period_end != f.period_end and gap <= PREVIOUS_WINDOW_DAYS and g.value and (best is None or gap < best[0]):
+            best = (gap, g)
+    return None if best is None else (math.log10(abs(best[1].value)), best[1].value)
 
 
 def current_columns(records: list[FundamentalFact]) -> dict[str, list[int]]:

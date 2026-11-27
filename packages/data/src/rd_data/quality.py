@@ -223,6 +223,7 @@ class SpikeScan:
     unconfirmed: tuple[int, ...] = ()  # extreme move at either end of the series that cannot be confirmed yet
     jumps: tuple[int, ...] = ()  # extreme move confirmed by more than MAX_BAD_RUN later points
     shifted: tuple[int, ...] = ()  # the points after an implausible move that stays: never confirmed by its run
+    implausible: tuple[int, ...] = ()  # every point held because of a move beyond ``implausible`` (runs and shifts)
 
 
 def scan_spikes(
@@ -235,8 +236,10 @@ def scan_spikes(
     :data:`MAX_BAD_RUN` points sit at the new level; with fewer (at the end of the series), or when the shift is
     within the first :data:`MAX_BAD_RUN` points, it is *unconfirmed*: the move cannot be told apart from a bad print.
     Changes larger than ``implausible`` (absolute, in the units of ``levels``) use :data:`LONG_BAD_RUN` instead, and
-    one that does not come back, with no other extreme move after it, is *shifted*: the series was keyed in another
-    unit from that point on, however many points share it (a genuine move of that size does not happen in one step).
+    one that is not a short bad print is *shifted*: every point after it is held until the series comes back (within
+    half the move), or to the end when it never does: the series was keyed in another unit from that point on,
+    however many points share it and whatever genuine moves (an expiry roll, a second slip) follow it, because a
+    genuine move of that size does not happen in one step.
     """
     n = len(levels)
     if n < 11:
@@ -248,17 +251,26 @@ def scan_spikes(
     jumps: list[int] = []
     shifted: set[int] = set()
     return_legs: set[int] = set()
+    wild_runs: set[int] = set()
+    bound = math.inf if implausible is None else implausible
     for k, is_extreme in enumerate(extreme):
         if not is_extreme or k in return_legs:
             continue
-        wild = implausible is not None and abs(changes[k]) > implausible
+        wild = abs(changes[k]) > bound
         limit = LONG_BAD_RUN if wild else MAX_BAD_RUN
-        run = _reversal_run(levels, changes, extreme, k, limit)
+        run = _reversal_run(levels, changes, extreme, k, limit, bound=bound)
         if run:
             bad.update(range(k + 1, k + 1 + run))
             return_legs.add(k + run)
-        elif wild and k + 1 > limit and not any(extreme[k + 1 :]):
-            shifted.update(range(k + 1, n))
+            if wild:
+                wild_runs.update(range(k + 1, k + 1 + run))
+        elif wild and k + 1 > limit:
+            back = _return_point(levels, changes, k, bound)
+            if back is None:
+                shifted.update(range(k + 1, n))  # keyed in another unit from here on
+            else:
+                shifted.update(range(k + 1, back + 1))  # a long bad run: the series comes back after it
+                return_legs.add(back)
         elif k + 1 <= limit:
             unconfirmed.update(range(k + 1))  # the first point(s) may be the bad print: nothing before to compare
         elif n - 1 - k <= limit:
@@ -271,21 +283,40 @@ def scan_spikes(
         unconfirmed=tuple(sorted(unconfirmed - bad - shifted)),
         jumps=tuple(jumps),
         shifted=tuple(sorted(shifted - bad)),
+        implausible=tuple(sorted(wild_runs | shifted)),
     )
 
 
+def _return_point(levels: Sequence[float], changes: Sequence[float], k: int, bound: float) -> int | None:
+    """Index of the first later change that brings the series back to where it was before change ``k`` (within
+    half the move, and within ``bound``: a second slip part of the way back is not a return), if any."""
+    near = min(0.5 * abs(changes[k]), bound)
+    for back in range(k + 1, len(levels) - 1):
+        if abs(levels[back + 1] - levels[k]) < near:
+            return back
+    return None
+
+
 def _reversal_run(
-    levels: Sequence[float], changes: Sequence[float], extreme: Sequence[bool], k: int, limit: int
+    levels: Sequence[float],
+    changes: Sequence[float],
+    extreme: Sequence[bool],
+    k: int,
+    limit: int,
+    *,
+    bound: float = math.inf,
 ) -> int:
-    """Length of the run of points after change ``k`` from which the series comes back, or 0 if it does not."""
+    """Length of the run of points after change ``k`` from which the series comes back (within half the move and
+    within ``bound`` of where it was), or 0 if it does not."""
     n = len(levels)
+    near = min(0.5 * abs(changes[k]), bound)
     for run in range(1, limit + 1):
         back = k + run  # index of the change out of the candidate run
         if back > n - 2:
             return 0
         if run > 1 and extreme[back - 1]:
             return 0  # another extreme move inside the run: not a single bad print
-        if extreme[back] and abs(levels[back + 1] - levels[k]) < 0.5 * abs(changes[k]):
+        if extreme[back] and abs(levels[back + 1] - levels[k]) < near:
             return run
     return 0
 
@@ -609,6 +640,7 @@ def check_series(
     lo: float | None = None,
     hi: float | None = None,
     level_like: bool = False,
+    max_step: float | None = None,
 ) -> tuple[DataQualityReport, list[MacroObservation]]:
     """Macro/inventory series: order, duplicates, finite values, physical range and bad prints.
 
@@ -617,7 +649,10 @@ def check_series(
     and hiding a genuine record release would misstate the data. For *levels* (``level_like=True``: inventories and
     other physical stocks, and daily market rates and prices such as par yields) changes are judged relative to the
     level when it is positive, and an extreme latest move is held like a price until later observations confirm it:
-    such a value is a decimal, unit or print error far more often than a real move (D-031).
+    such a value is a decimal, unit or print error far more often than a real move (D-031). A level that moves by
+    more than ``max_step`` (absolute, in the series' units) in one observation, or by more than x2.5 when no step is
+    given, is held from that point until the series comes back, or to the end when it never does: a block keyed in
+    the wrong unit is held whole, wherever it sits and however long it is.
     Missing values are allowed and counted.
     """
     values = [o.value for o in observations]
@@ -629,7 +664,12 @@ def check_series(
     scan = scan_spikes([math.log(v) if relative else v for _, v in present])
     reverted = tuple(present[j][0] for j in scan.bad_prints)
     unconfirmed = tuple(present[j][0] for j in scan.unconfirmed)
-    held = unconfirmed if level_like else ()
+    stepped: tuple[int, ...] = ()
+    if level_like and (max_step is not None or relative):
+        basis = [v for _, v in present] if max_step is not None else [math.log(v) for _, v in present]
+        steps = scan_spikes(basis, implausible=max_step if max_step is not None else IMPLAUSIBLE_LOG_MOVE)
+        stepped = tuple(present[j][0] for j in steps.implausible)
+    held = tuple(sorted({*unconfirmed, *stepped})) if level_like else ()
     edge = tuple(sorted({*(() if level_like else unconfirmed), *(present[j][0] for j in scan.jumps)}))
     checks = [
         check_monotonic([o.ts for o in observations]),  # callers pass rows sorted; raw order: check_provider_order
@@ -640,7 +680,7 @@ def check_series(
         range_check,
         _fail(
             "outliers",
-            f"{len(reverted)} reverting outlier(s) and {len(held)} unconfirmed level move(s) quarantined",
+            f"{len(reverted)} reverting outlier(s) and {len(held)} unconfirmed or impossible level move(s) quarantined",
             blocking=False,
             indices=tuple(sorted({*reverted, *held})),
         )

@@ -203,15 +203,24 @@ points is a bad print and is quarantined. An extreme move in the last two points
 apart from a bad print and is quarantined as *unconfirmed* until later bars confirm it; confirmed level shifts are
 kept with a warning. A move beyond ×2.5 in one bar (a Treasury par yield: 1.5 points in a day) is implausible, so
 its run and its confirmation extend to five points (three bad ticks in a row are not a market move), and one that
-does not come back, with no other extreme move after it, is never confirmed: every point after it is quarantined
-however many share it, as the series was keyed in another unit from there (round 27: the newest six Kraken bars
-×1000, ×10, ×3 or ÷1000, and the whole curve ×2 or ÷10 on its latest three days, were served as confirmed shifts).
+is not such a short bad print is never confirmed: every point after it is quarantined until the series comes back to
+where it was before the move (within half the move and within the implausible bound), or to the end of the series
+when it never does, however many points share it and whatever moves follow inside it — a genuine expiry roll, or a
+second slip part of the way back (round 27: the newest six Kraken bars ×1000, ×10, ×3 or ÷1000, and the whole curve
+×2 or ÷10 on its latest three days, were served as confirmed shifts; round 28: the rule was switched off by any later
+extreme move, so a COT shift spanning the E-mini S&P September roll, and bars, Treasury curves or EIA weeks shifted
+and then slipped again, were served fresh). A block inside the window is held whole and the points either side are
+served.
 The largest daily move of any tenor in the recorded 2026 Treasury file is 0.16 point. Volume is quarantined only when
 100× away from the series' median. Macro series: values outside the series' physical range and reverting outliers are quarantined. For *flow*
 statistics (monthly/quarterly releases such as unemployment or GDP) an extreme *latest* release is kept with a
 warning. *Levels* — EIA weekly quantities, COT open interest, and daily market series such as FRED yields, FX and
-commodity prices — are judged on relative changes and treated like prices: an extreme latest move is held until
-later observations confirm it (P1 review rounds 3 and 5). Open interest is held only beyond ×3/÷3 (expiry rolls of
+commodity prices — are judged on relative changes: an extreme latest move is held until later observations confirm
+it (P1 review rounds 3 and 5), and the implausible-move rule above applies with each series' own bound: an EIA
+catalogue series' largest possible weekly change (crude stocks 40,000 thousand barrels), 1.5 points in a day for a
+daily FRED rate in percent (the Treasury par-yield bound), and ×2.5 otherwise (round 28: EIA and FRED had no such
+rule, so the newest weeks of crude stocks ÷10 or a block of weeks ÷10 inside the window, and the 10-year yield ×3 or
+×10 on its newest days, were served fresh). Open interest is held only beyond ×3/÷3 (expiry rolls of
 20–40% are shown and flagged); a move beyond ×3 that stays holds every week after it, not only the week of the jump
 (round 27: every field of the newest two weeks ×10, which still balances, served the second week fresh). Holding the
 newest points can leave a response too old to serve: it is then refused as stale rather than served fresh.
@@ -261,7 +270,11 @@ terms allow display but forbid derived data, which the three-tag model could not
   corporate-actions source; without one (Twelve Data today) it is a warning, because a genuine −33% or ×2 day cannot
   be told from an unadjusted split.
 - EIA catalogue series also carry a maximum weekly change (crude 40,000 kbbl, gasoline and distillate 25,000 kbbl,
-  working gas 500 Bcf — above any recorded weekly build or draw); a latest week beyond it is held.
+  working gas 500 Bcf — above any recorded weekly build or draw); a week beyond it is held, and so is every week
+  after it until the series comes back (D-031), wherever the move sits (round 28: only the latest week was checked,
+  so the newest weeks or a block of weeks inside the window ÷10 were served).
+- Treasury curves: a row is read from quotes at about 15:30 New York time, so a row dated a day that has not reached
+  that time at retrieval has not happened yet and is refused, as CFTC and EIA refuse their future rows (round 28).
 - Percent series (FRED) have a floor of −100% and no ceiling: hyperinflation and some lending rates exceed 100%.
 **Reason.** P1 review round 2 seeded each of these through the adapters and they passed QA; the bounds are wide
 enough that no genuine value approaches them.
@@ -513,8 +526,12 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
    - cumulative equity balances (paid-in capital, retained earnings or deficit, total equity, treasury stock), as
      instants only: their flows and AOCI are bounded;
    - dei market values.
-8. *Spreading.* A held fact's siblings in the same table, a filing's column once mostly held, and relations that
-   close around a held fact whose other facts are off their own history too.
+8. *Spreading.* A held fact's siblings in the same table, a filing's column once mostly held, one statement of one
+   of a filing's periods once mostly held (its cash-flow statement — the lines named as cash-flow lines or as the
+   non-cash adjustments to net income — or its income statement and notes, apart), and relations that close around a
+   held fact whose other facts are off their own history too, repeated until nothing more is held (round 28: a
+   cash-flow statement held ×10 served its deferred taxes and other non-cash items, and an income statement held for
+   reversed signs served its continuing operations, pre-tax income and EPS).
 9. *Balance jumps.* A balance in a recent filing that moved more than 10^2 from the previous period end is flagged.
 10. *Impossible signs.* A negative value of a balance or total that cannot be negative is held: assets, liabilities,
     their current parts, liabilities and equity, cash, PP&E, goodwill, intangibles, inventory, receivables, payables,
@@ -552,6 +569,17 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
     52% of its facts within 10^0.5 of 10^-1). Balances and flows are separate columns, as the balance sheet and the
     other statements are keyed apart (and a mostly held column is held whole on the same split). For a young filer
     this is often the only evidence; it adds no clean holds.
+12. *Shifted statements.* A filing's face statement for one period — the facts its statement identities relate: the
+    balance sheet, the income statement, the cash-flow statement — is held when at least 6 of its facts have history
+    and a comparative in their own filing, and 75% of them sit the same power of 10 or 100 from both (within 10^0.5;
+    the statement's median within 10^0.3), or, for a balance sheet, oppose both in sign. Such a statement closes every
+    identity, and its footnotes keep the column's median where it was, so only its history shows it (round 28: WFC's
+    first-quarter 2017 balance sheet ÷10 and its cash flows ×10, and JPM's 2012 cash flows ×10, were served whole). The
+    own-filing comparative is what tells a slip from fast growth: NVDA's genuine 2026 income statement sits 10^1 above
+    its history but not above the prior-year column printed beside it (without that test the rule held 41 genuine NVDA
+    facts). Income statements are not judged on sign: a genuine loss reverses a whole income statement (C's fourth
+    quarter and BRK's first quarter of 2009). With both tests it adds no clean holds (335 before and after, none in a
+    newest filing).
 
 All checks run on every concept the company reports; a `concepts` filter narrows only what is returned, and the
 returned concepts alone date the response (a concept last reported years ago is as old as its last report).

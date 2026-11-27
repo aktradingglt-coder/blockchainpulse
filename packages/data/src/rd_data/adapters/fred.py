@@ -35,6 +35,8 @@ _SERIES = re.compile(r"^[A-Z0-9_]{1,30}$")
 #: Floor for a series measured in percent: no rate or percentage change goes below -100%. There is deliberately no
 #: ceiling: hyperinflation (Argentina 2023: 133.5%) and some lending rates exceed 100% (P1 review round 6).
 PERCENT_RANGE: tuple[float, float | None] = (-100.0, None)
+#: One-day move, in percentage points, beyond which a daily rate is held (the Treasury par-yield bound).
+YIELD_IMPLAUSIBLE_STEP = 1.5
 _FREQ = {"D": "daily", "W": "weekly", "BW": "weekly", "M": "monthly", "Q": "quarterly", "SA": "annual", "A": "annual"}
 
 
@@ -119,6 +121,9 @@ class FredAdapter(BaseAdapter):
             hi=PERCENT_RANGE[1] if percent else None,
             # Daily FRED series are market levels (yields, FX, commodity prices): the price rule applies (D-031).
             level_like=frequency == "daily",
+            # a daily rate in percent that moves 1.5 points in one day is a unit or decimal error, as for the
+            # Treasury par yields (D-033); other daily levels use the x2.5 price bound
+            max_step=YIELD_IMPLAUSIBLE_STEP if percent and frequency == "daily" else None,
         )
         quality = with_schema_rejections(
             DataQualityReport(report.subject, (*report.checks, order), report.quarantined, report.record_count),

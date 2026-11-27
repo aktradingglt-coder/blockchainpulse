@@ -13,8 +13,9 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import ClassVar
+from zoneinfo import ZoneInfo
 
 from rd_data.adapters.base import BaseAdapter, DataRequest, FreshnessSpec, ParseResult, RawPayload, RequestKind
 from rd_data.errors import InvalidArgs, NotFound, ProviderDown
@@ -108,6 +109,12 @@ class TreasuryAdapter(BaseAdapter):
         missing_columns = files[0].missing_columns
         rejected = sum(f.rejected for f in files)
         all_points = sorted((p for f in files for p in f.points), key=lambda p: (p.ts, p.tenor))
+        # A curve is read from quotes at about 15:30 New York time: a row for a session that has not reached that
+        # point at retrieval has not happened yet, and is refused like the other sources' future rows.
+        future = [p for p in all_points if _quoted_at(p.ts) > raw.retrieved_at]
+        if future:
+            rejected += len(future)
+            all_points = [p for p in all_points if _quoted_at(p.ts) <= raw.retrieved_at]
         if not files[0].points and not rejected and not missing_columns:
             raise NotFound(f"us_treasury: no curve rows for {year}", provider=self.name)
         range_check = check_range([p.yield_pct for p in all_points], lo=YIELD_RANGE[0], hi=YIELD_RANGE[1], what="yield")
@@ -179,6 +186,15 @@ class TreasuryAdapter(BaseAdapter):
     @staticmethod
     def recording_plan() -> list[DataRequest]:
         return [DataRequest(kind=RequestKind.TREASURY_CURVE, params={"year": 2026})]
+
+
+_NEW_YORK = ZoneInfo("America/New_York")
+#: New York time of the quotes a day's par-yield curve is read from.
+CURVE_QUOTE_TIME = time(15, 30)
+
+
+def _quoted_at(ts: datetime) -> datetime:
+    return datetime.combine(ts.date(), CURVE_QUOTE_TIME, tzinfo=_NEW_YORK)
 
 
 @dataclass
