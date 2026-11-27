@@ -6,7 +6,7 @@ _Last updated: 2026-11-27_
 
 **P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–28 returned ONE MORE PASS; major
 findings worked through in ledger rows 5–32 (row 32 lists what round 28's seeds still serve: GE's first-quarter 2017
-income statement as of 2017, single lines in no relation, and a balance-sheet slip repeated over AAPL's three newest
+income statement as of 2017, TSLA's cash flows as of 2015, single lines in no relation, and a balance-sheet slip repeated over AAPL's three newest
 filings in its two earlier columns); awaiting review round 29.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence

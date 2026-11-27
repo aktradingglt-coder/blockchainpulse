@@ -686,7 +686,9 @@ company's very first filing has nothing in the response to be compared with, bey
   (round 29, on c09cd78): of 3,168 facts seeded into the then-newest 10-Q's face balance sheet, income statement and
   cash-flow statement in as-of snapshots (2012, 2017, 2021; ×10, ÷10, ×100, sign reversed), 79 are served, against
   407 before. Statements mostly served: GE's first-quarter 2017 income statement ×10, ÷10 or ×100 (16 of 18 facts).
-  The rest are single lines outside any relation (loan-loss provisions, non-operating and minority-interest lines). A
+  The rest are single lines outside any relation (loan-loss provisions, non-operating and minority-interest lines).
+  Of the cash-flow statements as of 2015 and 2019 that round 28 found served, TSLA's as of 2015-08-10 ×10 or ÷10
+  still serves 17 of 24 facts; XOM's (2015, 2019), AAPL's and MMM's (2015) are held. A
   slip repeated across consecutive filings is not shown either: with AAPL's three newest balance sheets ×10 or ÷10,
   the newest is held but 69–85 facts of the two earlier columns are served, as each slipped column is the other's
   neighbour. Of 528 facts seeded into the newest filings' face statements, 2 are served (WFC's minority-interest share
