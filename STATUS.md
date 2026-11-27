@@ -4,10 +4,10 @@ _Last updated: 2026-11-27_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–30 returned ONE MORE PASS; major
-findings worked through in ledger rows 5–34 (row 34 lists what round 30's seeds still serve: single revenue lines ×10
-at PG, SBUX and DIS, an SEC filing date moved earlier but after its period end, frozen FRED daily values, a COT
-week scaled with its shares unchanged, Treasury header swaps); awaiting review round 31.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–31 returned ONE MORE PASS; major
+findings worked through in ledger rows 5–35 (row 35 lists what round 31's seeds still serve: single revenue lines
+×10 at PG, SBUX and DIS, Treasury near-copies, tenor swaps, header swaps and multi-day curve shifts, Kraken bar shifts
+under ×2.5 and volume slips); awaiting review round 32.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
