@@ -398,15 +398,18 @@ async def test_twelvedata_weekly_bars_and_delay_come_from_terms_not_the_caller(c
 
 async def test_twelvedata_drops_forming_candle_and_checks_staleness_only_while_open(ctx_factory: Any) -> None:
     days = [datetime(2026, 10, 21, tzinfo=UTC) - timedelta(days=k) for k in range(30, -1, -1)]
-    values = [
-        {"datetime": d.strftime("%Y-%m-%d"), "open": "1.1", "high": "1.2", "low": "1.0", "close": "1.1"}
-        for d in days
-        if d.weekday() < 5
-    ]
-    body = {"meta": {"symbol": "EUR/USD", "interval": "1day"}, "values": values, "status": "ok"}
+    weekdays = [d for d in days if d.weekday() < 5]
+
+    def bar(d: datetime, close: float) -> dict[str, str]:
+        return {"datetime": d.strftime("%Y-%m-%d"), "open": f"{close:.4f}", "high": f"{close + 0.01:.4f}",
+                "low": f"{close - 0.01:.4f}", "close": f"{close:.4f}"}  # fmt: skip
+
+    moving = [bar(d, 1.1 + 0.002 * math.sin(k)) for k, d in enumerate(weekdays)]  # synthetic
+    flat = [bar(d, 1.1) for d in weekdays]  # a feed stuck on one price
+    body = {"meta": {"symbol": "EUR/USD", "interval": "1day"}, "values": flat, "status": "ok"}
     weekend = datetime(2026, 10, 18, 12, tzinfo=UTC)
     ctx, _ = ctx_factory(
-        lambda _r: httpx.Response(200, json={**body, "values": [v for v in values if v["datetime"] <= "2026-10-16"]}),
+        lambda _r: httpx.Response(200, json={**body, "values": [v for v in moving if v["datetime"] <= "2026-10-16"]}),
         now=weekend,
         flags={"provider_twelvedata": True},
         **SETTINGS,
@@ -4406,7 +4409,8 @@ async def test_a_treasury_curve_for_a_session_not_yet_quoted_is_refused() -> Non
     def add_row(body: str) -> str:
         lines = body.split("\n")
         newest = lines[1].split(",")
-        lines.insert(1, ",".join([next_day.strftime("%m/%d/%Y"), *newest[1:]]))
+        moved = [f"{float(v) + 0.01:.2f}" if v else v for v in newest[1:]]  # synthetic: a new day's curve, not a copy
+        lines.insert(1, ",".join([next_day.strftime("%m/%d/%Y"), *moved]))
         return "\n".join(lines)
 
     morning = datetime.combine(next_day, datetime.min.time(), tzinfo=UTC) + timedelta(hours=13)  # 09:00 New York

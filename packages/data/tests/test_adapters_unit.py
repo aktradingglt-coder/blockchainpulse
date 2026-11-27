@@ -43,17 +43,19 @@ def _json(body: Any, status: int = 200) -> Callable[[httpx.Request], httpx.Respo
     return lambda _r: httpx.Response(status, json=body)
 
 
-def _tff_row(day: str, oi: float = 1000.0) -> dict[str, str]:
+def _tff_row(day: str, oi: float = 1000.0, shift: int = 0) -> dict[str, str]:
+    """A synthetic TFF row; ``shift`` contracts move from asset managers' to dealers' longs (totals unchanged), so two
+    weeks are not copies of each other."""
     return {
         "report_date_as_yyyy_mm_dd": f"{day}T00:00:00.000",
         "cftc_contract_market_code": "099741",
         "futonly_or_combined": "FutOnly",
         "market_and_exchange_names": "EURO FX - CHICAGO MERCANTILE EXCHANGE",
         "open_interest_all": str(oi),
-        "dealer_positions_long_all": "100",
+        "dealer_positions_long_all": str(100 + shift),
         "dealer_positions_short_all": "200",
         "dealer_positions_spread_all": "50",
-        "asset_mgr_positions_long": "400",
+        "asset_mgr_positions_long": str(400 - shift),
         "asset_mgr_positions_short": "100",
         "asset_mgr_positions_spread": "50",
         "lev_money_positions_long": "200",
@@ -71,7 +73,7 @@ TFF = DataRequest(kind=RequestKind.COT, params={"report_type": "tff", "market_co
 
 
 async def test_cftc_parse_cache_freshness_and_licence(ctx_factory: Any) -> None:
-    ctx, rec = ctx_factory(_json([_tff_row("2026-10-13"), _tff_row("2026-10-06")]))
+    ctx, rec = ctx_factory(_json([_tff_row("2026-10-13"), _tff_row("2026-10-06", shift=10)]))
     adapter = CftcAdapter(ctx)
     resp = await adapter.fetch(TFF)
     reports = of_type(resp.records, PositioningReport)

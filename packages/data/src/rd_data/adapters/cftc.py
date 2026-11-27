@@ -15,6 +15,7 @@ from typing import Any, ClassVar, Literal, cast
 import orjson
 
 from rd_data.adapters.base import (
+    EARLY_RELEASE_TOLERANCE,
     BaseAdapter,
     DataRequest,
     FreshnessSpec,
@@ -24,7 +25,7 @@ from rd_data.adapters.base import (
     as_float,
     require_param,
 )
-from rd_data.errors import InvalidArgs, NotFound, ProviderDown
+from rd_data.errors import DataQualityError, InvalidArgs, NotFound, ProviderDown
 from rd_data.licence import public_domain
 from rd_data.quality import (
     QA_CONTEXT,
@@ -210,6 +211,16 @@ class CftcAdapter(BaseAdapter):
                 records.append(self._row(row, report_type, futures_only=futures_only))
             except (KeyError, ValueError, TypeError):
                 rejected += 1
+        # a row released after we retrieved it is mislabelled or fabricated, held copy or not: the response is refused
+        unreleased = sorted(
+            r.as_of for r in records if release_time(r.as_of) > raw.retrieved_at + EARLY_RELEASE_TOLERANCE
+        )
+        if unreleased:
+            raise DataQualityError(
+                f"cftc: row dated {unreleased[-1].isoformat()} is not scheduled for release until "
+                f"{release_time(unreleased[-1]).isoformat()}, but was retrieved at {raw.retrieved_at.isoformat()}",
+                provider=self.name,
+            )
         order = check_provider_order([r.as_of for r in records], descending=True)  # requested newest first
         records.sort(key=lambda r: r.as_of)
         base = check_positioning(records, subject=f"cftc:{report_type}:{request.params['market_code']}")
