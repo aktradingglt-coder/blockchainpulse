@@ -4512,12 +4512,15 @@ def test_a_face_balance_sheet_slipped_as_a_whole_inside_a_genuine_column_is_held
     assert not clean
 
 
-def _quarterly_balance_sheets(factor: float, slipped: int) -> tuple[list[FundamentalFact], set[tuple[str, date, str]]]:
+def _quarterly_balance_sheets(
+    factor: float, slipped: int, *, statement: Mapping[str, tuple[float, ...]] | None = None, whole_column: bool = False
+) -> tuple[list[FundamentalFact], set[tuple[str, date, str]]]:
     """Quarterly balance sheets 2022-2026 (synthetic round figures growing 0.75% a quarter, not any filer's): each
     10-Q prints its quarter end and, beside it, the prior year end; each 10-K its year end and the one before. The
     statement of the ``slipped`` newest 10-Qs is keyed ``factor`` off at its own quarter end (its comparative and the
-    footnotes genuine). Returns the records and the (concept, period end, accession) of every seeded fact."""
-    base = _balance_sheet()
+    footnotes genuine, or with ``whole_column`` slipped too). Returns the records and the (concept, period end,
+    accession) of every seeded fact."""
+    base = dict(statement) if statement is not None else _balance_sheet()
     lines = {c: v[0] for c, v in base.items()}
     lines |= {f"Note{k:02d}": (1 + 0.1 * k) * 1e9 for k in range(12)}
     ends = [date(y, m, d) for y in range(2022, 2027) for m, d in ((3, 31), (6, 30), (9, 30), (12, 31))]
@@ -4540,7 +4543,7 @@ def _quarterly_balance_sheets(factor: float, slipped: int) -> tuple[list[Fundame
                 if when is None:
                     continue
                 value = level(concept, when)
-                if accession in hit and when == closing and concept in base:
+                if accession in hit and when == closing and (whole_column or concept in base):
                     value *= factor
                     seeded.add((concept, closing, accession))
                 fact = FundamentalFact(
@@ -4686,3 +4689,21 @@ async def test_a_curve_split_into_two_disagreeing_blocks_is_held_whole(first: st
 
     with pytest.raises(DataQualityError, match="every record was quarantined"):
         await _replay(TreasuryAdapter, request, {0: _csv_edit(edit)})
+
+
+@pytest.mark.parametrize("factor", [0.1, 10.0])
+def test_a_whole_balance_column_slipped_in_consecutive_quarters_is_held_where_faces_are_too_small(
+    factor: float,
+) -> None:
+    """A filer that tags only liabilities, equity and their total in its balance-sheet identities (too few facts to
+    judge a face, as HAS) has every currency balance of its three newest 10-Qs keyed at a tenth or 10x: each filing's
+    balance column, taken in filing order against its earlier history, is held, the newest too."""
+    full = _balance_sheet()
+    small = {c: full[c] for c in ("Liabilities", "StockholdersEquity", "LiabilitiesAndStockholdersEquity")}
+    records, seeded = _quarterly_balance_sheets(factor, 3, statement=small, whole_column=True)
+    held, _ = sec_scale.scale_errors(records)
+    got = {(records[i].concept, records[i].period_end, records[i].accession) for i in held}
+    assert seeded <= got
+    assert all(end in {date(2025, 12, 31), *(e for _, e, _ in seeded)} for _, end, _ in got)
+    clean, _ = sec_scale.scale_errors(_quarterly_balance_sheets(1.0, 0, statement=small)[0])
+    assert not clean

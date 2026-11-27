@@ -925,9 +925,10 @@ def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours, h
     A slip repeated over consecutive filings (each quarter's statement keyed the same wrong way) puts the later slipped
     periods into each one's history on both sides, so the faces are also taken in filing order against their earlier
     history alone, leaving out the facts already held and the faces this pass holds: the first slipped statement
-    stands against genuine history, and each later one against the genuine periods before the run. A decimal step
-    counts only facts that keep their comparative's sign: a genuine collapse into a loss also sits a power of 10 below
-    a profitable history (see _face_shift)."""
+    stands against genuine history, and each later one against the genuine periods before the run. This pass also
+    takes each filing's whole balance-sheet column for a period end, for filers whose faces are too small. A decimal
+    step counts only facts that keep their comparative's sign: a genuine collapse into a loss also sits a power of 10
+    below a profitable history (see _face_shift)."""
     faces = _statement_faces(records)
     if not faces:
         return set()
@@ -949,8 +950,15 @@ def _statement_shifts(records: list[FundamentalFact], neighbours: _Neighbours, h
     def earlier(k: int) -> float | None:
         return _earlier_step(neighbours, k, removed)
 
-    for key in sorted(faces, key=lambda k: (filed_on[k[0]], k[0], k[2])):
-        face = faces[key]
+    # a filer that tags few identity facts (HAS: liabilities, equity and their total) has faces too small to judge;
+    # its balance-sheet column for each period end (every currency balance of the filing there) is judged the same way
+    columns: dict[tuple[str, date | None, date, str], set[int]] = {}
+    for i, f in enumerate(records):
+        if f.period_start is None and _CURRENCY.match(f.unit) and f.taxonomy != "dei":
+            columns.setdefault((f.accession, None, f.period_end, "balance column"), set()).add(i)
+    later = {**faces, **columns}
+    for key in sorted(later, key=lambda k: (filed_on[k[0]], k[0], k[2], k[3])):
+        face = later[key]
         if face <= out:
             continue
         moved = _face_shift(records, face, earlier, lines, None)

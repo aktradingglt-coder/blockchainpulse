@@ -609,7 +609,9 @@ response, and holds them (quarantine) or flags them (kept, with a warning). The 
     also taken in filing order against their earlier history alone, leaving out the facts already held and each face
     this pass holds: the first slipped statement stands against genuine history and each later one against the
     genuine periods before the run (round 29: three consecutive 10-Q balance sheets ÷10 served the newest at 13 of 14
-    calibration filers, BA and F among the out-of-sample ones). In both passes a fact counts toward a decimal step
+    calibration filers, BA and F among the out-of-sample ones). That pass also takes each filing's whole balance-sheet
+    column for a period end (every currency balance there), as some filers tag too few identity facts for a face to
+    be judged (HAS: liabilities, equity and their total). In both passes a fact counts toward a decimal step
     only if it keeps the sign of its own comparative: a decimal slip never changes a sign, while a genuine collapse
     into a loss sits 10^1 below a profitable history and its comparative with the opposite sign (round 29: MRK's
     nine months to September 2026, a −$510M loss, had 16 genuine facts of its newest 10-Q held; the one-sided pass
