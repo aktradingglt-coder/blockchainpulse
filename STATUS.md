@@ -4,10 +4,10 @@ _Last updated: 2026-11-27_
 
 ## Current phase
 
-**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–29 returned ONE MORE PASS; major
-findings worked through in ledger rows 5–33 (row 33 lists what round 29's seeds still serve: NVDA's newest balance
-sheet ÷10 over three filings, whole-file Treasury unit slips, PG single lines and some 2019 sign-reversed flow
-columns outside the calibration set); awaiting review round 30.** P2 does not start until the P1 reviewer returns PASS.
+**P0 Foundations — PASSED (review round 4).** **P1 Data layer — review rounds 1–30 returned ONE MORE PASS; major
+findings worked through in ledger rows 5–34 (row 34 lists what round 30's seeds still serve: single revenue lines ×10
+at PG, SBUX and DIS, an SEC filing date moved earlier but after its period end, frozen FRED daily values, a COT
+week scaled with its shares unchanged, Treasury header swaps); awaiting review round 31.** P2 does not start until the P1 reviewer returns PASS.
 
 ## Done (P0), with evidence
 
@@ -40,7 +40,7 @@ columns outside the calibration set); awaiting review round 30.** P2 does not st
 | Adapter pipeline: flag → validate → cache → fetch → parse → QA → freshness → licence | `rd_data/adapters/base.py`, `test_adapters_unit.py` |
 | HTTP: host allow-list (SSRF guard), retries with full jitter + Retry-After, typed errors, redacted URLs | `test_http.py` |
 | Shared rate limits (atomic Lua token buckets), circuit breaker, response cache — on real Valkey | `test_resilience.py`, `tests/integration/test_data_redis.py` |
-| Freshness per §5.4 with exchange calendars; COT measured from release (D-027) | `test_freshness.py` |
+| Freshness per §5.4 with exchange calendars; COT measured from release (D-027); Treasury weekend rows refused and exchange-holiday rows held (D-033); other sources' rows are not checked against a calendar | `test_freshness.py` |
 | QA checks for seeded bad data (gaps, spikes, duplicates, non-monotonic, OHLC violations, rejected rows; SEC company facts by the relations of D-036). Not yet met as an exit criterion: the stated limits of D-031, D-033 and D-036 list what seeds still pass (whole-window unit slips with no anchor, single SEC lines outside any relation, filers outside the calibration set) | `test_quality.py`, `test_hardening.py` |
 | Seeded bad data end to end through the adapters, mostly by corrupting real cassettes (bad prints, impossible values, NaN, wrong subject/series/year, renamed columns, malformed payloads, stale symbols) | `test_hardening.py` |
 | Provider circuit state on the status page | `/v1/status` → `providers`, `tests/integration/test_services.py` |
