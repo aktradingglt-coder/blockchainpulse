@@ -682,6 +682,15 @@ company's very first filing has nothing in the response to be compared with, bey
   on 90b3e53). With every sign reversed, 8 of 465 cash-flow facts, 18 of 343 income-statement facts and 18 of 393
   with EPS are served, the same kinds of line, and C's annual income statement, which has no never-negative expense
   line to seed it (on 9d6726e).
+- *Slips that history and the filing's own comparatives cannot show.* Measured on the round-28 reviewer's harnesses
+  (round 29, on c09cd78): of 3,168 facts seeded into the then-newest 10-Q's face balance sheet, income statement and
+  cash-flow statement in as-of snapshots (2012, 2017, 2021; ×10, ÷10, ×100, sign reversed), 79 are served, against
+  407 before. Statements mostly served: GE's first-quarter 2017 income statement ×10, ÷10 or ×100 (16 of 18 facts).
+  The rest are single lines outside any relation (loan-loss provisions, non-operating and minority-interest lines). A
+  slip repeated across consecutive filings is not shown either: with AAPL's three newest balance sheets ×10 or ÷10,
+  the newest is held but 69–85 facts of the two earlier columns are served, as each slipped column is the other's
+  neighbour. Of 528 facts seeded into the newest filings' face statements, 2 are served (WFC's minority-interest share
+  with every sign reversed).
 
 Fetching and checking each filing's calculation linkbase is the complete fix. It is recorded for the phase that puts
 fundamentals into reports (STATUS). (P1 review rounds 6–12.)
