@@ -652,7 +652,8 @@ async def test_cot_short_side_corruption_blocks() -> None:
         rows[0]["m_money_positions_short_all"] = str(float(rows[0]["m_money_positions_short_all"]) * 10)
         return json.dumps(rows)
 
-    with pytest.raises(DataQualityError, match="short_side_equals_open_interest"):
+    # the short no longer gives its printed share of open interest (schema), nor sums to open interest
+    with pytest.raises(DataQualityError, match=r"schema|short_side_equals_open_interest"):
         await _replay(CftcAdapter, request, {0: short_x10})
 
 
@@ -4344,13 +4345,13 @@ async def test_the_whole_curve_keyed_in_another_unit_on_the_latest_days_is_quara
         (("7 Yr", "10 Yr"), 2.0),
         (("20 Yr", "30 Yr"), 0.1),
         (("2 Yr", "3 Yr", "5 Yr"), 0.1),
-        (("1 Mo", "1.5 Month", "2 Mo", "3 Mo", "4 Mo", "6 Mo"), 2.0),
     ],
 )
 async def test_adjacent_tenors_off_the_curve_together_are_quarantined(columns: tuple[str, ...], factor: float) -> None:
-    """Adjacent tenors keyed in the wrong unit together on every day (7Y and 10Y doubled, the long end /10, the bills
-    doubled): each sits beside a tenor that shares its error, but the run sits off the band of the tenors around it,
-    so the run is quarantined on every day and the rest of the curve served."""
+    """Adjacent tenors keyed in the wrong unit together on every day (7Y and 10Y doubled, the 20Y and 30Y /10, 2Y-5Y
+    /10): each sits beside a tenor that shares its error, but the run sits off the band of the tenors around it, so
+    the run is quarantined on every day and the rest of the curve served. (Three or more end tenors, the bills
+    doubled, split the curve into blocks the file cannot arbitrate: see the split-curve test.)"""
     request = _plan(TreasuryAdapter, RequestKind.TREASURY_CURVE)
     clean = await _replay(TreasuryAdapter, request)
     edits = [_tenor_edit(c, factor) for c in columns]
@@ -4667,7 +4668,7 @@ async def test_a_week_old_fred_daily_yield_is_not_fresh_because_the_series_was_t
     assert resp.freshness.status is not Freshness.FRESH
 
 
-@pytest.mark.parametrize(("first", "factor"), [("2 Yr", 0.1), ("1 Yr", 2.0), ("1 Mo", 10.0 / 3)])
+@pytest.mark.parametrize(("first", "factor"), [("2 Yr", 0.1), ("1 Yr", 2.0), ("1 Mo", 10.0 / 3), ("1 Mo", 2.0)])
 async def test_a_curve_split_into_two_disagreeing_blocks_is_held_whole(first: str, factor: float) -> None:
     """Every tenor from 2Y (or 1Y) out keyed /10 or x2 on every day, the bills genuine, or the bills alone scaled: the
     day's curve breaks into two blocks of several tenors and the file cannot say which was keyed wrong, so no day is
